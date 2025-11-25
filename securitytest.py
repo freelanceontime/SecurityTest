@@ -5616,22 +5616,30 @@ def check_signature_schemes(apk_path):
     all_schemes = ["v1", "v2", "v3"]
     missing = [v for v in all_schemes if v not in present]
 
-    # Build base report
+    # Build base report with clear structure
     if not present:
         return False, "No signature schemes found"
 
-    parts = [f"Present: {', '.join(present)}"]
+    report_lines = []
+    has_failures = False
+
+    # INFO: Signature scheme versions
+    info_parts = []
+    info_parts.append(f"<strong>Present:</strong> {', '.join(present)}")
     if missing:
-        parts.append(f"Missing: {', '.join(missing)}")
+        info_parts.append(f"<strong>Missing:</strong> {', '.join(missing)}")
+    report_lines.append("<div style='color:#0d6efd;'>ℹ️ " + " | ".join(info_parts) + "</div>")
 
     # Check certificate hash algorithm (SHA1 vs SHA256)
     sha1_detected = False
     if re.search(r'(SHA1withRSA|SHA-1)', clean, re.IGNORECASE):
         sha1_detected = True
-        parts.append(
-            "WARNING - Weak signature algorithm: Certificate uses SHA1withRSA. "
-            "SHA-1 is cryptographically broken and vulnerable to collision attacks. "
-            "Re-sign with SHA256withRSA or stronger."
+        has_failures = True
+        report_lines.append(
+            "<div style='margin-top:10px;'><strong style='color:#dc3545;'>❌ FAIL: Weak Signature Algorithm</strong></div>"
+            "<div style='margin-left:20px;'>Certificate uses <code>SHA1withRSA</code>. "
+            "SHA-1 is cryptographically broken and vulnerable to collision attacks.</div>"
+            "<div style='margin-left:20px;'><strong>Recommendation:</strong> Re-sign with <code>SHA256withRSA</code> or stronger.</div>"
         )
 
     # Janus vulnerability logic (CVE-2017-13156)
@@ -5639,40 +5647,39 @@ def check_signature_schemes(apk_path):
     # - v1 ONLY: Vulnerable on ALL Android versions (5.0-8.0)
     # - v1 + v2/v3: STILL vulnerable on Android 5.0-7.x (OS doesn't enforce v2/v3 properly)
     # - v2/v3 without v1: Secure (but breaks compatibility with Android < 7.0)
-    janus_warn = None
 
     if "v1" in present:
+        has_failures = True
         if present == ["v1"]:
             # v1 only → CRITICAL: vulnerable on ALL Android versions
-            janus_warn = (
-                "CRITICAL - Vulnerable to Janus (CVE-2017-13156): "
-                "APK signed only with v1 (JAR signature), vulnerable on Android 5.0-8.0. "
-                "v1 does not validate the entire APK, allowing malicious DEX prepending. "
-                "Add v2 or v3 signing to mitigate."
+            report_lines.append(
+                "<div style='margin-top:10px;'><strong style='color:#dc3545;'>❌ FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
+                "<div style='margin-left:20px;'><strong>Severity:</strong> CRITICAL</div>"
+                "<div style='margin-left:20px;'>APK signed only with v1 (JAR signature), vulnerable on Android 5.0-8.0.</div>"
+                "<div style='margin-left:20px;'>v1 does not validate the entire APK, allowing malicious DEX prepending.</div>"
+                "<div style='margin-left:20px;'><strong>Recommendation:</strong> Add v2 or v3 signing to mitigate.</div>"
             )
         else:
             # v1 + v2/v3 → WARNING: still vulnerable on Android 5.0-7.x
-            janus_warn = (
-                "WARNING - Partially vulnerable to Janus (CVE-2017-13156): "
-                "APK signed with v1 + v2/v3. While v2/v3 provide protection on Android 8.0+, "
-                "Android 5.0-7.x devices do NOT properly enforce v2/v3 validation and remain vulnerable. "
-                "Consider dropping support for Android < 7.0 and removing v1 signing entirely."
+            report_lines.append(
+                "<div style='margin-top:10px;'><strong style='color:#fd7e14;'>⚠️ FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
+                "<div style='margin-left:20px;'><strong>Severity:</strong> Partial (Android 5.0-7.x affected)</div>"
+                "<div style='margin-left:20px;'>APK signed with v1 + v2/v3. While v2/v3 provide protection on Android 8.0+, "
+                "Android 5.0-7.x devices do NOT properly enforce v2/v3 validation and remain vulnerable.</div>"
+                "<div style='margin-left:20px;'><strong>Recommendation:</strong> Consider dropping support for Android < 7.0 and removing v1 signing entirely.</div>"
             )
 
-    if janus_warn:
-        parts.append(janus_warn)
-        return False, "; ".join(parts)
+    # Final verdict
+    if has_failures:
+        return False, "<br>\n".join(report_lines)
 
-    # Fail if SHA1 detected (even without Janus)
-    if sha1_detected:
-        return False, "; ".join(parts)
-
-    # If we have v2/v3 WITHOUT v1, we're fully protected (but lose Android < 7.0 compat)
+    # If we have v2/v3 WITHOUT v1, we're fully protected
     if "v2" in present or "v3" in present:
-        return True, "; ".join(parts)
+        report_lines.append("<div style='margin-top:10px;color:#198754;'>✓ Secure signature configuration</div>")
+        return True, "<br>\n".join(report_lines)
 
-    # No signatures at all
-    return False, "; ".join(parts)
+    # No proper signatures
+    return False, "<br>\n".join(report_lines)
     
 def check_insecure_randomness(base):
     """
