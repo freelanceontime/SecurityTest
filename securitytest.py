@@ -13,11 +13,99 @@ import ast
 import select
 from collections import defaultdict
 import math
+import hashlib
+import urllib.request
+import urllib.error
+
+# Version tracking for auto-update
+__version__ = "1.0.0"
+__script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 
 ## Add new test as def
 ## Add to Tests
 ## Add to HTML Special
 ## Add to Group MASVS
+
+def check_for_updates():
+    """
+    Check if a newer version exists on GitHub and offer to update.
+    Compares local file hash with remote file hash.
+    """
+    try:
+        print(f"[*] Current version: {__version__}")
+        print(f"[*] Checking for updates from GitHub...")
+
+        # Get local file hash
+        script_path = os.path.abspath(__file__)
+        with open(script_path, 'rb') as f:
+            local_hash = hashlib.sha256(f.read()).hexdigest()
+
+        # Fetch remote file
+        try:
+            with urllib.request.urlopen(__script_url__, timeout=5) as response:
+                remote_content = response.read()
+                remote_hash = hashlib.sha256(remote_content).hexdigest()
+        except urllib.error.URLError as e:
+            print(f"[!] Could not check for updates: {e}")
+            print("[*] Continuing with current version...")
+            return
+        except Exception as e:
+            print(f"[!] Update check failed: {e}")
+            print("[*] Continuing with current version...")
+            return
+
+        # Compare hashes
+        if local_hash == remote_hash:
+            print("[+] You have the latest version!")
+            return
+
+        # Newer version available
+        print("\n" + "="*70)
+        print("[!] A newer version is available on GitHub!")
+        print("="*70)
+        print(f"Local hash:  {local_hash[:16]}...")
+        print(f"Remote hash: {remote_hash[:16]}...")
+        print(f"Source: {__script_url__}")
+
+        # Ask user if they want to update
+        try:
+            response = input("\n[?] Do you want to update now? [y/N]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n[*] Update cancelled. Continuing with current version...")
+            return
+
+        if response not in ['y', 'yes']:
+            print("[*] Update declined. Continuing with current version...")
+            return
+
+        # Perform update
+        print("\n[*] Downloading update...")
+
+        # Create backup
+        backup_path = script_path + ".backup"
+        shutil.copy2(script_path, backup_path)
+        print(f"[+] Backup created: {backup_path}")
+
+        # Write new version
+        try:
+            with open(script_path, 'wb') as f:
+                f.write(remote_content)
+            print("[+] Update installed successfully!")
+            print("\n[*] Please restart the script to use the new version.")
+            print("="*70)
+            sys.exit(0)
+        except Exception as e:
+            # Restore backup on failure
+            print(f"[!] Update failed: {e}")
+            print("[*] Restoring backup...")
+            shutil.copy2(backup_path, script_path)
+            print("[+] Backup restored. Continuing with current version...")
+
+    except Exception as e:
+        print(f"[!] Update check error: {e}")
+        print("[*] Continuing with current version...")
+
+    print()  # Empty line for spacing
 
 # HTML template with professional, client-ready styling
 HTML_TEMPLATE = '''
@@ -7340,6 +7428,9 @@ def print_banner():
 # Main logic
 
 def main():
+    # Check for updates before running
+    check_for_updates()
+
     print_banner()
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
