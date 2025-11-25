@@ -18,7 +18,7 @@ import urllib.request
 import urllib.error
 
 # Version tracking for auto-update
-__version__ = "1.0.0"
+__version__ = "3.1.0"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 
 ## Add new test as def
@@ -81,16 +81,22 @@ def check_for_updates():
         # Perform update
         print("\n[*] Downloading update...")
 
-        # Create backup
+        # Create temporary backup (for safety during update)
         backup_path = script_path + ".backup"
         shutil.copy2(script_path, backup_path)
-        print(f"[+] Backup created: {backup_path}")
 
         # Write new version
         try:
             with open(script_path, 'wb') as f:
                 f.write(remote_content)
             print("[+] Update installed successfully!")
+
+            # Clean up backup after successful update
+            try:
+                os.remove(backup_path)
+            except:
+                pass  # Ignore if cleanup fails
+
             print("\n[*] Please restart the script to use the new version.")
             print("="*70)
             sys.exit(0)
@@ -100,6 +106,12 @@ def check_for_updates():
             print("[*] Restoring backup...")
             shutil.copy2(backup_path, script_path)
             print("[+] Backup restored. Continuing with current version...")
+
+            # Clean up backup after restore
+            try:
+                os.remove(backup_path)
+            except:
+                pass
 
     except Exception as e:
         print(f"[!] Update check error: {e}")
