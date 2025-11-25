@@ -3345,79 +3345,219 @@ def analyze_sql_context(api_name, context, api_line_index):
 
 def check_insecure_webview(base):
     """
-    FAIL if any:
-      1) addJavascriptInterface(...)
-      2) setAllowUniversalAccessFromFileURLs(true)
-      3) setAllowFileAccessFromFileURLs(true)
-      4) setAllowFileAccessFromContentURLs(true)
-      5) setAllowFileAccess(true) [deprecated but still risky]
-      6) WebViewClient.onReceivedSslError(...) calls proceed()
-      7) WebView.setWebContentsDebuggingEnabled(true)
-      8) loadUrl() with user input concatenation (XSS risk)
-      9) evaluateJavascript() with user input (XSS risk)
+    Comprehensive WebView security check based on OWASP MASTG-KNOW-0018.
+
+    Tests for all major WebView misconfigurations:
+    1. JavaScript execution (setJavaScriptEnabled)
+    2. File access (setAllowFileAccess, setAllowUniversalAccessFromFileURLs, etc.)
+    3. Content provider access (setAllowContentAccess)
+    4. JavaScript interfaces (addJavascriptInterface) - NOTE: Also tested separately
+    5. SSL/TLS error bypassing (onReceivedSslError with proceed())
+    6. WebView debugging (setWebContentsDebuggingEnabled)
+    7. URL loading from user input (XSS risks)
+    8. Mixed content mode (setMixedContentMode ALWAYS_ALLOW)
+    9. Geolocation permissions without validation
+    10. DOM storage and database enabled
+    11. Deprecated/risky features (setSavePassword, etc.)
+    12. Missing WebView cleanup (clearCache, clearHistory)
+
+    MASVS: MASVS-PLATFORM-2
+    MASTG: MASTG-KNOW-0018, MASTG-TEST-0027, MASTG-TEST-0031, MASTG-TEST-0032,
+           MASTG-TEST-0033, MASTG-TEST-0037, MASTG-TEST-0250-253, MASTG-TEST-0284
     """
 
     hits = []
+    critical_hits = []  # High severity issues
+    medium_hits = []    # Medium severity issues
+    info_hits = []      # Informational findings
 
-    # (a) WebView API misuses (use correct smali patterns)
-    patterns = {
-      "addJavascriptInterface":      r'Landroid/webkit/WebView;->addJavascriptInterface\(',
-      "setJavaScriptEnabled(true)":  r'Landroid/webkit/WebSettings;->setJavaScriptEnabled\(Z\)V',  # Major XSS risk
-      "setAllowUniversalAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowUniversalAccessFromFileURLs\(Z\)V',
-      "setAllowFileAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccessFromFileURLs\(Z\)V',
-      "setAllowFileAccessFromContentURLs(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccessFromContentURLs\(Z\)V',
-      "setAllowFileAccess(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccess\(Z\)V',  # File access
-      "setWebContentsDebuggingEnabled(true)": r'Landroid/webkit/WebView;->setWebContentsDebuggingEnabled\(Z\)V',
+    # === CRITICAL: Core WebView security misconfigurations ===
+    critical_patterns = {
+        "setJavaScriptEnabled(true)": r'Landroid/webkit/WebSettings;->setJavaScriptEnabled\(Z\)V',
+        "setAllowUniversalAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowUniversalAccessFromFileURLs\(Z\)V',
+        "setAllowFileAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccessFromFileURLs\(Z\)V',
+        "addJavascriptInterface": r'Landroid/webkit/WebView;->addJavascriptInterface\(',
     }
-    for desc, pat in patterns.items():
-        for rel in grep_code(base, pat):
-            full = os.path.join(base, rel)
-            hits.append(f"<code>{rel}</code> {desc}")
 
-    # (b) XSS risks - loadUrl/loadData/evaluateJavascript with user input (getText, getStringExtra, etc.)
-    # Pattern: Check for loadUrl calls near user input sources
+    for desc, pat in critical_patterns.items():
+        for rel in grep_code(base, pat):
+            critical_hits.append(f"<code>{rel}</code> {desc}")
+
+    # === MEDIUM: File and content access ===
+    medium_patterns = {
+        "setAllowFileAccess(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccess\(Z\)V',
+        "setAllowContentAccess(true)": r'Landroid/webkit/WebSettings;->setAllowContentAccess\(Z\)V',
+        "setWebContentsDebuggingEnabled(true)": r'Landroid/webkit/WebView;->setWebContentsDebuggingEnabled\(Z\)V',
+        "setMixedContentMode(ALWAYS_ALLOW)": r'Landroid/webkit/WebSettings;->setMixedContentMode\(I\)V',
+        "setGeolocationEnabled(true)": r'Landroid/webkit/WebSettings;->setGeolocationEnabled\(Z\)V',
+        "setDomStorageEnabled(true)": r'Landroid/webkit/WebSettings;->setDomStorageEnabled\(Z\)V',
+        "setDatabaseEnabled(true)": r'Landroid/webkit/WebSettings;->setDatabaseEnabled\(Z\)V',
+        "setSavePassword(true)": r'Landroid/webkit/WebSettings;->setSavePassword\(Z\)V',  # Deprecated but still found
+        "setSaveFormData(true)": r'Landroid/webkit/WebSettings;->setSaveFormData\(Z\)V',
+    }
+
+    for desc, pat in medium_patterns.items():
+        for rel in grep_code(base, pat):
+            medium_hits.append(f"<code>{rel}</code> {desc}")
+
+    # === XSS Risks: loadUrl/loadData/evaluateJavascript with user input ===
+    xss_files = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith('.smali'): continue
+            if not fn.endswith('.smali'):
+                continue
             path = os.path.join(root, fn)
             try:
-                lines = open(path, errors='ignore').read()
-                # Check for loadUrl/loadData with user input in same method
-                if 'WebView;->loadUrl' in lines or 'WebView;->loadData' in lines or 'WebView;->evaluateJavascript' in lines:
+                content = open(path, errors='ignore').read()
+                # Check for WebView loading methods
+                has_load_method = any(method in content for method in [
+                    'WebView;->loadUrl',
+                    'WebView;->loadData',
+                    'WebView;->loadDataWithBaseURL',
+                    'WebView;->evaluateJavascript'
+                ])
+
+                if has_load_method:
                     # Check for user input sources in same file
-                    has_user_input = any(pattern in lines for pattern in [
-                        'getText()',  # EditText/TextView user input
-                        'getStringExtra',  # Intent extras
-                        'getQueryParameter',  # URI parameters
-                        'getExtras',  # Bundle data
-                    ])
+                    user_input_patterns = [
+                        'getText()',           # EditText user input
+                        'getStringExtra',      # Intent extras
+                        'getQueryParameter',   # URI parameters
+                        'getExtras',           # Bundle data
+                        'getDataString',       # Intent data
+                        'getAction',           # Intent action
+                        'readLine',            # File/stream input
+                        'receive',             # Broadcast/network input
+                    ]
+                    has_user_input = any(pattern in content for pattern in user_input_patterns)
+
                     if has_user_input:
                         rel = os.path.relpath(path, base)
-                        hits.append(f"<code>{rel}</code> WebView loadUrl/loadData with potential user input (XSS risk)")
+                        xss_files.append(rel)
             except:
                 continue
 
-    # (c) onReceivedSslError→proceed()
+    if xss_files:
+        critical_hits.append(f"<strong>⚠️ {len(xss_files)} file(s) load WebView content from user input (XSS risk):</strong>")
+        for rel in xss_files[:10]:
+            critical_hits.append(f"<code style='margin-left:20px;'>{rel}</code>")
+        if len(xss_files) > 10:
+            critical_hits.append(f"<span style='margin-left:20px;'>...and {len(xss_files) - 10} more</span>")
+
+    # === SSL/TLS Error Bypassing (onReceivedSslError with proceed()) ===
+    ssl_bypass_files = []
     override_re = re.compile(r'\.method.*onReceivedSslError')
-    proceed_re  = re.compile(r'\bproceed\(')
+    proceed_re = re.compile(r'\bproceed\(')
+
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith('.smali'): continue
+            if not fn.endswith('.smali'):
+                continue
             path = os.path.join(root, fn)
-            lines = open(path, errors='ignore').read().splitlines()
-            for i, line in enumerate(lines,1):
-                if override_re.search(line):
-                    for j in range(i, min(i+20,len(lines))):
-                        if proceed_re.search(lines[j]):
-                            snippet = html.escape(lines[j].strip())
-                            hits.append(
-                                f"<code>{fn}:{j}</code> onReceivedSslError calls proceed()<br><code>{snippet}</code>"
-                            )
-                            break
+            try:
+                lines = open(path, errors='ignore').read().splitlines()
+                for i, line in enumerate(lines):
+                    if override_re.search(line):
+                        # Check next 30 lines for proceed() call
+                        for j in range(i, min(i + 30, len(lines))):
+                            if proceed_re.search(lines[j]):
+                                rel = os.path.relpath(path, base)
+                                ssl_bypass_files.append(f"<code>{rel}:{j+1}</code> onReceivedSslError calls proceed()")
+                                break
+            except:
+                pass
 
-    if not hits:
-        return True, "None"
-    return False, "<br>\n".join(hits)
+    if ssl_bypass_files:
+        critical_hits.extend(ssl_bypass_files[:10])
+        if len(ssl_bypass_files) > 10:
+            critical_hits.append(f"<span>...and {len(ssl_bypass_files) - 10} more SSL bypass instances</span>")
+
+    # === Protocol Handler Issues (shouldOverrideUrlLoading) ===
+    protocol_handlers = []
+    protocol_re = re.compile(r'\.method.*(shouldOverrideUrlLoading|shouldInterceptRequest)')
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                content = open(path, errors='ignore').read()
+                if protocol_re.search(content):
+                    # Check for unsafe URL handling (intent://, file://, javascript:, etc.)
+                    unsafe_schemes = ['intent://', 'file://', 'javascript:', 'data:', 'content://']
+                    has_unsafe_scheme = any(scheme in content.lower() for scheme in unsafe_schemes)
+
+                    # Check for URL validation
+                    has_validation = bool(re.search(r'(startsWith|contains|matches|whitelist|allow)', content, re.IGNORECASE))
+
+                    if has_unsafe_scheme and not has_validation:
+                        rel = os.path.relpath(path, base)
+                        protocol_handlers.append(f"<code>{rel}</code> Custom protocol handler without URL validation")
+            except:
+                pass
+
+    if protocol_handlers:
+        medium_hits.append(f"<strong>⚠️ {len(protocol_handlers)} custom protocol handler(s) detected:</strong>")
+        medium_hits.extend(protocol_handlers[:10])
+
+    # === WebView Cleanup Check ===
+    cleanup_missing = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                content = open(path, errors='ignore').read()
+                has_webview = 'Landroid/webkit/WebView;' in content
+                has_ondestroy = '.method' in content and ('onDestroy' in content or 'onPause' in content)
+
+                if has_webview and has_ondestroy:
+                    # Check for cleanup methods
+                    has_cleanup = any(method in content for method in [
+                        'clearCache',
+                        'clearHistory',
+                        'clearFormData',
+                        'removeJavascriptInterface',
+                        'destroy',
+                    ])
+
+                    if not has_cleanup:
+                        rel = os.path.relpath(path, base)
+                        cleanup_missing.append(rel)
+            except:
+                pass
+
+    if cleanup_missing:
+        info_hits.append(f"<strong>ℹ️ {len(cleanup_missing)} file(s) may lack proper WebView cleanup:</strong>")
+        for rel in cleanup_missing[:5]:
+            info_hits.append(f"<code style='margin-left:20px;'>{rel}</code>")
+
+    # === Build final report ===
+    all_hits = []
+
+    if critical_hits:
+        all_hits.append("<div><strong style='color:#dc3545;'>🔴 CRITICAL Issues:</strong></div>")
+        all_hits.extend(critical_hits)
+
+    if medium_hits:
+        all_hits.append("<div><br><strong style='color:#fd7e14;'>🟠 MEDIUM Issues:</strong></div>")
+        all_hits.extend(medium_hits)
+
+    if info_hits:
+        all_hits.append("<div><br><strong style='color:#0d6efd;'>🔵 INFO:</strong></div>")
+        all_hits.extend(info_hits)
+
+    if not all_hits:
+        return True, "No insecure WebView configurations detected"
+
+    # Add OWASP reference
+    all_hits.append("<div style='margin-top:15px;'><em>📚 Reference: OWASP MASTG-KNOW-0018 (WebView Security)</em></div>")
+
+    # FAIL if any critical or medium severity issues found
+    is_secure = len(critical_hits) == 0 and len(medium_hits) == 0
+    return is_secure, "<br>\n".join(all_hits)
 
 
 def check_keyboard_cache(base, manifest):
@@ -4966,7 +5106,17 @@ def check_flag_secure(base, manifest):
 def check_webview_javascript_bridge(base):
     """
     Check for insecure WebView JavaScript interfaces.
-    Properly correlates addJavascriptInterface calls with @JavascriptInterface annotations.
+
+    CRITICAL VULNERABILITY: addJavascriptInterface() + remote content loading allows
+    any JavaScript from the internet to call exposed Android methods.
+
+    This checks:
+    1. Whether @JavascriptInterface annotations are present (API 17+ requirement)
+    2. Whether WebViews with JS interfaces load REMOTE content (http/https URLs)
+    3. Whether proper URL validation is implemented
+
+    FAIL if: addJavascriptInterface + loading remote/network URLs
+    PASS if: addJavascriptInterface + only local assets (file:// or loadData)
     """
     # JavaScript interface patterns
     js_interface_patterns = [
@@ -4984,12 +5134,35 @@ def check_webview_javascript_bridge(base):
     # Analyze each file that adds JavaScript interface
     interface_classes = set()
     vulnerable_interfaces = []
+    files_with_remote_loading = []
 
     for rel in hits:
         full_path = os.path.join(base, rel)
         try:
             with open(full_path, 'r', errors='ignore') as f:
                 content = f.read()
+
+            # Check if this file loads REMOTE content (critical vulnerability indicator)
+            remote_loading_patterns = [
+                r'loadUrl.*"https?://',           # loadUrl("http://...")
+                r'loadUrl.*Ljava/lang/String;',   # loadUrl(stringVar) - might be remote
+                r'loadDataWithBaseURL.*"https?://', # loadDataWithBaseURL with remote base
+            ]
+
+            loads_remote = False
+            for pattern in remote_loading_patterns:
+                if re.search(pattern, content):
+                    loads_remote = True
+                    break
+
+            # Check for URL validation (security control)
+            has_url_validation = bool(re.search(r'(startsWith|contains|matches|equals).*"(https?://|file://)', content))
+
+            if loads_remote:
+                files_with_remote_loading.append({
+                    'file': rel,
+                    'has_validation': has_url_validation
+                })
 
             # Find addJavascriptInterface calls and extract the object being passed
             # Pattern: invoke-virtual {vX, vY}, Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
@@ -5062,24 +5235,38 @@ def check_webview_javascript_bridge(base):
 
     if secure_count > 0:
         lines.append(f"<div>✓ @JavascriptInterface annotations properly implemented</div>")
-        lines.append(f"<div>Secure interface classes: {secure_count}</div>")
 
     if vulnerable_interfaces:
         lines.append(f"<div>⚠ WARNING: {len(vulnerable_interfaces)} interface(s) may lack @JavascriptInterface annotations:</div>")
         for vuln_class in vulnerable_interfaces[:10]:
             lines.append(f"<div style='margin-left:20px;'>• {vuln_class}</div>")
 
+    # CRITICAL: Check for remote content loading
+    if files_with_remote_loading:
+        lines.append(f"<div><br><strong style='color:#dc3545;'>❌ CRITICAL: {len(files_with_remote_loading)} file(s) expose JavaScript interfaces while loading REMOTE content:</strong></div>")
+        lines.append("<div style='margin-left:20px;color:#dc3545;'>This allows ANY JavaScript from the internet to call exposed Android methods!</div>")
+        for item in files_with_remote_loading[:10]:
+            full = os.path.abspath(os.path.join(base, item['file']))
+            validation_note = " (has some URL validation)" if item['has_validation'] else " (NO URL validation detected)"
+            lines.append(f"<div style='margin-left:20px;'>• <a href=\"file://{html.escape(full)}\">{html.escape(item['file'])}</a>{validation_note}</div>")
+
+        lines.append("<div style='margin-left:20px;margin-top:10px;'><strong>Attack scenario:</strong></div>")
+        lines.append("<div style='margin-left:20px;'>1. WebView loads remote content with JavaScript enabled</div>")
+        lines.append("<div style='margin-left:20px;'>2. Attacker injects JavaScript via MITM, XSS, or compromised page</div>")
+        lines.append("<div style='margin-left:20px;'>3. Injected JavaScript calls the exposed interface methods</div>")
+        lines.append("<div style='margin-left:20px;'>4. Sensitive data (credentials, tokens, etc.) can be exfiltrated</div>")
+
     # Show files that use addJavascriptInterface
-    lines.append("<div><br><strong>Files using addJavascriptInterface:</strong></div>")
+    lines.append("<div><br><strong>All files using addJavascriptInterface:</strong></div>")
     for rel in sorted(hits)[:20]:
         full = os.path.abspath(os.path.join(base, rel))
-        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(f'<div style="margin-left:20px;"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
 
     if len(hits) > 20:
-        lines.append(f"<div>...and {len(hits) - 20} more</div>")
+        lines.append(f"<div style='margin-left:20px;'>...and {len(hits) - 20} more</div>")
 
-    # PASS if no vulnerable interfaces found or if we found secure annotations
-    is_secure = (len(vulnerable_interfaces) == 0) or (secure_count > 0 and len(vulnerable_interfaces) == 0)
+    # FAIL if remote content loading detected, regardless of annotations
+    is_secure = len(files_with_remote_loading) == 0 and len(vulnerable_interfaces) == 0
 
     return is_secure, "<br>\n".join(lines)
 
