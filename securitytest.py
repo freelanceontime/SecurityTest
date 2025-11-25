@@ -7833,50 +7833,100 @@ def main():
     }
 
     # Interactive test selection
-    if not args.update and not args.all_tests:
+    if not args.all_tests:
         print("\n" + "="*70)
         print("TEST SELECTION")
         print("="*70)
-        print("\nAvailable tests:")
-        for idx, (name, _) in enumerate(checks, 1):
-            print(f"  [{idx:2d}] {name}")
-
-        print("\nOptions:")
-        print("  - Type 'a' or press Enter to run ALL tests")
-        print("  - Type 's' to SELECT specific tests (comma-separated, e.g., 1,3,5)")
-        print("  - Type 'q' to quit")
 
         try:
-            selection = input("\nYour choice: ").strip().lower()
+            print("\nRun all tests or select specific tests?")
+            print("  a - Run ALL tests")
+            print("  s - SELECT specific tests")
+            print("  q - Quit")
 
-            if selection == 'q':
+            choice = input("\nYour choice (a/s/q): ").strip().lower()
+
+            if choice == 'q':
                 print("[*] Exiting...")
                 sys.exit(0)
-            elif selection == "" or selection == 'a':
+            elif choice == 'a' or choice == '':
                 print("[*] Running all tests...")
-            elif selection == 's':
-                # User wants to select specific tests
-                print("\nEnter test numbers to ENABLE (comma-separated):")
-                test_selection = input("Tests to run: ").strip()
+            elif choice == 's':
+                # Interactive test selection
+                selected = set(range(len(checks)))  # Start with all selected
 
-                try:
-                    enabled_nums = [int(x.strip()) for x in test_selection.split(',') if x.strip()]
-                    enabled_nums = [x for x in enabled_nums if 1 <= x <= len(checks)]
+                while True:
+                    print("\n" + "="*70)
+                    print("SELECT TESTS (all enabled by default)")
+                    print("="*70)
 
-                    if enabled_nums:
-                        # Keep only selected tests
-                        selected_checks = [checks[num - 1] for num in sorted(enabled_nums)]
-                        print(f"\n[*] Enabled tests:")
-                        for name, _ in selected_checks:
-                            print(f"    - {name}")
-                        checks = selected_checks
-                        print(f"\n[*] Running {len(checks)} test(s)...")
+                    for idx, (name, _) in enumerate(checks):
+                        status = "[*]" if idx in selected else "[ ]"
+                        print(f"  {status} [{idx+1:2d}] {name}")
+
+                    print("\n" + "="*70)
+                    print(f"Selected: {len(selected)}/{len(checks)} tests")
+                    print("\nOptions:")
+                    print("  - Enter test numbers to TOGGLE (e.g., 1,3,5 or 1-10)")
+                    print("  - Type 'all' to select all")
+                    print("  - Type 'none' to deselect all")
+                    print("  - Press Enter to continue with selected tests")
+                    print("  - Type 'q' to quit")
+
+                    user_input = input("\nToggle tests: ").strip().lower()
+
+                    if user_input == '':
+                        # User pressed Enter - continue with selected tests
+                        break
+                    elif user_input == 'q':
+                        print("[*] Exiting...")
+                        sys.exit(0)
+                    elif user_input == 'all':
+                        selected = set(range(len(checks)))
+                        print("[*] All tests selected")
+                    elif user_input == 'none':
+                        selected = set()
+                        print("[*] All tests deselected")
                     else:
-                        print("[!] No valid test numbers provided. Running all tests...")
-                except ValueError:
-                    print("[!] Invalid input. Running all tests...")
+                        # Parse test numbers or ranges
+                        try:
+                            for part in user_input.split(','):
+                                part = part.strip()
+                                if '-' in part:
+                                    # Handle range (e.g., 1-10)
+                                    start, end = part.split('-')
+                                    start, end = int(start.strip()), int(end.strip())
+                                    for num in range(start, end + 1):
+                                        if 1 <= num <= len(checks):
+                                            idx = num - 1
+                                            if idx in selected:
+                                                selected.remove(idx)
+                                            else:
+                                                selected.add(idx)
+                                else:
+                                    # Handle single number
+                                    num = int(part)
+                                    if 1 <= num <= len(checks):
+                                        idx = num - 1
+                                        if idx in selected:
+                                            selected.remove(idx)
+                                            print(f"[*] Deselected: {checks[idx][0]}")
+                                        else:
+                                            selected.add(idx)
+                                            print(f"[*] Selected: {checks[idx][0]}")
+                        except ValueError:
+                            print("[!] Invalid input. Use numbers, ranges (1-10), or comma-separated values.")
+
+                # Apply selection
+                if selected:
+                    checks = [checks[i] for i in sorted(selected)]
+                    print(f"\n[*] Running {len(checks)} selected test(s)...")
+                else:
+                    print("\n[!] No tests selected. Exiting...")
+                    sys.exit(0)
             else:
-                print("[!] Invalid option. Running all tests...")
+                print("[!] Invalid choice. Running all tests...")
+
         except (KeyboardInterrupt, EOFError):
             print("\n[*] Exiting...")
             sys.exit(0)
@@ -8028,48 +8078,92 @@ def main():
             print("\n" + "="*70)
             print("DYNAMIC TEST SELECTION (Frida)")
             print("="*70)
-            print("\nAvailable dynamic tests:")
-            for idx, (name, _) in enumerate(frida_checks, 1):
-                print(f"  [{idx:2d}] {name}")
-
-            print("\nOptions:")
-            print("  - Type 'a' or press Enter to run ALL dynamic tests")
-            print("  - Type 's' to SELECT specific tests (comma-separated, e.g., 1,3,5)")
-            print("  - Type 'q' to skip all dynamic tests")
 
             try:
-                selection = input("\nYour choice: ").strip().lower()
+                print("\nRun all dynamic tests or select specific tests?")
+                print("  a - Run ALL dynamic tests")
+                print("  s - SELECT specific dynamic tests")
+                print("  n - Skip dynamic tests")
 
-                if selection == 'q':
+                choice = input("\nYour choice (a/s/n): ").strip().lower()
+
+                if choice == 'n':
                     print("[*] Skipping all dynamic tests...")
                     frida_checks = []
-                elif selection == "" or selection == 'a':
+                elif choice == 'a' or choice == '':
                     print("[*] Running all dynamic tests...")
-                elif selection == 's':
-                    # User wants to select specific tests
-                    print("\nEnter test numbers to ENABLE (comma-separated):")
-                    test_selection = input("Dynamic tests to run: ").strip()
+                elif choice == 's':
+                    # Interactive test selection
+                    selected = set(range(len(frida_checks)))  # Start with all selected
 
-                    try:
-                        enabled_nums = [int(x.strip()) for x in test_selection.split(',') if x.strip()]
-                        enabled_nums = [x for x in enabled_nums if 1 <= x <= len(frida_checks)]
+                    while True:
+                        print("\n" + "="*70)
+                        print("SELECT DYNAMIC TESTS (all enabled by default)")
+                        print("="*70)
 
-                        if enabled_nums:
-                            # Keep only selected tests
-                            selected_checks = [frida_checks[num - 1] for num in sorted(enabled_nums)]
-                            print(f"\n[*] Enabled dynamic tests:")
-                            for name, _ in selected_checks:
-                                print(f"    - {name}")
-                            frida_checks = selected_checks
-                            print(f"\n[*] Running {len(frida_checks)} dynamic test(s)...")
+                        for idx, (name, _) in enumerate(frida_checks):
+                            status = "[*]" if idx in selected else "[ ]"
+                            print(f"  {status} [{idx+1:2d}] {name}")
+
+                        print("\n" + "="*70)
+                        print(f"Selected: {len(selected)}/{len(frida_checks)} tests")
+                        print("\nOptions:")
+                        print("  - Enter test numbers to TOGGLE (e.g., 1,3,5 or 1-5)")
+                        print("  - Type 'all' to select all")
+                        print("  - Type 'none' to deselect all")
+                        print("  - Press Enter to continue with selected tests")
+
+                        user_input = input("\nToggle tests: ").strip().lower()
+
+                        if user_input == '':
+                            # User pressed Enter - continue with selected tests
+                            break
+                        elif user_input == 'all':
+                            selected = set(range(len(frida_checks)))
+                            print("[*] All dynamic tests selected")
+                        elif user_input == 'none':
+                            selected = set()
+                            print("[*] All dynamic tests deselected")
                         else:
-                            print("[!] No valid test numbers provided. Skipping all dynamic tests...")
-                            frida_checks = []
-                    except ValueError:
-                        print("[!] Invalid input. Skipping all dynamic tests...")
+                            # Parse test numbers or ranges
+                            try:
+                                for part in user_input.split(','):
+                                    part = part.strip()
+                                    if '-' in part:
+                                        # Handle range (e.g., 1-5)
+                                        start, end = part.split('-')
+                                        start, end = int(start.strip()), int(end.strip())
+                                        for num in range(start, end + 1):
+                                            if 1 <= num <= len(frida_checks):
+                                                idx = num - 1
+                                                if idx in selected:
+                                                    selected.remove(idx)
+                                                else:
+                                                    selected.add(idx)
+                                    else:
+                                        # Handle single number
+                                        num = int(part)
+                                        if 1 <= num <= len(frida_checks):
+                                            idx = num - 1
+                                            if idx in selected:
+                                                selected.remove(idx)
+                                                print(f"[*] Deselected: {frida_checks[idx][0]}")
+                                            else:
+                                                selected.add(idx)
+                                                print(f"[*] Selected: {frida_checks[idx][0]}")
+                            except ValueError:
+                                print("[!] Invalid input. Use numbers, ranges (1-5), or comma-separated values.")
+
+                    # Apply selection
+                    if selected:
+                        frida_checks = [frida_checks[i] for i in sorted(selected)]
+                        print(f"\n[*] Running {len(frida_checks)} selected dynamic test(s)...")
+                    else:
+                        print("\n[*] No dynamic tests selected. Skipping...")
                         frida_checks = []
                 else:
-                    print("[!] Invalid option. Running all dynamic tests...")
+                    print("[!] Invalid choice. Running all dynamic tests...")
+
             except (KeyboardInterrupt, EOFError):
                 print("\n[*] Skipping all dynamic tests...")
                 frida_checks = []
