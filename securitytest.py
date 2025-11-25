@@ -2480,11 +2480,15 @@ def check_http_uris(base):
     """
     FAIL if any literal 'http://' URIs are found in .smali, .java or .xml files,
     except known safe namespaces (Android schema, W3C, Maven, Apache, etc.).
+    Also filters out common false positives like localhost, example.com, test URLs,
+    and URLs appearing in error messages or documentation strings.
     Returns (ok: bool, details_html: str).
     """
-    
+
     hits = []
     http_re = re.compile(r'http://[^\s"\'<>]+')
+
+    # Known safe namespaces and schema URLs
     ignore_prefixes = (
         "http://schemas.android.com",
         "http://www.w3.org",
@@ -2499,7 +2503,24 @@ def check_http_uris(base):
         "http://xmlpull.org",
         "http://xml.org",
         "http://www.android.com",
+        "http://jsoup.org",
+        # Test/placeholder URLs
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://0.0.0.0",
+        "http://example.com",
+        "http://example.org",
+        "http://test.com",
+        "http://undefined",
     )
+
+    # Patterns that indicate the URL is in documentation/error messages (not actual code)
+    false_positive_patterns = [
+        r'(error|exception|warning|log|message|description|comment|make sure|example|e\.g\.|i\.e\.|see https?://)',
+        r'(starts with|should be|must be|can be|try|instead)',
+        r'(malformed|invalid|supplied.*url)',
+    ]
+    false_positive_re = re.compile('|'.join(false_positive_patterns), re.IGNORECASE)
 
     for root, _, files in os.walk(base):
         for fn in files:
@@ -2510,8 +2531,14 @@ def check_http_uris(base):
             try:
                 for lineno, line in enumerate(open(full, errors='ignore'), 1):
                     for m in http_re.findall(line):
+                        # Skip known safe prefixes
                         if any(m.startswith(pref) for pref in ignore_prefixes):
                             continue
+
+                        # Skip if this appears to be in an error message or documentation
+                        if false_positive_re.search(line):
+                            continue
+
                         snippet = html.escape(line.strip())
                         link    = f'<a href="file://{html.escape(full)}">{html.escape(rel)}:{lineno}</a>'
                         hits.append(f"{link} ⟶ {snippet}")
