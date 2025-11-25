@@ -1194,9 +1194,9 @@ def check_strict_mode(base):
 
     lines.append(f"<div><strong>StrictMode API calls found:</strong> {len(findings)} instance(s)</div>")
     if guarded:
-        lines.append(f"<div>✓ <strong>Guarded by DEBUG check:</strong> {len(guarded)} instance(s)</div>")
+        lines.append(f"<div> <strong>Guarded by DEBUG check:</strong> {len(guarded)} instance(s)</div>")
     if unguarded:
-        lines.append(f"<div>⚠ <strong>Not guarded (production risk):</strong> {len(unguarded)} instance(s)</div>")
+        lines.append(f"<div>WARNING: <strong>Not guarded (production risk):</strong> {len(unguarded)} instance(s)</div>")
     lines.append("<br>")
 
     # Group by file
@@ -1210,7 +1210,7 @@ def check_strict_mode(base):
     # Collapsible section
     lines.append('<details open>')
     lines.append('<summary class="warning">')
-    lines.append(f'⚠ StrictMode Usage ({len(files_with_strictmode)} files) - Click to expand/collapse')
+    lines.append(f'WARNING: StrictMode Usage ({len(files_with_strictmode)} files) - Click to expand/collapse')
     lines.append('</summary>')
     lines.append('<div>')
 
@@ -1225,7 +1225,7 @@ def check_strict_mode(base):
         )
 
         for finding in file_findings[:5]:  # Show first 5 per file
-            guarded_indicator = '✓ ' if finding.get('has_debug_guard') else '⚠ '
+            guarded_indicator = ' ' if finding.get('has_debug_guard') else 'WARNING: '
             guard_status = '<span class="text-success">(DEBUG-guarded)</span>' if finding.get('has_debug_guard') else '<span class="text-danger">(not guarded)</span>'
 
             lines.append(f'<div class="finding-detail">')
@@ -1241,7 +1241,7 @@ def check_strict_mode(base):
     lines.append('</div></details>')
 
     lines.append(
-        '<div class="info-box"><em>💡 Recommendation: StrictMode is a development tool for detecting performance issues. '
+        '<div class="info-box"><em> Recommendation: StrictMode is a development tool for detecting performance issues. '
         'It should be disabled in production builds as it can expose debug information and impact performance. '
         'Use BuildConfig.DEBUG checks to conditionally enable StrictMode only during development.</em></div>'
     )
@@ -1432,7 +1432,7 @@ def check_uri_scheme(manifest):
 
                 if is_likely_oauth:
                     issue += (
-                        f"<strong>⚠️ OAuth Indicator Detected:</strong> Activity/host name suggests OAuth usage (Account Takeover Risk)<br>"
+                        f"<strong>WARNING: OAuth Indicator Detected:</strong> Activity/host name suggests OAuth usage (Account Takeover Risk)<br>"
                     )
 
                 issue += (
@@ -1477,11 +1477,11 @@ def check_uri_scheme(manifest):
         return True, "No custom URI schemes detected", 0
 
     result = (
-        f"<div class='warning-box'><strong>⚠️ CUSTOM URI SCHEME VULNERABILITY</strong></div>"
+        f"<div class='warning-box'><strong>WARNING: CUSTOM URI SCHEME VULNERABILITY</strong></div>"
         f"<div><strong>Found {len(issues)} custom scheme(s)</strong></div>"
         f"<div>Custom schemes can be hijacked by malicious apps (OAuth token theft, task hijacking, data interception)</div><br>"
         + "".join(issues) +
-        "<div class='info-box'><em>💡 This check detects custom URI schemes with VIEW action (BROWSABLE or DEFAULT category). "
+        "<div class='info-box'><em> This check detects custom URI schemes with VIEW action (BROWSABLE or DEFAULT category). "
         "Custom schemes are vulnerable to hijacking attacks where malicious apps register the same scheme. "
         "Replace with HTTPS App Links with android:autoVerify for secure deep linking. "
         "http/https scheme issues are checked separately in 'Browsable DeepLinks' test.</em></div>"
@@ -1615,7 +1615,7 @@ def check_updates(base):
 
     if ok:
         # Success case - show what was found
-        details = "<div>✓ Update mechanism detected</div>"
+        details = "<div> Update mechanism detected</div>"
 
         if google_play_ok:
             details += "<div class='detail-section'><strong>Google Play In-App Updates API:</strong></div>"
@@ -1826,9 +1826,9 @@ def check_serialize(base):
 
                     # Add contextual information
                     if has_version_check:
-                        context = "⚠️ Has version check but missing type-safe API"
+                        context = "WARNING: Has version check but missing type-safe API"
                     else:
-                        context = "❌ No version check or type safety"
+                        context = "FAIL: No version check or type safety"
 
                     hits.append(
                         f"{link} – {context}<br>"
@@ -2006,7 +2006,7 @@ def check_browsable_deeplinks(manifest):
     result = (
         f"<div><strong>Found {total_issues} deep link security issue(s)</strong></div><br>"
         + "".join(issues) +
-        "<div class='info-box'><em>💡 These checks apply only to BROWSABLE intent-filters (externally accessible). "
+        "<div class='info-box'><em> These checks apply only to BROWSABLE intent-filters (externally accessible). "
         "Custom URI schemes (myapp://) without BROWSABLE category are not flagged. "
         "MainActivity is excluded from checks. "
         "<strong>Test commands use intent-filter resolution (no -n flag) to verify actual vulnerability.</strong></em></div>"
@@ -2108,7 +2108,7 @@ def check_deep_link_misconfiguration(manifest):
 
             issue_msg = (
                 f"<strong>{activity_name}</strong><br>"
-                f"<strong>⚠ Vulnerability:</strong> Intent filter with multiple &lt;data&gt; tags "
+                f"<strong>WARNING: Vulnerability:</strong> Intent filter with multiple &lt;data&gt; tags "
                 f"({len(data_tags)} found) but <strong>NO host restriction</strong>.<br>"
             )
 
@@ -2643,12 +2643,12 @@ def check_root_detection(manifest, base):
 
     # Report all detection methods found with line numbers and snippets
     lines = []
-    lines.append(f"<div>✓ Root detection mechanisms found: {len(findings)} method(s)</div>")
+    lines.append(f"<div> Root detection mechanisms found: {len(findings)} method(s)</div>")
 
     for desc, hits in findings.items():
         lines.append(f'<details open>')
         lines.append(f'<summary class="pass">')
-        lines.append(f'<span class="bullet">▸</span><span class="check-name">✓ {desc} ({len(hits)} file(s))</span>')
+        lines.append(f'<span class="bullet"></span><span class="check-name"> {desc} ({len(hits)} file(s))</span>')
         lines.append('</summary>')
 
         # Show first 5 files with line numbers and code snippets
@@ -3202,9 +3202,9 @@ def check_raw_sql_queries(base):
 
     # Show findings by severity with collapsible sections
     severity_config = {
-        'Critical': ('🔴', '#dc3545', True),
-        'High': ('🟠', '#fd7e14', True),
-        'Medium': ('🟡', '#ffc107', False),
+        'Critical': ('', '#dc3545', True),
+        'High': ('', '#fd7e14', True),
+        'Medium': ('', '#ffc107', False),
     }
 
     for severity, (emoji, color, is_open) in severity_config.items():
@@ -3215,7 +3215,7 @@ def check_raw_sql_queries(base):
         open_attr = 'open' if is_open else ''
         lines.append(f'<details {open_attr}>')
         lines.append(f'<summary>')
-        lines.append(f'<span class="bullet">▸</span><span class="check-name">{emoji} {severity} Risk ({len(items)})</span>')
+        lines.append(f'<span class="bullet"></span><span class="check-name">{emoji} {severity} Risk ({len(items)})</span>')
         lines.append('</summary>')
 
         for i, finding in enumerate(items, 1):
@@ -3231,7 +3231,7 @@ def check_raw_sql_queries(base):
             )
 
             if finding['indicators']:
-                lines.append('<br><span class="text-muted">⚠ ')
+                lines.append('<br><span class="text-muted">WARNING: ')
                 lines.append(', '.join(html.escape(ind) for ind in finding['indicators']))
                 lines.append('</span>')
 
@@ -3246,7 +3246,7 @@ def check_raw_sql_queries(base):
         lines.append('</details>')
 
     lines.append(
-        '<div class="info-box"><em>💡 Recommendation: Use parameterized queries with ? placeholders '
+        '<div class="info-box"><em> Recommendation: Use parameterized queries with ? placeholders '
         'and selectionArgs[] to prevent SQL injection. Avoid string concatenation for SQL.</em></div>'
     )
 
@@ -3347,19 +3347,18 @@ def check_insecure_webview(base):
     """
     Comprehensive WebView security check based on OWASP MASTG-KNOW-0018.
 
-    Tests for all major WebView misconfigurations:
-    1. JavaScript execution (setJavaScriptEnabled)
-    2. File access (setAllowFileAccess, setAllowUniversalAccessFromFileURLs, etc.)
-    3. Content provider access (setAllowContentAccess)
-    4. JavaScript interfaces (addJavascriptInterface) - NOTE: Also tested separately
-    5. SSL/TLS error bypassing (onReceivedSslError with proceed())
-    6. WebView debugging (setWebContentsDebuggingEnabled)
-    7. URL loading from user input (XSS risks)
-    8. Mixed content mode (setMixedContentMode ALWAYS_ALLOW)
-    9. Geolocation permissions without validation
-    10. DOM storage and database enabled
-    11. Deprecated/risky features (setSavePassword, etc.)
-    12. Missing WebView cleanup (clearCache, clearHistory)
+    Checks for:
+      • JavaScript enabled (setJavaScriptEnabled)
+      • JavaScript interfaces (addJavascriptInterface)
+      • File access configurations (setAllowFileAccess, setAllowUniversalAccessFromFileURLs, etc.)
+      • Content provider access (setAllowContentAccess)
+      • WebView debugging (setWebContentsDebuggingEnabled)
+      • SSL/TLS error bypassing (onReceivedSslError with proceed())
+      • URL loading from user input (XSS risks)
+      • Mixed content mode (setMixedContentMode ALWAYS_ALLOW)
+      • Storage and geolocation permissions
+      • Custom protocol handlers without validation
+      • Missing WebView cleanup
 
     MASVS: MASVS-PLATFORM-2
     MASTG: MASTG-KNOW-0018, MASTG-TEST-0027, MASTG-TEST-0031, MASTG-TEST-0032,
@@ -3367,24 +3366,13 @@ def check_insecure_webview(base):
     """
 
     hits = []
-    critical_hits = []  # High severity issues
-    medium_hits = []    # Medium severity issues
-    info_hits = []      # Informational findings
 
-    # === CRITICAL: Core WebView security misconfigurations ===
-    critical_patterns = {
+    # WebView configuration patterns to check
+    patterns = {
         "setJavaScriptEnabled(true)": r'Landroid/webkit/WebSettings;->setJavaScriptEnabled\(Z\)V',
+        "addJavascriptInterface": r'Landroid/webkit/WebView;->addJavascriptInterface\(',
         "setAllowUniversalAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowUniversalAccessFromFileURLs\(Z\)V',
         "setAllowFileAccessFromFileURLs(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccessFromFileURLs\(Z\)V',
-        "addJavascriptInterface": r'Landroid/webkit/WebView;->addJavascriptInterface\(',
-    }
-
-    for desc, pat in critical_patterns.items():
-        for rel in grep_code(base, pat):
-            critical_hits.append(f"<code>{rel}</code> {desc}")
-
-    # === MEDIUM: File and content access ===
-    medium_patterns = {
         "setAllowFileAccess(true)": r'Landroid/webkit/WebSettings;->setAllowFileAccess\(Z\)V',
         "setAllowContentAccess(true)": r'Landroid/webkit/WebSettings;->setAllowContentAccess\(Z\)V',
         "setWebContentsDebuggingEnabled(true)": r'Landroid/webkit/WebView;->setWebContentsDebuggingEnabled\(Z\)V',
@@ -3392,15 +3380,15 @@ def check_insecure_webview(base):
         "setGeolocationEnabled(true)": r'Landroid/webkit/WebSettings;->setGeolocationEnabled\(Z\)V',
         "setDomStorageEnabled(true)": r'Landroid/webkit/WebSettings;->setDomStorageEnabled\(Z\)V',
         "setDatabaseEnabled(true)": r'Landroid/webkit/WebSettings;->setDatabaseEnabled\(Z\)V',
-        "setSavePassword(true)": r'Landroid/webkit/WebSettings;->setSavePassword\(Z\)V',  # Deprecated but still found
+        "setSavePassword(true)": r'Landroid/webkit/WebSettings;->setSavePassword\(Z\)V',
         "setSaveFormData(true)": r'Landroid/webkit/WebSettings;->setSaveFormData\(Z\)V',
     }
 
-    for desc, pat in medium_patterns.items():
+    for desc, pat in patterns.items():
         for rel in grep_code(base, pat):
-            medium_hits.append(f"<code>{rel}</code> {desc}")
+            hits.append(f"<code>{rel}</code> {desc}")
 
-    # === XSS Risks: loadUrl/loadData/evaluateJavascript with user input ===
+    # XSS Risks: loadUrl/loadData/evaluateJavascript with user input
     xss_files = []
     for root, _, files in os.walk(base):
         for fn in files:
@@ -3438,13 +3426,13 @@ def check_insecure_webview(base):
                 continue
 
     if xss_files:
-        critical_hits.append(f"<strong>⚠️ {len(xss_files)} file(s) load WebView content from user input (XSS risk):</strong>")
+        hits.append(f"<strong>{len(xss_files)} file(s) load WebView content from user input (XSS risk):</strong>")
         for rel in xss_files[:10]:
-            critical_hits.append(f"<code style='margin-left:20px;'>{rel}</code>")
+            hits.append(f"<code style='margin-left:20px;'>{rel}</code>")
         if len(xss_files) > 10:
-            critical_hits.append(f"<span style='margin-left:20px;'>...and {len(xss_files) - 10} more</span>")
+            hits.append(f"<span style='margin-left:20px;'>...and {len(xss_files) - 10} more</span>")
 
-    # === SSL/TLS Error Bypassing (onReceivedSslError with proceed()) ===
+    # SSL/TLS Error Bypassing (onReceivedSslError with proceed())
     ssl_bypass_files = []
     override_re = re.compile(r'\.method.*onReceivedSslError')
     proceed_re = re.compile(r'\bproceed\(')
@@ -3462,17 +3450,12 @@ def check_insecure_webview(base):
                         for j in range(i, min(i + 30, len(lines))):
                             if proceed_re.search(lines[j]):
                                 rel = os.path.relpath(path, base)
-                                ssl_bypass_files.append(f"<code>{rel}:{j+1}</code> onReceivedSslError calls proceed()")
+                                hits.append(f"<code>{rel}:{j+1}</code> onReceivedSslError calls proceed()")
                                 break
             except:
                 pass
 
-    if ssl_bypass_files:
-        critical_hits.extend(ssl_bypass_files[:10])
-        if len(ssl_bypass_files) > 10:
-            critical_hits.append(f"<span>...and {len(ssl_bypass_files) - 10} more SSL bypass instances</span>")
-
-    # === Protocol Handler Issues (shouldOverrideUrlLoading) ===
+    # Protocol Handler Issues (shouldOverrideUrlLoading)
     protocol_handlers = []
     protocol_re = re.compile(r'\.method.*(shouldOverrideUrlLoading|shouldInterceptRequest)')
 
@@ -3493,71 +3476,13 @@ def check_insecure_webview(base):
 
                     if has_unsafe_scheme and not has_validation:
                         rel = os.path.relpath(path, base)
-                        protocol_handlers.append(f"<code>{rel}</code> Custom protocol handler without URL validation")
+                        hits.append(f"<code>{rel}</code> Custom protocol handler without URL validation")
             except:
                 pass
 
-    if protocol_handlers:
-        medium_hits.append(f"<strong>⚠️ {len(protocol_handlers)} custom protocol handler(s) detected:</strong>")
-        medium_hits.extend(protocol_handlers[:10])
-
-    # === WebView Cleanup Check ===
-    cleanup_missing = []
-    for root, _, files in os.walk(base):
-        for fn in files:
-            if not fn.endswith('.smali'):
-                continue
-            path = os.path.join(root, fn)
-            try:
-                content = open(path, errors='ignore').read()
-                has_webview = 'Landroid/webkit/WebView;' in content
-                has_ondestroy = '.method' in content and ('onDestroy' in content or 'onPause' in content)
-
-                if has_webview and has_ondestroy:
-                    # Check for cleanup methods
-                    has_cleanup = any(method in content for method in [
-                        'clearCache',
-                        'clearHistory',
-                        'clearFormData',
-                        'removeJavascriptInterface',
-                        'destroy',
-                    ])
-
-                    if not has_cleanup:
-                        rel = os.path.relpath(path, base)
-                        cleanup_missing.append(rel)
-            except:
-                pass
-
-    if cleanup_missing:
-        info_hits.append(f"<strong>ℹ️ {len(cleanup_missing)} file(s) may lack proper WebView cleanup:</strong>")
-        for rel in cleanup_missing[:5]:
-            info_hits.append(f"<code style='margin-left:20px;'>{rel}</code>")
-
-    # === Build final report ===
-    all_hits = []
-
-    if critical_hits:
-        all_hits.append("<div><strong style='color:#dc3545;'>🔴 CRITICAL Issues:</strong></div>")
-        all_hits.extend(critical_hits)
-
-    if medium_hits:
-        all_hits.append("<div><br><strong style='color:#fd7e14;'>🟠 MEDIUM Issues:</strong></div>")
-        all_hits.extend(medium_hits)
-
-    if info_hits:
-        all_hits.append("<div><br><strong style='color:#0d6efd;'>🔵 INFO:</strong></div>")
-        all_hits.extend(info_hits)
-
-    if not all_hits:
-        return True, "No insecure WebView configurations detected"
-
-    # Add OWASP reference
-    all_hits.append("<div style='margin-top:15px;'><em>📚 Reference: OWASP MASTG-KNOW-0018 (WebView Security)</em></div>")
-
-    # FAIL if any critical or medium severity issues found
-    is_secure = len(critical_hits) == 0 and len(medium_hits) == 0
-    return is_secure, "<br>\n".join(all_hits)
+    if not hits:
+        return True, "None"
+    return False, "<br>\n".join(hits)
 
 
 def check_keyboard_cache(base, manifest):
@@ -3678,24 +3603,24 @@ def check_keyboard_cache(base, manifest):
                         # Sensitive field - strict checking
                         if not input_type:
                             vulnerability_found = True
-                            vulnerability_desc.append("❌ NO android:inputType attribute (keyboard cache ENABLED)")
+                            vulnerability_desc.append("FAIL: NO android:inputType attribute (keyboard cache ENABLED)")
                             severity = "CRITICAL"
                         elif 'textNoSuggestions' not in input_type:
                             vulnerability_found = True
-                            vulnerability_desc.append("⚠️ Missing 'textNoSuggestions' flag (autocomplete enabled)")
+                            vulnerability_desc.append("WARNING: Missing 'textNoSuggestions' flag (autocomplete enabled)")
                             severity = "HIGH"
 
                         # Password field without textPassword
                         if 'password' in sensitive_type.lower():
                             if 'textPassword' not in input_type and 'numberPassword' not in input_type:
                                 vulnerability_found = True
-                                vulnerability_desc.append("❌ Password field without 'textPassword' flag (VISIBLE password)")
+                                vulnerability_desc.append("FAIL: Password field without 'textPassword' flag (VISIBLE password)")
                                 severity = "CRITICAL"
                     else:
                         # Non-sensitive field - only flag if completely missing inputType
                         if not input_type:
                             vulnerability_found = True
-                            vulnerability_desc.append("❌ NO android:inputType attribute (keyboard cache ENABLED)")
+                            vulnerability_desc.append("FAIL: NO android:inputType attribute (keyboard cache ENABLED)")
                             severity = "MEDIUM"
 
                     if vulnerability_found:
@@ -3746,7 +3671,7 @@ def check_keyboard_cache(base, manifest):
     # Build result with cache location info
     result = (
         f"<div style='background:#fff3cd; border-left:4px solid #ffc107; padding:10px; margin:10px 0;'>"
-        f"<strong>⚠️ KEYBOARD CACHE VULNERABILITY</strong><br>"
+        f"<strong>WARNING: KEYBOARD CACHE VULNERABILITY</strong><br>"
         f"Found {len(issues)} EditText field(s) vulnerable to keyboard caching<br>"
         f"Sensitive data may be stored in keyboard autocomplete dictionaries"
         f"</div>"
@@ -3756,7 +3681,7 @@ def check_keyboard_cache(base, manifest):
     # Add cache storage locations
     result += (
         f"<div style='background:#d1ecf1; border-left:4px solid #17a2b8; padding:10px; margin:10px 0;'>"
-        f"<strong>📁 Keyboard Cache Storage Locations:</strong><br><br>"
+        f"<strong> Keyboard Cache Storage Locations:</strong><br><br>"
         f"<strong>System Dictionary:</strong><br>"
         f"<code>/data/data/com.android.providers.userdictionary/databases/user_dict.db</code><br><br>"
         f"<strong>Google Keyboard (Gboard):</strong><br>"
@@ -4325,13 +4250,13 @@ def check_certificate_pinning(base):
     # Add summary at the top
     summary_parts = []
     if lib_hits:
-        summary_parts.append(f"✓ <strong>Library pinning APIs found:</strong> {len(lib_hits)} file(s)")
+        summary_parts.append(f" <strong>Library pinning APIs found:</strong> {len(lib_hits)} file(s)")
     if sslfactory_hits:
-        summary_parts.append(f"✓ <strong>SSLSocketFactory overrides found:</strong> {len(sslfactory_hits)} file(s)")
+        summary_parts.append(f" <strong>SSLSocketFactory overrides found:</strong> {len(sslfactory_hits)} file(s)")
     if manual_hits:
-        summary_parts.append(f"⚠ <strong>Manual patterns found:</strong> {len(manual_hits)} file(s)")
+        summary_parts.append(f"WARNING: <strong>Manual patterns found:</strong> {len(manual_hits)} file(s)")
     if hv_hits:
-        summary_parts.append(f"⚠ <strong>HostnameVerifier stubs found:</strong> {len(hv_hits)} file(s)")
+        summary_parts.append(f"WARNING: <strong>HostnameVerifier stubs found:</strong> {len(hv_hits)} file(s)")
 
     summary_html = "<div>" + "</div><div>".join(summary_parts) + "</div><br>" if summary_parts else ""
 
@@ -4341,7 +4266,7 @@ def check_certificate_pinning(base):
     if lib_hits or sslfactory_hits:
         # definitive pinning found
         confidence_note = (
-            "<br><div><em>💡 Definitive certificate pinning detected. "
+            "<br><div><em> Definitive certificate pinning detected. "
             "Dynamic testing recommended to verify pinning is active for all connections.</em></div>"
         )
         return True, detail_html + confidence_note
@@ -4447,16 +4372,16 @@ def check_sharedprefs_encryption(base):
         return 'PASS', f"<div>No SharedPreferences usage detected</div><div>Scanned {scanned_files} files</div>"
 
     if unencrypted_count == 0:
-        return 'PASS', f"<div>✓ All SharedPreferences usage is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>"
+        return 'PASS', f"<div> All SharedPreferences usage is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>"
 
     # Build detailed report with collapsible sections
     lines = []
     lines.append(f"<div><strong>Scanned:</strong> {scanned_files} app files</div>")
 
     if encrypted_count > 0:
-        lines.append(f"<div><strong>✓ Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
+        lines.append(f"<div><strong> Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
 
-    lines.append(f"<div><strong>⚠ Unencrypted usage found:</strong> {unencrypted_count} instance(s)</div><br>")
+    lines.append(f"<div><strong>WARNING: Unencrypted usage found:</strong> {unencrypted_count} instance(s)</div><br>")
 
     # Group by file for better organization
     files_with_unencrypted = {}
@@ -4469,7 +4394,7 @@ def check_sharedprefs_encryption(base):
     # Collapsible section for unencrypted findings
     lines.append('<details open>')
     lines.append('<summary class="warning">')
-    lines.append(f'⚠ Unencrypted SharedPreferences ({len(files_with_unencrypted)} files) - Click to expand/collapse')
+    lines.append(f'WARNING: Unencrypted SharedPreferences ({len(files_with_unencrypted)} files) - Click to expand/collapse')
     lines.append('</summary>')
     lines.append('<div>')
 
@@ -4499,7 +4424,7 @@ def check_sharedprefs_encryption(base):
     lines.append('</div></details>')
 
     lines.append(
-        '<div class="info-box"><em>💡 Recommendation: Use EncryptedSharedPreferences from '
+        '<div class="info-box"><em> Recommendation: Use EncryptedSharedPreferences from '
         'androidx.security:security-crypto to encrypt sensitive preferences. '
         'See: <a href="https://developer.android.com/reference/androidx/security/crypto/EncryptedSharedPreferences" '
         'target="_blank">Android Security Crypto</a></em></div>'
@@ -4594,7 +4519,7 @@ def check_external_storage(base):
 
     # Show risky usage
     if risky_findings:
-        lines.append(f"<div><strong>⚠ High-risk external storage usage:</strong></div>")
+        lines.append(f"<div><strong>WARNING: High-risk external storage usage:</strong></div>")
         for desc, hits in risky_findings.items():
             lines.append(f"<div><strong>{desc}:</strong> {len(hits)} file(s)</div>")
             for rel in sorted(hits)[:10]:
@@ -4902,13 +4827,13 @@ def check_hardcoded_keys(base):
         if not findings:
             continue
 
-        emoji = {'Critical': '🔴', 'High': '🟠', 'Medium': '🟡', 'Low': '⚪'}[category]
+        emoji = {'Critical': '', 'High': '', 'Medium': '', 'Low': ''}[category]
 
         # Create collapsible section - Critical and High are expanded by default
         is_open = 'open' if category in ['Critical', 'High'] else ''
         lines.append(f'<details {is_open}>')
         lines.append(f'<summary>')
-        lines.append(f'<span class="bullet">▸</span><span class="check-name">{emoji} {category} ({len(findings)})</span>')
+        lines.append(f'<span class="bullet"></span><span class="check-name">{emoji} {category} ({len(findings)})</span>')
         lines.append('</summary>')
 
         # Show ALL findings (no truncation) - compact format
@@ -4956,7 +4881,7 @@ def check_hardcoded_keys(base):
         lines.append('</details>')  # Close details
 
     lines.append(
-        f"<div><em>💡 Tip: Focus on Critical and High confidence findings first. "
+        f"<div><em> Tip: Focus on Critical and High confidence findings first. "
         f"Entropy analysis and pattern matching used to reduce false positives.</em></div>"
     )
 
@@ -5050,7 +4975,7 @@ def check_biometric_auth(base):
     # Check if secure implementation (uses CryptoObject)
     if secure_hits:
         lines = [
-            f"<div>✓ Biometric authentication with CryptoObject detected</div>",
+            f"<div> Biometric authentication with CryptoObject detected</div>",
             f"<div>Files: {len(secure_hits)}</div>"
         ]
         for rel in sorted(secure_hits)[:10]:
@@ -5060,7 +4985,7 @@ def check_biometric_auth(base):
 
     # Only basic biometric without CryptoObject (insecure)
     lines = [
-        "<div><strong>⚠ Biometric authentication without CryptoObject detected</strong></div>",
+        "<div><strong>WARNING: Biometric authentication without CryptoObject detected</strong></div>",
         "<div>This may allow authentication bypass. Use BiometricPrompt with CryptoObject.</div>"
     ]
     for rel in sorted(basic_hits)[:20]:
@@ -5094,14 +5019,14 @@ def check_flag_secure(base, manifest):
 
     if hits:
         lines = [
-            f"<div>✓ FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
+            f"<div> FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
         ]
         for rel in sorted(hits)[:15]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
         return 'PASS', "<br>\n".join(lines)
 
-    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em>💡 Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>"
+    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em> Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>"
 
 def check_webview_javascript_bridge(base):
     """
@@ -5234,21 +5159,21 @@ def check_webview_javascript_bridge(base):
         lines.append(f"<div>Interface classes identified: {len(interface_classes)}</div>")
 
     if secure_count > 0:
-        lines.append(f"<div>✓ @JavascriptInterface annotations properly implemented</div>")
+        lines.append(f"<div>@JavascriptInterface annotations properly implemented</div>")
 
     if vulnerable_interfaces:
-        lines.append(f"<div>⚠ WARNING: {len(vulnerable_interfaces)} interface(s) may lack @JavascriptInterface annotations:</div>")
+        lines.append(f"<div>WARNING: {len(vulnerable_interfaces)} interface(s) may lack @JavascriptInterface annotations:</div>")
         for vuln_class in vulnerable_interfaces[:10]:
-            lines.append(f"<div style='margin-left:20px;'>• {vuln_class}</div>")
+            lines.append(f"<div style='margin-left:20px;'>{vuln_class}</div>")
 
-    # CRITICAL: Check for remote content loading
+    # Check for remote content loading
     if files_with_remote_loading:
-        lines.append(f"<div><br><strong style='color:#dc3545;'>❌ CRITICAL: {len(files_with_remote_loading)} file(s) expose JavaScript interfaces while loading REMOTE content:</strong></div>")
-        lines.append("<div style='margin-left:20px;color:#dc3545;'>This allows ANY JavaScript from the internet to call exposed Android methods!</div>")
+        lines.append(f"<div><br><strong>CRITICAL: {len(files_with_remote_loading)} file(s) expose JavaScript interfaces while loading REMOTE content:</strong></div>")
+        lines.append("<div style='margin-left:20px;'>This allows ANY JavaScript from the internet to call exposed Android methods!</div>")
         for item in files_with_remote_loading[:10]:
             full = os.path.abspath(os.path.join(base, item['file']))
             validation_note = " (has some URL validation)" if item['has_validation'] else " (NO URL validation detected)"
-            lines.append(f"<div style='margin-left:20px;'>• <a href=\"file://{html.escape(full)}\">{html.escape(item['file'])}</a>{validation_note}</div>")
+            lines.append(f"<div style='margin-left:20px;'><a href=\"file://{html.escape(full)}\">{html.escape(item['file'])}</a>{validation_note}</div>")
 
         lines.append("<div style='margin-left:20px;margin-top:10px;'><strong>Attack scenario:</strong></div>")
         lines.append("<div style='margin-left:20px;'>1. WebView loads remote content with JavaScript enabled</div>")
@@ -5392,7 +5317,7 @@ def check_clipboard_security(base):
                 f"<div style='border-left:4px solid #dc3545; padding-left:10px; margin:10px 0;'>"
                 f"<strong>File:</strong> <a href='file://{html.escape(full)}'>{html.escape(finding['file'])}:{finding['line']}</a><br>"
                 f"<strong>API:</strong> <code>{finding['api']}</code> (COPIES TO CLIPBOARD)<br>"
-                f"<strong>⚠️ Sensitive data detected in context</strong> (OTP/password/token/credit card)<br>"
+                f"<strong>WARNING: Sensitive data detected in context</strong> (OTP/password/token/credit card)<br>"
                 f"<strong>Code:</strong><br>"
                 f"<pre>{html.escape(finding['context'])}</pre>"
                 f"<strong>Fix:</strong> Never copy sensitive authentication data to clipboard. Use secure alternatives:<br>"
@@ -5407,7 +5332,7 @@ def check_clipboard_security(base):
     if findings:
         report_lines.append(f"<div><strong>Other Clipboard Usage:</strong> {len(findings)} instance(s)</div>")
         if prevention_hits:
-            report_lines.append(f"<div><strong>✓ Files with clipboard prevention:</strong> {len(prevention_hits)} file(s)</div>")
+            report_lines.append(f"<div><strong> Files with clipboard prevention:</strong> {len(prevention_hits)} file(s)</div>")
         report_lines.append("<br>")
 
         files_with_clipboard = {}
@@ -5419,7 +5344,7 @@ def check_clipboard_security(base):
 
         report_lines.append('<details>')
         report_lines.append('<summary>')
-        report_lines.append(f'⚠ Non-Critical Clipboard Usage ({len(files_with_clipboard)} files)')
+        report_lines.append(f'WARNING: Non-Critical Clipboard Usage ({len(files_with_clipboard)} files)')
         report_lines.append('</summary>')
 
         for file_path in sorted(files_with_clipboard.keys()):
@@ -5428,7 +5353,7 @@ def check_clipboard_security(base):
 
             has_prevention = file_path in prevention_hits
             border_color = '#28a745' if has_prevention else '#ffc107'
-            status_icon = '✓' if has_prevention else '⚠'
+            status_icon = '' if has_prevention else 'WARNING:'
 
             report_lines.append(
                 f'<div style="border-left:4px solid {border_color}; padding-left:10px; margin:10px 0;">'
@@ -5453,7 +5378,7 @@ def check_clipboard_security(base):
         report_lines.append('</details>')
 
     report_lines.append(
-        '<div class="info-box"><em>💡 Clipboard data can be accessed by other apps. '
+        '<div class="info-box"><em> Clipboard data can be accessed by other apps. '
         'Avoid copying sensitive data (OTP, passwords, tokens, credit cards) to clipboard.</em></div>'
     )
 
@@ -5628,7 +5553,7 @@ def check_signature_schemes(apk_path):
     info_parts.append(f"<strong>Present:</strong> {', '.join(present)}")
     if missing:
         info_parts.append(f"<strong>Missing:</strong> {', '.join(missing)}")
-    report_lines.append("<div style='color:#0d6efd;'>ℹ️ " + " | ".join(info_parts) + "</div>")
+    report_lines.append("<div style='color:#0d6efd;'>INFO: " + " | ".join(info_parts) + "</div>")
 
     # Check certificate hash algorithm (SHA1 vs SHA256)
     sha1_detected = False
@@ -5636,7 +5561,7 @@ def check_signature_schemes(apk_path):
         sha1_detected = True
         has_failures = True
         report_lines.append(
-            "<div style='margin-top:10px;'><strong style='color:#dc3545;'>❌ FAIL: Weak Signature Algorithm</strong></div>"
+            "<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Weak Signature Algorithm</strong></div>"
             "<div style='margin-left:20px;'>Certificate uses <code>SHA1withRSA</code>. "
             "SHA-1 is cryptographically broken and vulnerable to collision attacks.</div>"
             "<div style='margin-left:20px;'><strong>Recommendation:</strong> Re-sign with <code>SHA256withRSA</code> or stronger.</div>"
@@ -5653,7 +5578,7 @@ def check_signature_schemes(apk_path):
         if present == ["v1"]:
             # v1 only → CRITICAL: vulnerable on ALL Android versions
             report_lines.append(
-                "<div style='margin-top:10px;'><strong style='color:#dc3545;'>❌ FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
+                "<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
                 "<div style='margin-left:20px;'><strong>Severity:</strong> CRITICAL</div>"
                 "<div style='margin-left:20px;'>APK signed only with v1 (JAR signature), vulnerable on Android 5.0-8.0.</div>"
                 "<div style='margin-left:20px;'>v1 does not validate the entire APK, allowing malicious DEX prepending.</div>"
@@ -5662,7 +5587,7 @@ def check_signature_schemes(apk_path):
         else:
             # v1 + v2/v3 → WARNING: still vulnerable on Android 5.0-7.x
             report_lines.append(
-                "<div style='margin-top:10px;'><strong style='color:#fd7e14;'>⚠️ FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
+                "<div style='margin-top:10px;'><strong style='color:#fd7e14;'>FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
                 "<div style='margin-left:20px;'><strong>Severity:</strong> Partial (Android 5.0-7.x affected)</div>"
                 "<div style='margin-left:20px;'>APK signed with v1 + v2/v3. While v2/v3 provide protection on Android 8.0+, "
                 "Android 5.0-7.x devices do NOT properly enforce v2/v3 validation and remain vulnerable.</div>"
@@ -5675,7 +5600,7 @@ def check_signature_schemes(apk_path):
 
     # If we have v2/v3 WITHOUT v1, we're fully protected
     if "v2" in present or "v3" in present:
-        report_lines.append("<div style='margin-top:10px;color:#198754;'>✓ Secure signature configuration</div>")
+        report_lines.append("<div style='margin-top:10px;color:#198754;'>Secure signature configuration</div>")
         return True, "<br>\n".join(report_lines)
 
     # No proper signatures
@@ -6134,17 +6059,17 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         summary_parts = []
 
         if legacy_neg:
-            summary_parts.append("❌ <strong>TLS 1.0/1.1 WAS NEGOTIATED</strong> - The app successfully connected using legacy TLS!")
+            summary_parts.append("FAIL: <strong>TLS 1.0/1.1 WAS NEGOTIATED</strong> - The app successfully connected using legacy TLS!")
         elif legacy_enabled:
-            summary_parts.append("⚠️ <strong>TLS 1.0/1.1 IS ENABLED</strong> - The app enables legacy TLS versions but didn't negotiate them")
+            summary_parts.append("WARNING: <strong>TLS 1.0/1.1 IS ENABLED</strong> - The app enables legacy TLS versions but didn't negotiate them")
         else:
             # Check if actual network connections happened
             if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
-                summary_parts.append("✓ <strong>No legacy TLS detected</strong> - App made network connections using modern TLS")
+                summary_parts.append(" <strong>No legacy TLS detected</strong> - App made network connections using modern TLS")
             elif tls_inits > 0:
-                summary_parts.append("ℹ️ <strong>TLS initialized but no network activity</strong> - Need to trigger network calls in the app")
+                summary_parts.append("INFO: <strong>TLS initialized but no network activity</strong> - Need to trigger network calls in the app")
             else:
-                summary_parts.append("ℹ️ <strong>No TLS activity detected</strong> - App may not use network, or didn't trigger any connections")
+                summary_parts.append("INFO: <strong>No TLS activity detected</strong> - App may not use network, or didn't trigger any connections")
 
         summary_parts.append(f"<div style='margin-top:8px; font-size:11px; color:#666'>")
         summary_parts.append(f"Captured: {tls_inits} TLS inits")
@@ -6157,7 +6082,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         if status == 'PASS' and okhttp_calls == 0 and jsse_calls == 0 and native_calls == 0:
             summary_parts.append(
                 "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:11px'>"
-                "<strong>⚠️ Test Incomplete:</strong> No network connections detected during monitoring.<br>"
+                "<strong>WARNING: Test Incomplete:</strong> No network connections detected during monitoring.<br>"
                 "<strong>Action Required:</strong> While the app is running in Frida, manually trigger actions that make network requests:<br>"
                 "• Login/logout<br>"
                 "• Load content/refresh feeds<br>"
@@ -6177,7 +6102,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     else:
         detail = (
             "<div style='padding:8px; background:#f8d7da; border-left:3px solid #dc3545; font-size:11px'>"
-            "<strong>❌ No output captured</strong><br>"
+            "<strong>FAIL: No output captured</strong><br>"
             "Possible issues:<br>"
             "• Frida hooks didn't attach (check if app uses native SSL)<br>"
             "• App crashed on startup<br>"
@@ -6478,7 +6403,7 @@ def check_frida_file_reads(base, wait_secs=7):
 
     unique = sorted(set(reads))
     if not unique:
-        return True, "<strong>✓ No file-read attempts observed.</strong>"
+        return True, "<strong> No file-read attempts observed.</strong>"
     # File reads detected - this is informational, not necessarily a failure
     # Return True but show what was read
     return True, f"<strong>File reads detected ({len(unique)}):</strong><br>" + "<br>\n".join(f"- <code>{html.escape(p)}</code>" for p in unique)
@@ -6651,7 +6576,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     report_lines = []
 
     if app_strictmode_calls:
-        report_lines.append("<div><strong>⚠ StrictMode in App Code:</strong> {} call(s)</div><br>".format(len(app_strictmode_calls)))
+        report_lines.append("<div><strong>WARNING: StrictMode in App Code:</strong> {} call(s)</div><br>".format(len(app_strictmode_calls)))
         report_lines.append("<details open><summary style='cursor:pointer'>App StrictMode Calls - Click to expand/collapse</summary>")
         report_lines.append("<pre style='white-space:pre-wrap; font-size:90%;'>\n" + "\n\n".join(app_strictmode_calls) + "\n</pre>")
         report_lines.append("</details>")
@@ -6663,7 +6588,7 @@ def check_frida_strict_mode(base, wait_secs=7):
         report_lines.append("</details>")
 
     report_lines.append(
-        "<br><div><em>💡 Note: StrictMode in library code (Google Play Services, Firebase) is managed by the library vendor "
+        "<br><div><em> Note: StrictMode in library code (Google Play Services, Firebase) is managed by the library vendor "
         "and is generally not a concern. Focus on StrictMode calls originating from your app's package.</em></div>"
     )
 
@@ -6674,7 +6599,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     # Library/framework StrictMode calls are out of the developer's control and should not cause failure
     if app_strictmode_calls:
         severity_note = "<br><div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107'>"
-        severity_note += "<strong>⚠ MASTG Guidance:</strong><br>"
+        severity_note += "<strong>WARNING: MASTG Guidance:</strong><br>"
         severity_note += "StrictMode detected in APP CODE at runtime in production build (MASTG-TEST-0264, MASTG-TEST-0263, MASTG-TEST-0265).<br>"
         severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br>"
         severity_note += "<strong>Remediation:</strong><br>"
@@ -6991,10 +6916,10 @@ def check_frida_sharedprefs(base, wait_secs=10):
                     if payload.get('type') == 'prefs_access':
                         if payload.get('encrypted'):
                             encrypted_count += 1
-                            findings.append(f"✓ Encrypted: {payload.get('name')}")
+                            findings.append(f" Encrypted: {payload.get('name')}")
                         else:
                             plain_count += 1
-                            findings.append(f"⚠ Plain: {payload.get('name')}")
+                            findings.append(f"WARNING: Plain: {payload.get('name')}")
                     elif payload.get('type') == 'prefs_write':
                         key = payload.get('key', '')
                         value = payload.get('value', '')
@@ -7011,11 +6936,11 @@ def check_frida_sharedprefs(base, wait_secs=10):
                         marker = "📝"
 
                         if is_jwt:
-                            marker = "🔴"
+                            marker = ""
                             flags.append("JWT token")
                             critical_findings.append(f"{key}: JWT detected")
                         elif sensitive and (high_entropy or is_base64 or is_hex):
-                            marker = "🔴"
+                            marker = ""
                             if high_entropy:
                                 flags.append(f"entropy {entropy}")
                             if is_base64:
@@ -7024,10 +6949,10 @@ def check_frida_sharedprefs(base, wait_secs=10):
                                 flags.append("hex")
                             critical_findings.append(f"{key}: sensitive + high entropy")
                         elif sensitive:
-                            marker = "🟠"
+                            marker = ""
                             flags.append("sensitive keyword")
                         elif high_entropy and value_len > 32:
-                            marker = "🟡"
+                            marker = ""
                             flags.append(f"entropy {entropy}")
                         elif is_base64 or is_hex:
                             flags.append("base64" if is_base64 else "hex")
@@ -7047,12 +6972,12 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
     detail = [
         f"<div><strong>Summary:</strong></div>",
-        f"<div>✓ Encrypted accesses: {encrypted_count}</div>",
-        f"<div>⚠ Plain accesses: {plain_count}</div>",
+        f"<div> Encrypted accesses: {encrypted_count}</div>",
+        f"<div>WARNING: Plain accesses: {plain_count}</div>",
     ]
 
     if critical_findings:
-        detail.append(f"<div>🔴 Critical issues: {len(critical_findings)}</div>")
+        detail.append(f"<div> Critical issues: {len(critical_findings)}</div>")
         for cf in critical_findings[:5]:
             detail.append(f"<div class='detail-list-item'>{html.escape(cf)}</div>")
 
@@ -7061,7 +6986,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if len(findings) > 50:
         detail.append(f"<div>...and {len(findings) - 50} more</div>")
 
-    detail.append("<br><div><em>Legend: 🔴=Critical 🟠=Sensitive 🟡=High entropy 📝=Normal</em></div>")
+    detail.append("<br><div><em>Legend: =Critical =Sensitive =High entropy 📝=Normal</em></div>")
 
     # Status logic
     if critical_findings:
@@ -7172,7 +7097,7 @@ def check_frida_external_storage(base, wait_secs=10):
                         ext = payload.get('extension', '')
                         # Flag sensitive extensions
                         sensitive_exts = ['.db', '.sqlite', '.sql', '.key', '.pem', '.p12', '.jks']
-                        marker = "🔴" if ext in sensitive_exts else "📁"
+                        marker = "" if ext in sensitive_exts else ""
                         findings.append(f"{marker} Write: {path}")
                     elif payload.get('type') == 'external_file':
                         findings.append(f"📂 Access: {payload.get('path', '')}")
@@ -7192,7 +7117,7 @@ def check_frida_external_storage(base, wait_secs=10):
     if len(findings) > 30:
         detail.append(f"<div>...and {len(findings) - 30} more</div>")
 
-    has_sensitive = any('🔴' in f for f in findings)
+    has_sensitive = any('' in f for f in findings)
     status = 'FAIL' if has_sensitive else 'WARN'
     return status, "<br>\n".join(detail)
 
@@ -7301,17 +7226,17 @@ def check_frida_crypto_keys(base, wait_secs=10):
                         algo = payload.get('algorithm', '')
                         keyLen = payload.get('keyLength', 0)
                         preview = payload.get('keyPreview', '')
-                        marker = "🔴" if keyLen < 128 else "🔑"
+                        marker = "" if keyLen < 128 else ""
                         findings.append(f"{marker} {algo} key ({keyLen} bits): {preview}")
                         if keyLen < 128:
                             weak_keys.append(f"{algo} with {keyLen} bits")
                     elif payload.get('type') == 'key_generator':
                         size = payload.get('keySize', 0)
-                        marker = "✓" if size >= 128 else "⚠"
+                        marker = "" if size >= 128 else "WARNING:"
                         findings.append(f"{marker} Generated key: {size} bits")
                     elif payload.get('type') == 'keypair_generator':
                         size = payload.get('keySize', 0)
-                        marker = "✓" if size >= 2048 else "⚠"
+                        marker = "" if size >= 2048 else "WARNING:"
                         findings.append(f"{marker} Generated keypair: {size} bits")
                         if size < 2048:
                             weak_keys.append(f"RSA with {size} bits")
@@ -7328,7 +7253,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
 
     detail = [f"<div><strong>Cryptographic operations detected:</strong></div>"]
     if weak_keys:
-        detail.append(f"<div><strong>⚠ Weak keys found:</strong> {', '.join(set(weak_keys))}</div><br>")
+        detail.append(f"<div><strong>WARNING: Weak keys found:</strong> {', '.join(set(weak_keys))}</div><br>")
 
     detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:30]])
     if len(findings) > 30:
@@ -7432,7 +7357,7 @@ def check_frida_clipboard(base, wait_secs=10):
                         preview = payload.get('preview', '')
                         length = payload.get('length', 0)
                         sensitive = payload.get('sensitive', False)
-                        marker = "🔴" if sensitive else "📋"
+                        marker = "" if sensitive else ""
                         if sensitive:
                             sensitive_count += 1
                         findings.append(f"{marker} Copied {length} chars: {preview}")
@@ -7449,7 +7374,7 @@ def check_frida_clipboard(base, wait_secs=10):
 
     detail = [f"<div><strong>Clipboard operations detected:</strong></div>"]
     if sensitive_count > 0:
-        detail.append(f"<div><strong>🔴 Sensitive data copied to clipboard: {sensitive_count} time(s)</strong></div><br>")
+        detail.append(f"<div><strong> Sensitive data copied to clipboard: {sensitive_count} time(s)</strong></div><br>")
 
     detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:20]])
     if len(findings) > 20:
@@ -7561,7 +7486,7 @@ def check_storage_analysis(base, package_name):
 
     # Section 1: New directories (show all, no limits)
     if new_dirs:
-        findings.append(f"<div class='storage-section'><strong>📁 New Directories: {len(new_dirs)}</strong></div>")
+        findings.append(f"<div class='storage-section'><strong> New Directories: {len(new_dirs)}</strong></div>")
         findings.append("<div class='storage-item'>")
         for dir_path in sorted(new_dirs):
             files_in_dir = new_files.get(dir_path, [])
@@ -7576,7 +7501,7 @@ def check_storage_analysis(base, package_name):
         findings.append("<div class='storage-item'>")
 
         for dir_path, files in sorted(modified_files.items()):
-            findings.append(f"<div><strong>📁 {html.escape(dir_path)}</strong></div>")
+            findings.append(f"<div><strong> {html.escape(dir_path)}</strong></div>")
             findings.append("<div class='file-list-box'>")
 
             for file_entry in files:
@@ -7585,14 +7510,14 @@ def check_storage_analysis(base, package_name):
                 # Security checks
                 if '.xml' in file_entry and 'shared_prefs' in dir_path:
                     if '-rw-' in file_entry and '---' not in file_entry:
-                        security_issues.append(f"⚠ Shared preferences file with potentially insecure permissions: {file_entry}")
+                        security_issues.append(f"WARNING: Shared preferences file with potentially insecure permissions: {file_entry}")
 
                 if '.db' in file_entry:
                     if '-rw-rw-' in file_entry or '-rw-rw-rw-' in file_entry:
-                        security_issues.append(f"🔴 Database file with world-readable permissions: {file_entry}")
+                        security_issues.append(f" Database file with world-readable permissions: {file_entry}")
 
                 if any(ext in file_entry for ext in ['.key', '.pem', '.jks', '.p12']):
-                    security_issues.append(f"🔴 Cryptographic key file detected: {file_entry}")
+                    security_issues.append(f" Cryptographic key file detected: {file_entry}")
 
             findings.append("</div>")
 
@@ -7815,7 +7740,7 @@ def main():
         status = 'PASS' if ok else 'FAIL'
         block = (
             "<details>"
-            f"<summary class='{cls}'><span class='bullet'>▸</span> "
+            f"<summary class='{cls}'><span class='bullet'></span> "
             f"<span class='check-name'>APK Signature Schemes:</span> "
             f"<span class='check-status'>{status}</span></summary>"
             f"<div style='padding:8px'>{det}</div>"
@@ -7869,7 +7794,6 @@ def main():
         ("Insecure Fingerprint API",lambda: check_insecure_fingerprint_api(base)),
         ("Use of TLS 1.0 or 1.1",   lambda: check_tls_versions(base)),
         ("Root Detection",          lambda: check_root_detection(manifest, base)),
-        # New MASVS checks
         ("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
         ("External Storage Usage",  lambda: check_external_storage(base)),
         ("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
@@ -7995,7 +7919,7 @@ def main():
         if name in html_special:
             html_block = (
                 "<details>"
-                f"<summary class='{cls}'><span class='bullet'>▸</span> "
+                f"<summary class='{cls}'><span class='bullet'></span> "
                 f"<span class='check-name'>{name}:</span> "
                 f"<span class='check-status'>{status}</span></summary>"
                 f"<div class='detail-content'>{det}</div>"
@@ -8004,7 +7928,7 @@ def main():
         else:
             html_block = (
                 "<details>"
-                f"<summary class='{cls}'><span class='bullet'>▸</span> "
+                f"<summary class='{cls}'><span class='bullet'></span> "
                 f"<span class='check-name'>{name}:</span> "
                 f"<span class='check-status'>{status}</span></summary>"
                 f"<pre>{det}</pre>"
@@ -8070,7 +7994,7 @@ def main():
 
             html_block = (
                 "<details>"
-                f"<summary class='{cls}'><span class='bullet'>▸</span> "
+                f"<summary class='{cls}'><span class='bullet'></span> "
                 f"<span class='check-name'>{name}:</span> {dynamic_badge} "
                 f"<span class='check-status'>{status}</span></summary>"
                 f"<div class='detail-content'>{det}</div>"
@@ -8102,7 +8026,7 @@ def main():
 
                 html_block = (
                     "<details>"
-                    f"<summary class='{cls}'><span class='bullet'>▸</span> "
+                    f"<summary class='{cls}'><span class='bullet'></span> "
                     f"<span class='check-name'>Storage Analysis:</span> "
                     f"<span class='check-status'>{status}</span></summary>"
                     f"<div class='detail-content'>{det}</div>"
