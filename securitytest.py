@@ -7696,6 +7696,7 @@ def main():
                 "SharedPreferences Encryption",
                 "External Storage Usage",
                 "Keyboard Cache",
+                "Storage Analysis",
             ]
         },
         "MASVS-CRYPTO": {
@@ -7824,9 +7825,24 @@ def main():
     else:
         print("[*] Skipping signature check (no APK source)")
 
-    # 3) Manifest load
+ # 3) Manifest load
     print("[*] Loading AndroidManifest.xml…")
     manifest = os.path.join(base, 'AndroidManifest.xml')
+
+    # Helper to run Storage Analysis as a selectable dynamic test
+    def run_storage_analysis():
+        pkg_name = None
+        if manifest and os.path.exists(manifest):
+            try:
+                root = ET.parse(manifest).getroot()
+                pkg_name = root.get('package')
+            except Exception as e:
+                return 'WARN', f"<div>Failed to parse manifest for storage analysis: {html.escape(str(e))}</div>"
+
+        if not pkg_name:
+            return 'WARN', "<div>Could not extract package name for storage analysis</div>"
+
+        return check_storage_analysis(base, pkg_name)
 
     # 4) Main checks list
     checks = [
@@ -8068,6 +8084,7 @@ def main():
             ("Dynamic External Storage",     lambda: check_frida_external_storage(base)),
             ("Dynamic Crypto Keys",          lambda: check_frida_crypto_keys(base)),
             ("Dynamic Clipboard",            lambda: check_frida_clipboard(base)),
+            ("Storage Analysis",             run_storage_analysis),
         ]
         DYNAMIC_TO_STATIC = {
          "Dynamic Cert Pinning":          "Certificate Pinning",
@@ -8163,38 +8180,6 @@ def main():
                     break
             if not placed:
                 ungrouped.append(html_block)
-
-        # Storage Analysis Check (run last, after all other checks)
-        print("[*] Running Storage Analysis (final check)...")
-        try:
-            # Extract package name from manifest
-            pkg_name = None
-            if manifest:
-                root = ET.parse(manifest).getroot()
-                pkg_name = root.get('package')
-
-            if pkg_name:
-                status, det = check_storage_analysis(base, pkg_name)
-                cls = {'PASS':'pass', 'WARN':'warn', 'FAIL':'fail'}.get(status, 'fail')
-
-                html_block = (
-                    "<details>"
-                    f"<summary class='{cls}'><span class='bullet'></span> "
-                    f"<span class='check-name'>Storage Analysis:</span> "
-                    f"<span class='check-status'>{status}</span></summary>"
-                    f"<div class='detail-content'>{det}</div>"
-                    "</details>\n"
-                )
-
-                # Add to MASVS-STORAGE category
-                for cat, info in MASVS_CATEGORIES.items():
-                    if cat == "MASVS-STORAGE":
-                        grouped[cat].append(html_block)
-                        break
-            else:
-                print("[!] Could not extract package name for storage analysis")
-        except Exception as e:
-            print(f"[!] Storage Analysis failed: {str(e)}")
 
     # 7) Assemble final report
     sections = checksec_block  # ensure checksec is at top
