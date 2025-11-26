@@ -3763,62 +3763,16 @@ def check_keyboard_cache(base, manifest):
     severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2}
     issues.sort(key=lambda x: severity_order.get(x[0], 999))
 
-    # Build result with cache location info
-    result = (
-        f"<div style='background:#fff3cd; border-left:4px solid #ffc107; padding:10px; margin:10px 0;'>"
-        f"<strong>WARNING: KEYBOARD CACHE VULNERABILITY</strong><br>"
-        f"Found {len(issues)} EditText field(s) vulnerable to keyboard caching<br>"
-        f"Sensitive data may be stored in keyboard autocomplete dictionaries"
-        f"</div>"
-        f"<br>"
+    # Compact report: just the vulnerable fields
+    lines = []
+    lines.append(
+        f"<div><strong>Keyboard cache issues:</strong> {len(issues)} vulnerable EditText field(s)</div>"
     )
 
-    # Add cache storage locations
-    result += (
-        f"<div style='background:#d1ecf1; border-left:4px solid #17a2b8; padding:10px; margin:10px 0;'>"
-        f"<strong> Keyboard Cache Storage Locations:</strong><br><br>"
-        f"<strong>System Dictionary:</strong><br>"
-        f"<code>/data/data/com.android.providers.userdictionary/databases/user_dict.db</code><br><br>"
-        f"<strong>Google Keyboard (Gboard):</strong><br>"
-        f"<code>/data/data/com.google.android.inputmethod.latin/databases/trainingcache*.db</code><br><br>"
-        f"<strong>Samsung Keyboard:</strong><br>"
-        f"<code>/data/data/com.samsung.android.honeyboard/databases/</code><br><br>"
-        f"<strong>SwiftKey:</strong><br>"
-        f"<code>/data/data/com.touchtype.swiftkey/databases/dynamic.db</code><br><br>"
-        f"</div>"
-        f"<br>"
-    )
+    for severity, issue_html in issues:
+        lines.append(issue_html)
 
-    # Add ADB extraction commands
-    result += (
-        f"<div style='background:#f8d7da; border-left:4px solid #dc3545; padding:10px; margin:10px 0;'>"
-        f"<strong>🔍 How to Extract Keyboard Cache (Manual Verification):</strong><br><br>"
-        f"<strong>1. Enter sensitive data in vulnerable fields</strong><br>"
-        f"<strong>2. Extract keyboard cache databases:</strong><br>"
-        f"<pre># System dictionary\n"
-        f"adb shell \"su -c 'cat /data/data/com.android.providers.userdictionary/databases/user_dict.db'\" > user_dict.db\n\n"
-        f"# Google Keyboard\n"
-        f"adb shell \"su -c 'cat /data/data/com.google.android.inputmethod.latin/databases/trainingcache2.db'\" > gboard_cache.db\n\n"
-        f"# Samsung Keyboard\n"
-        f"adb shell \"su -c 'ls /data/data/com.samsung.android.honeyboard/databases/'\"</pre>"
-        f"<strong>3. Analyze extracted databases:</strong><br>"
-        f"<pre># Install SQLite browser or use command line\n"
-        f"sqlite3 user_dict.db \"SELECT * FROM words;\"</pre>"
-        f"<strong>4. Search for your test data</strong> - If found, vulnerability confirmed!<br><br>"
-        f"<strong>Alternative (Non-root):</strong><br>"
-        f"<pre># Backup app data (includes keyboard cache if stored in app directory)\n"
-        f"adb backup -f backup.ab {pkg}\n"
-        f"# Convert to tar and extract\n"
-        f"dd if=backup.ab bs=24 skip=1 | openssl zlib -d | tar -xvf -</pre>"
-        f"</div>"
-        f"<br>"
-    )
-
-    # Add individual issues
-    for severity, issue in issues:
-        result += issue
-
-    return False, result, len(issues)
+    return False, "<br>\n".join(lines), len(issues)
 
 
 def check_os_command_injection(base):
@@ -5435,18 +5389,12 @@ def check_webview_javascript_bridge(base):
 
     # Check for remote content loading
     if files_with_remote_loading:
-        lines.append(f"<div><br><strong>CRITICAL: {len(files_with_remote_loading)} file(s) expose JavaScript interfaces while loading REMOTE content:</strong></div>")
+        lines.append(f"<div><br><strong>{len(files_with_remote_loading)} file(s) expose JavaScript interfaces while loading REMOTE content:</strong></div>")
         lines.append("<div style='margin-left:20px;'>This allows ANY JavaScript from the internet to call exposed Android methods!</div>")
         for item in files_with_remote_loading[:10]:
             full = os.path.abspath(os.path.join(base, item['file']))
             validation_note = " (has some URL validation)" if item['has_validation'] else " (NO URL validation detected)"
             lines.append(f"<div style='margin-left:20px;'><a href=\"file://{html.escape(full)}\">{html.escape(item['file'])}</a>{validation_note}</div>")
-
-        lines.append("<div style='margin-left:20px;margin-top:10px;'><strong>Attack scenario:</strong></div>")
-        lines.append("<div style='margin-left:20px;'>1. WebView loads remote content with JavaScript enabled</div>")
-        lines.append("<div style='margin-left:20px;'>2. Attacker injects JavaScript via MITM, XSS, or compromised page</div>")
-        lines.append("<div style='margin-left:20px;'>3. Injected JavaScript calls the exposed interface methods</div>")
-        lines.append("<div style='margin-left:20px;'>4. Sensitive data (credentials, tokens, etc.) can be exfiltrated</div>")
 
     # Show files that use addJavascriptInterface
     lines.append("<div><br><strong>All files using addJavascriptInterface:</strong></div>")
