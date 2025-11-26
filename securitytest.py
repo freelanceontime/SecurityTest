@@ -5067,106 +5067,173 @@ def check_biometric_auth(base):
     Check for proper biometric authentication implementation in APP CODE.
     Verifies biometric auth is bound to cryptographic operations via CryptoObject.
 
+    CRITICAL: Detects BiometricPrompt.authenticate() without CryptoObject (allows Frida bypass).
+
     MASTG: https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/
+    Reference: https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0001/
     """
-    # Patterns indicating BiometricPrompt usage in APP CODE
-    biometric_usage_patterns = [
-        r'BiometricPrompt\$Builder',  # Creating BiometricPrompt
-        r'new-instance.*BiometricPrompt',  # Instantiation in smali
-        r'\.authenticate\(',  # authenticate() call
-    ]
+    # Library paths to exclude
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        """Check if path is library code"""
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
+    # CRITICAL: BiometricPrompt.authenticate() without CryptoObject
+    # authenticate(PromptInfo) = VULNERABLE (one param, no CryptoObject)
+    null_crypto_biometric = re.compile(
+        r'invoke-virtual.*Landroidx/biometric/BiometricPrompt;->authenticate'
+        r'\(Landroidx/biometric/BiometricPrompt\$PromptInfo;\)V'
+    )
+
+    # SECURE: BiometricPrompt.authenticate() with CryptoObject
+    # authenticate(PromptInfo, CryptoObject) = SECURE (two params)
+    secure_crypto_biometric = re.compile(
+        r'invoke-virtual.*Landroidx/biometric/BiometricPrompt;->authenticate'
+        r'\(Landroidx/biometric/BiometricPrompt\$PromptInfo;Landroidx/biometric/BiometricPrompt\$CryptoObject;\)'
+    )
+
+    # Detect general BiometricPrompt usage
+    biometric_prompt_pat = re.compile(r'Landroidx/biometric/BiometricPrompt;')
 
     # Secure patterns - CryptoObject + KeyStore binding
-    crypto_patterns = [
-        r'setUserAuthenticationRequired\s*\(\s*true',  # KeyStore bound to auth
-        r'setInvalidatedByBiometricEnrollment',  # Proper invalidation
-        r'new-instance.*BiometricPrompt\$CryptoObject',  # CryptoObject creation in app
+    crypto_object_pattern = re.compile(r'Landroidx/biometric/BiometricPrompt\$CryptoObject;')
+    keystore_patterns = [
+        re.compile(r'setUserAuthenticationRequired'),
+        re.compile(r'setInvalidatedByBiometricEnrollment'),
     ]
 
-    # Insecure patterns
-    insecure_patterns = [
-        r'FingerprintManager',  # Deprecated API
-        r'setUserAuthenticationRequired\s*\(\s*false',  # Not bound to auth
-    ]
-
-    # Find BiometricPrompt usage in APP CODE only (skip library files)
+    # Categorize findings
     biometric_files = set()
-    crypto_files = set()
-    insecure_files = set()
+    null_crypto_files = []  # CRITICAL - allows Frida bypass
+    secure_crypto_files = set()  # SECURE - uses CryptoObject
+    crypto_object_files = set()
+    keystore_files = set()
 
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
                 continue
 
-            full = os.path.join(root, fn)
-            rel = os.path.relpath(full, base)
+            path = os.path.join(root, fn)
+            rel_path = os.path.relpath(path, base)
 
-            # SKIP library files - only check APP CODE
-            if any(lib in rel for lib in ['androidx/', 'android/support/', 'com/google/',
-                                          'kotlin/', 'kotlinx/', 'org/jetbrains/']):
+            # Skip library code - only check APP CODE
+            if is_library_path(rel_path):
                 continue
 
             try:
-                content = open(full, errors='ignore').read()
+                content = open(path, errors='ignore').read()
+                lines = content.splitlines()
+            except:
+                continue
 
-                # Check for biometric usage
-                for pat in biometric_usage_patterns:
-                    if re.search(pat, content):
-                        biometric_files.add(rel)
-                        break
+            # Check for BiometricPrompt usage (general)
+            if biometric_prompt_pat.search(content):
+                biometric_files.add(rel_path)
 
-                # Check for crypto binding
-                for pat in crypto_patterns:
-                    if re.search(pat, content):
-                        crypto_files.add(rel)
-                        break
+            # Check for CryptoObject usage (secure)
+            if crypto_object_pattern.search(content):
+                crypto_object_files.add(rel_path)
 
-                # Check for insecure patterns
-                for pat in insecure_patterns:
-                    if re.search(pat, content):
-                        insecure_files.add(rel)
-                        break
+            # Check for KeyStore integration (secure)
+            for pat in keystore_patterns:
+                if pat.search(content):
+                    keystore_files.add(rel_path)
+                    break
 
-            except Exception:
-                pass
+            # Check for CRITICAL vulnerability: authenticate() without CryptoObject
+            for i, line in enumerate(lines, 1):
+                if null_crypto_biometric.search(line):
+                    snippet = html.escape(line.strip()[:120])
+                    link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
+                    null_crypto_files.append((link, snippet))
+                    break
 
-    # No biometric authentication found in app code
-    if not biometric_files and not insecure_files:
-        return 'PASS', "<div>No biometric authentication detected in app code</div>"
+            # Check for secure usage: authenticate() with CryptoObject
+            if secure_crypto_biometric.search(content):
+                secure_crypto_files.add(rel_path)
 
-    # Check for insecure implementations
-    if insecure_files:
+    # No BiometricPrompt API usage detected in app code
+    if not biometric_files:
+        return 'PASS', "<div>No BiometricPrompt usage detected in app code</div>"
+
+    # CRITICAL: BiometricPrompt.authenticate() without CryptoObject - allows Frida bypass
+    if null_crypto_files:
         lines = [
-            f"<div><strong>CRITICAL: {len(insecure_files)} file(s) use deprecated or insecure biometric APIs</strong></div>",
-            "<div>Issues detected:</div>",
-            "<ul style='margin-left:20px;'>"
+            "<div><strong style='color:#dc2626;'>🔴 CRITICAL: BiometricPrompt.authenticate() without CryptoObject</strong></div>",
+            "<div style='margin-top:8px;'><strong>Security Impact:</strong> Authentication can be bypassed using Frida on rooted devices.</div>",
+            "<div style='margin-top:8px;'><strong>Attack Vector:</strong></div>",
+            "<ul style='margin-left:20px;'>",
+            "<li>Attacker hooks onAuthenticationSucceeded() callback with Frida</li>",
+            "<li>Triggers callback without valid biometric authentication</li>",
+            "<li>Completely bypasses biometric security</li>",
+            "</ul>",
+            f"<div style='margin-top:8px;'><strong>Vulnerable Code ({len(null_crypto_files)} instance(s)):</strong></div>"
         ]
+        for link, snippet in null_crypto_files[:15]:
+            lines.append(f"{link} → <code>{snippet}</code>")
 
-        deprecated_count = len([f for f in insecure_files if 'FingerprintManager' in open(os.path.join(base, f), errors='ignore').read()])
-        if deprecated_count > 0:
-            lines.append(f"<li>Deprecated FingerprintManager API usage (use BiometricPrompt)</li>")
-
+        lines.append("<br><div><strong>Required Fix:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        lines.append("<li>Create KeyStore key with setUserAuthenticationRequired(true)</li>")
+        lines.append("<li>Create CryptoObject wrapping the key (Cipher/Signature/Mac)</li>")
+        lines.append("<li>Pass CryptoObject to authenticate() method</li>")
+        lines.append("<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate on enrollment changes</li>")
         lines.append("</ul>")
-        lines.append("<div><strong>Files:</strong></div>")
-        for rel in sorted(insecure_files)[:15]:
-            full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+        lines.append("<div style='margin-top:8px;'><strong>Secure Example:</strong></div>")
+        lines.append("<div style='margin-left:20px;background:#f5f5f5;padding:10px;border-radius:4px;'>")
+        lines.append("<code>")
+        lines.append("// 1. Create KeyStore key<br>")
+        lines.append("KeyGenerator keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, \"AndroidKeyStore\");<br>")
+        lines.append("keyGen.init(new KeyGenParameterSpec.Builder(KEY_NAME, PURPOSE_ENCRYPT | PURPOSE_DECRYPT)<br>")
+        lines.append("&nbsp;&nbsp;.setUserAuthenticationRequired(true)<br>")
+        lines.append("&nbsp;&nbsp;.setInvalidatedByBiometricEnrollment(true)<br>")
+        lines.append("&nbsp;&nbsp;.build());<br>")
+        lines.append("SecretKey key = keyGen.generateKey();<br><br>")
+        lines.append("// 2. Create CryptoObject<br>")
+        lines.append("Cipher cipher = Cipher.getInstance(...);<br>")
+        lines.append("cipher.init(Cipher.ENCRYPT_MODE, key);<br>")
+        lines.append("BiometricPrompt.CryptoObject crypto = new BiometricPrompt.CryptoObject(cipher);<br><br>")
+        lines.append("// 3. Authenticate with CryptoObject<br>")
+        lines.append("<strong>biometricPrompt.authenticate(promptInfo, crypto);</strong>  // Secure - cannot be bypassed")
+        lines.append("</code>")
+        lines.append("</div>")
+
+        lines.append("<br><div><strong>OWASP References:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        lines.append("<li><a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0001/' target='_blank'>MASTG-KNOW-0001: BiometricPrompt Security</a></li>")
+        lines.append("<li><a href='https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md' target='_blank'>MASTG Local Authentication Testing</a></li>")
+        lines.append("</ul>")
 
         return 'FAIL', "<br>\n".join(lines)
 
-    # BiometricPrompt found - check if properly secured with CryptoObject
-    if crypto_files:
+    # BiometricPrompt found with secure usage (CryptoObject + KeyStore)
+    if secure_crypto_files or (crypto_object_files and keystore_files):
         lines = [
-            f"<div>✓ Biometric authentication with cryptographic binding detected</div>",
-            f"<div>Found in {len(biometric_files)} file(s), with crypto binding in {len(crypto_files)} file(s)</div>",
+            f"<div>✓ BiometricPrompt with cryptographic binding detected</div>",
+            f"<div>Found in {len(biometric_files)} file(s)</div>",
             "<div><strong>Secure patterns detected:</strong></div>",
-            "<ul style='margin-left:20px;'>",
-            "<li>setUserAuthenticationRequired(true) - Keys bound to biometric auth</li>",
-            "<li>CryptoObject usage - Cryptographic operations protected</li>",
-            "</ul>",
-            "<div><strong>App code files implementing biometric auth:</strong></div>"
+            "<ul style='margin-left:20px;'>"
         ]
+        if secure_crypto_files:
+            lines.append(f"<li>✓ BiometricPrompt.authenticate() with CryptoObject: {len(secure_crypto_files)} file(s)</li>")
+        if crypto_object_files:
+            lines.append(f"<li>✓ CryptoObject usage: {len(crypto_object_files)} file(s)</li>")
+        if keystore_files:
+            lines.append(f"<li>✓ KeyStore integration (setUserAuthenticationRequired): {len(keystore_files)} file(s)</li>")
+        lines.append("</ul>")
+
+        lines.append("<div><strong>App code files implementing biometric auth:</strong></div>")
         for rel in sorted(biometric_files)[:10]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
@@ -5180,16 +5247,16 @@ def check_biometric_auth(base):
 
         return 'PASS', "<br>\n".join(lines)
 
-    # BiometricPrompt used but no crypto binding found
+    # BiometricPrompt used but cannot confirm secure implementation
     lines = [
-        f"<div><strong>WARNING: Biometric authentication without cryptographic binding</strong></div>",
-        f"<div>Found BiometricPrompt usage in {len(biometric_files)} file(s), but no KeyStore crypto binding detected.</div>",
-        "<div><strong>Security Risk:</strong> Authentication may be bypassable if not bound to cryptographic operations.</div>",
-        "<br><div><strong>Recommendation:</strong></div>",
+        f"<div><strong style='color:#d97706;'>⚠ WARNING: BiometricPrompt usage detected, security unclear</strong></div>",
+        f"<div style='margin-top:8px;'>Found BiometricPrompt in {len(biometric_files)} file(s)</div>",
+        "<div style='margin-top:8px;'><strong>Status:</strong> Could not detect authenticate() calls with or without CryptoObject.</div>",
+        "<div><strong>Manual Review Required:</strong></div>",
         "<ul style='margin-left:20px;'>",
-        "<li>Use KeyGenParameterSpec.Builder with setUserAuthenticationRequired(true)</li>",
-        "<li>Pass CryptoObject to BiometricPrompt.authenticate()</li>",
-        "<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate keys on enrollment changes</li>",
+        "<li>Verify authenticate() is called WITH CryptoObject parameter</li>",
+        "<li>Ensure CryptoObject wraps a KeyStore-bound key</li>",
+        "<li>Check setUserAuthenticationRequired(true) is used</li>",
         "</ul>",
         "<div><strong>Files using BiometricPrompt:</strong></div>"
     ]
@@ -5881,13 +5948,15 @@ def check_insecure_randomness(base):
     
 def check_insecure_fingerprint_api(base):
     """
-    MASTG-TEST: Testing Insecure Fingerprint API Implementation
+    MASTG-TEST: Testing Insecure Biometric Authentication Implementation
 
-    Checks for critical FingerprintManager vulnerabilities according to OWASP MASTG:
+    Checks for critical biometric vulnerabilities according to OWASP MASTG:
 
     CRITICAL: authenticate() with null CryptoObject - allows Frida bypass attacks
     FAIL: Deprecated FingerprintManager API usage
-    WARN: FingerprintManager without crypto binding detected
+    WARN: BiometricPrompt/FingerprintManager without crypto binding detected
+
+    Checks BOTH deprecated FingerprintManager AND modern BiometricPrompt APIs.
 
     MASTG Reference: https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md
     """
@@ -5906,22 +5975,17 @@ def check_insecure_fingerprint_api(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    # Detection patterns
+    # Detection patterns for FingerprintManager (deprecated API only)
     fingerprint_manager_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;')
-    authenticate_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;->authenticate')
 
-    # Critical: null CryptoObject - first parameter is CancellationSignal instead of CryptoObject
-    # Signature: authenticate(CryptoObject, CancellationSignal, int, AuthenticationCallback, Handler)
-    # If null: authenticate(CancellationSignal, ...) - missing CryptoObject parameter
-    null_crypto_pat = re.compile(
+    # CRITICAL: authenticate(CancellationSignal, ...) = null CryptoObject
+    null_crypto_fingerprint = re.compile(
         r'invoke-virtual.*Landroid/hardware/fingerprint/FingerprintManager;->authenticate'
-        r'\(Landroid/os/CancellationSignal;'  # First param is CancellationSignal = null CryptoObject
+        r'\(Landroid/os/CancellationSignal;'
     )
 
     # Secure: CryptoObject used
-    crypto_object_pat = re.compile(
-        r'Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;'
-    )
+    crypto_object_pattern = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;')
 
     # KeyStore integration patterns (secure implementation)
     keystore_patterns = [
@@ -5952,12 +6016,12 @@ def check_insecure_fingerprint_api(base):
             except:
                 continue
 
-            # Check for FingerprintManager usage
+            # Check for FingerprintManager usage (deprecated)
             if fingerprint_manager_pat.search(content):
                 fingerprint_files.add(rel_path)
 
             # Check for CryptoObject usage (secure)
-            if crypto_object_pat.search(content):
+            if crypto_object_pattern.search(content):
                 crypto_files.add(rel_path)
 
             # Check for KeyStore integration (secure)
@@ -5968,15 +6032,15 @@ def check_insecure_fingerprint_api(base):
 
             # Check for null CryptoObject vulnerability (CRITICAL)
             for i, line in enumerate(lines, 1):
-                if null_crypto_pat.search(line):
+                if null_crypto_fingerprint.search(line):
                     snippet = html.escape(line.strip()[:120])
                     link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
                     null_crypto_files.append((link, snippet))
                     break
 
-    # No FingerprintManager usage detected
+    # No FingerprintManager API usage detected
     if not fingerprint_files:
-        return 'PASS', "<div>No FingerprintManager API usage detected</div>"
+        return 'PASS', "<div>No FingerprintManager API usage detected in app code</div>"
 
     # CRITICAL: null CryptoObject detected - allows Frida bypass
     if null_crypto_files:
@@ -6019,8 +6083,8 @@ def check_insecure_fingerprint_api(base):
         lines.append("</div>")
 
         lines.append("<br><div><strong>OWASP Reference:</strong> ")
-        lines.append("<a href='https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md' target='_blank'>")
-        lines.append("MASTG Local Authentication Testing</a></div>")
+        lines.append("<a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0002/' target='_blank'>")
+        lines.append("MASTG-KNOW-0002: FingerprintManager Security</a></div>")
 
         return 'FAIL', "<br>\n".join(lines)
 
