@@ -5012,55 +5012,142 @@ def check_key_sizes(base):
 
 def check_biometric_auth(base):
     """
-    Check for proper biometric authentication implementation.
+    MASTG-TEST-0018: Testing Biometric Authentication
+
+    Check for proper biometric authentication implementation in APP CODE.
+    Verifies biometric auth is bound to cryptographic operations via CryptoObject.
+
+    MASTG: https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/
     """
-    # Good patterns (secure biometric usage)
-    secure_patterns = [
-        r'BiometricPrompt\$CryptoObject',
-        r'androidx/biometric/BiometricPrompt\$CryptoObject',
-        r'setNegativeButtonText',  # Required for biometric prompt
-        r'CryptoObject\(',
+    # Patterns indicating BiometricPrompt usage in APP CODE
+    biometric_usage_patterns = [
+        r'BiometricPrompt\$Builder',  # Creating BiometricPrompt
+        r'new-instance.*BiometricPrompt',  # Instantiation in smali
+        r'\.authenticate\(',  # authenticate() call
     ]
 
-    # Basic patterns (potentially insecure)
-    basic_patterns = [
-        r'BiometricPrompt',
-        r'FingerprintManager',
-        r'androidx/biometric/BiometricPrompt',
+    # Secure patterns - CryptoObject + KeyStore binding
+    crypto_patterns = [
+        r'setUserAuthenticationRequired\s*\(\s*true',  # KeyStore bound to auth
+        r'setInvalidatedByBiometricEnrollment',  # Proper invalidation
+        r'new-instance.*BiometricPrompt\$CryptoObject',  # CryptoObject creation in app
     ]
 
-    secure_hits = set()
-    for pat in secure_patterns:
-        secure_hits.update(grep_code(base, pat))
+    # Insecure patterns
+    insecure_patterns = [
+        r'FingerprintManager',  # Deprecated API
+        r'setUserAuthenticationRequired\s*\(\s*false',  # Not bound to auth
+    ]
 
-    basic_hits = set()
-    for pat in basic_patterns:
-        basic_hits.update(grep_code(base, pat))
+    # Find BiometricPrompt usage in APP CODE only (skip library files)
+    biometric_files = set()
+    crypto_files = set()
+    insecure_files = set()
 
-    if not basic_hits:
-        return True, "No biometric authentication detected"
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
 
-    # Check if secure implementation (uses CryptoObject)
-    if secure_hits:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            # SKIP library files - only check APP CODE
+            if any(lib in rel for lib in ['androidx/', 'android/support/', 'com/google/',
+                                          'kotlin/', 'kotlinx/', 'org/jetbrains/']):
+                continue
+
+            try:
+                content = open(full, errors='ignore').read()
+
+                # Check for biometric usage
+                for pat in biometric_usage_patterns:
+                    if re.search(pat, content):
+                        biometric_files.add(rel)
+                        break
+
+                # Check for crypto binding
+                for pat in crypto_patterns:
+                    if re.search(pat, content):
+                        crypto_files.add(rel)
+                        break
+
+                # Check for insecure patterns
+                for pat in insecure_patterns:
+                    if re.search(pat, content):
+                        insecure_files.add(rel)
+                        break
+
+            except Exception:
+                pass
+
+    # No biometric authentication found in app code
+    if not biometric_files and not insecure_files:
+        return 'PASS', "<div>No biometric authentication detected in app code</div>"
+
+    # Check for insecure implementations
+    if insecure_files:
         lines = [
-            f"<div> Biometric authentication with CryptoObject detected</div>",
-            f"<div>Files: {len(secure_hits)}</div>"
+            f"<div><strong>CRITICAL: {len(insecure_files)} file(s) use deprecated or insecure biometric APIs</strong></div>",
+            "<div>Issues detected:</div>",
+            "<ul style='margin-left:20px;'>"
         ]
-        for rel in sorted(secure_hits)[:10]:
+
+        deprecated_count = len([f for f in insecure_files if 'FingerprintManager' in open(os.path.join(base, f), errors='ignore').read()])
+        if deprecated_count > 0:
+            lines.append(f"<li>Deprecated FingerprintManager API usage (use BiometricPrompt)</li>")
+
+        lines.append("</ul>")
+        lines.append("<div><strong>Files:</strong></div>")
+        for rel in sorted(insecure_files)[:15]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
-        return True, "<br>\n".join(lines)
 
-    # Only basic biometric without CryptoObject (insecure)
+        return 'FAIL', "<br>\n".join(lines)
+
+    # BiometricPrompt found - check if properly secured with CryptoObject
+    if crypto_files:
+        lines = [
+            f"<div>✓ Biometric authentication with cryptographic binding detected</div>",
+            f"<div>Found in {len(biometric_files)} file(s), with crypto binding in {len(crypto_files)} file(s)</div>",
+            "<div><strong>Secure patterns detected:</strong></div>",
+            "<ul style='margin-left:20px;'>",
+            "<li>setUserAuthenticationRequired(true) - Keys bound to biometric auth</li>",
+            "<li>CryptoObject usage - Cryptographic operations protected</li>",
+            "</ul>",
+            "<div><strong>App code files implementing biometric auth:</strong></div>"
+        ]
+        for rel in sorted(biometric_files)[:10]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+        lines.append("<br><div><strong>Recommendations:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        lines.append("<li>Verify setInvalidatedByBiometricEnrollment(true) is used</li>")
+        lines.append("<li>Ensure sensitive operations require biometric re-authentication</li>")
+        lines.append("<li>Check for proper error handling in onAuthenticationError()</li>")
+        lines.append("</ul>")
+
+        return 'PASS', "<br>\n".join(lines)
+
+    # BiometricPrompt used but no crypto binding found
     lines = [
-        "<div><strong>WARNING: Biometric authentication without CryptoObject detected</strong></div>",
-        "<div>This may allow authentication bypass. Use BiometricPrompt with CryptoObject.</div>"
+        f"<div><strong>WARNING: Biometric authentication without cryptographic binding</strong></div>",
+        f"<div>Found BiometricPrompt usage in {len(biometric_files)} file(s), but no KeyStore crypto binding detected.</div>",
+        "<div><strong>Security Risk:</strong> Authentication may be bypassable if not bound to cryptographic operations.</div>",
+        "<br><div><strong>Recommendation:</strong></div>",
+        "<ul style='margin-left:20px;'>",
+        "<li>Use KeyGenParameterSpec.Builder with setUserAuthenticationRequired(true)</li>",
+        "<li>Pass CryptoObject to BiometricPrompt.authenticate()</li>",
+        "<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate keys on enrollment changes</li>",
+        "</ul>",
+        "<div><strong>Files using BiometricPrompt:</strong></div>"
     ]
-    for rel in sorted(basic_hits)[:20]:
+    for rel in sorted(biometric_files)[:15]:
         full = os.path.abspath(os.path.join(base, rel))
         lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
 
-    return False, "<br>\n".join(lines)
+    return 'WARN', "<br>\n".join(lines)
 
 def check_flag_secure(base, manifest):
     """
@@ -5744,12 +5831,15 @@ def check_insecure_randomness(base):
     
 def check_insecure_fingerprint_api(base):
     """
-    FAIL if your app code references the deprecated
-    android.hardware.fingerprint.FingerprintManager class
-    or calls its authenticate(...) method directly.
-    Emits clickable file:// links with line numbers and snippet context.
+    MASTG-TEST: Testing Insecure Fingerprint API Implementation
 
-    Filters out library code (AndroidX, OkHttp, Retrofit, etc.)
+    Checks for critical FingerprintManager vulnerabilities according to OWASP MASTG:
+
+    CRITICAL: authenticate() with null CryptoObject - allows Frida bypass attacks
+    FAIL: Deprecated FingerprintManager API usage
+    WARN: FingerprintManager without crypto binding detected
+
+    MASTG Reference: https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md
     """
 
     # Library paths to exclude (not your app code)
@@ -5766,45 +5856,182 @@ def check_insecure_fingerprint_api(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    class_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;')
-    # More specific: only match biometric/fingerprint authenticate calls
-    biometric_auth_pat = re.compile(
-        r'(Landroid/hardware/biometrics/BiometricPrompt;->authenticate'
-        r'|Landroidx/biometric/BiometricPrompt;->authenticate'
-        r'|Landroid/hardware/fingerprint/FingerprintManager;->authenticate)'
+    # Detection patterns
+    fingerprint_manager_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;')
+    authenticate_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;->authenticate')
+
+    # Critical: null CryptoObject - first parameter is CancellationSignal instead of CryptoObject
+    # Signature: authenticate(CryptoObject, CancellationSignal, int, AuthenticationCallback, Handler)
+    # If null: authenticate(CancellationSignal, ...) - missing CryptoObject parameter
+    null_crypto_pat = re.compile(
+        r'invoke-virtual.*Landroid/hardware/fingerprint/FingerprintManager;->authenticate'
+        r'\(Landroid/os/CancellationSignal;'  # First param is CancellationSignal = null CryptoObject
     )
 
-    issues = []
+    # Secure: CryptoObject used
+    crypto_object_pat = re.compile(
+        r'Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;'
+    )
+
+    # KeyStore integration patterns (secure implementation)
+    keystore_patterns = [
+        re.compile(r'setUserAuthenticationRequired'),
+        re.compile(r'setInvalidatedByBiometricEnrollment'),
+    ]
+
+    # Categorize findings
+    fingerprint_files = set()
+    null_crypto_files = []  # CRITICAL - allows Frida bypass
+    crypto_files = set()  # SECURE - uses CryptoObject
+    keystore_files = set()  # SECURE - KeyStore integration
+
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
                 continue
             path = os.path.join(root, fn)
-
-            # Skip all library code
             rel_path = os.path.relpath(path, base)
+
+            # Skip library code
             if is_library_path(rel_path):
                 continue
 
             try:
-                lines = open(path, errors='ignore').read().splitlines()
+                content = open(path, errors='ignore').read()
+                lines = content.splitlines()
             except:
                 continue
 
+            # Check for FingerprintManager usage
+            if fingerprint_manager_pat.search(content):
+                fingerprint_files.add(rel_path)
+
+            # Check for CryptoObject usage (secure)
+            if crypto_object_pat.search(content):
+                crypto_files.add(rel_path)
+
+            # Check for KeyStore integration (secure)
+            for pat in keystore_patterns:
+                if pat.search(content):
+                    keystore_files.add(rel_path)
+                    break
+
+            # Check for null CryptoObject vulnerability (CRITICAL)
             for i, line in enumerate(lines, 1):
-                if class_pat.search(line) or biometric_auth_pat.search(line):
-                    snippet = html.escape(line.strip())
-                    link = (
-                        f'<a href="file://{html.escape(path)}">'
-                        f'{html.escape(rel_path)}:{i}</a>'
-                    )
-                    issues.append(f"{link} – <code>{snippet}</code>")
-                    break  # only first hit per file
+                if null_crypto_pat.search(line):
+                    snippet = html.escape(line.strip()[:120])
+                    link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
+                    null_crypto_files.append((link, snippet))
+                    break
 
-    if not issues:
-        return True, "None"
+    # No FingerprintManager usage detected
+    if not fingerprint_files:
+        return 'PASS', "<div>No FingerprintManager API usage detected</div>"
 
-    return False, "<br>\n".join(issues)
+    # CRITICAL: null CryptoObject detected - allows Frida bypass
+    if null_crypto_files:
+        lines = [
+            "<div><strong style='color:#dc2626;'>🔴 CRITICAL: FingerprintManager.authenticate() with NULL CryptoObject</strong></div>",
+            "<div style='margin-top:8px;'><strong>Security Impact:</strong> Authentication can be bypassed using Frida on rooted devices.</div>",
+            "<div style='margin-top:8px;'><strong>Attack Vector:</strong></div>",
+            "<ul style='margin-left:20px;'>",
+            "<li>Attacker hooks onAuthenticationSucceeded() callback with Frida</li>",
+            "<li>Triggers callback without valid biometric authentication</li>",
+            "<li>Completely bypasses fingerprint security</li>",
+            "</ul>",
+            f"<div style='margin-top:8px;'><strong>Vulnerable Code ({len(null_crypto_files)} file(s)):</strong></div>"
+        ]
+        for link, snippet in null_crypto_files[:15]:
+            lines.append(f"{link} → <code>{snippet}</code>")
+
+        lines.append("<br><div><strong>Required Fix:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        lines.append("<li>Create KeyStore key with setUserAuthenticationRequired(true)</li>")
+        lines.append("<li>Create CryptoObject wrapping the key</li>")
+        lines.append("<li>Pass CryptoObject as first parameter to authenticate()</li>")
+        lines.append("<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate on enrollment changes</li>")
+        lines.append("</ul>")
+
+        lines.append("<div style='margin-top:8px;'><strong>Secure Example:</strong></div>")
+        lines.append("<div style='margin-left:20px;background:#f5f5f5;padding:10px;border-radius:4px;'>")
+        lines.append("<code>")
+        lines.append("KeyGenerator keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, \"AndroidKeyStore\");<br>")
+        lines.append("keyGen.init(new KeyGenParameterSpec.Builder(KEY_NAME, PURPOSE_ENCRYPT | PURPOSE_DECRYPT)<br>")
+        lines.append("&nbsp;&nbsp;.setUserAuthenticationRequired(true)<br>")
+        lines.append("&nbsp;&nbsp;.setInvalidatedByBiometricEnrollment(true)<br>")
+        lines.append("&nbsp;&nbsp;.build());<br>")
+        lines.append("SecretKey key = keyGen.generateKey();<br>")
+        lines.append("Cipher cipher = Cipher.getInstance(...);<br>")
+        lines.append("cipher.init(Cipher.ENCRYPT_MODE, key);<br>")
+        lines.append("FingerprintManager.CryptoObject crypto = new FingerprintManager.CryptoObject(cipher);<br>")
+        lines.append("<strong>fingerprintManager.authenticate(crypto, ...);</strong>  // Secure - cannot be bypassed")
+        lines.append("</code>")
+        lines.append("</div>")
+
+        lines.append("<br><div><strong>OWASP Reference:</strong> ")
+        lines.append("<a href='https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md' target='_blank'>")
+        lines.append("MASTG Local Authentication Testing</a></div>")
+
+        return 'FAIL', "<br>\n".join(lines)
+
+    # FingerprintManager used - check for crypto binding
+    if crypto_files or keystore_files:
+        # Potentially secure - but still using deprecated API
+        lines = [
+            f"<div><strong style='color:#d97706;'>⚠ WARNING: Deprecated FingerprintManager API with crypto binding detected</strong></div>",
+            f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
+            "<div style='margin-top:8px;'><strong>Status:</strong></div>",
+            "<ul style='margin-left:20px;'>"
+        ]
+
+        if crypto_files:
+            lines.append(f"<li>✓ CryptoObject usage detected in {len(crypto_files)} file(s)</li>")
+        if keystore_files:
+            lines.append(f"<li>✓ KeyStore integration detected in {len(keystore_files)} file(s)</li>")
+
+        lines.append("</ul>")
+        lines.append("<div style='margin-top:8px;'><strong>Issue:</strong> FingerprintManager is deprecated since Android 9.0 (API 28)</div>")
+        lines.append("<div><strong>Recommendation:</strong> Migrate to androidx.biometric.BiometricPrompt</div>")
+
+        lines.append("<div style='margin-top:8px;'><strong>Files using FingerprintManager:</strong></div>")
+        for rel in sorted(fingerprint_files)[:15]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+        lines.append("<br><div><strong>Migration Guide:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        lines.append("<li>Replace FingerprintManager with BiometricPrompt</li>")
+        lines.append("<li>Use BiometricPrompt.CryptoObject instead</li>")
+        lines.append("<li>Maintain KeyStore crypto binding (setUserAuthenticationRequired)</li>")
+        lines.append("</ul>")
+
+        return 'WARN', "<br>\n".join(lines)
+
+    # FingerprintManager used without crypto binding - potentially vulnerable
+    lines = [
+        f"<div><strong style='color:#dc2626;'>❌ FAIL: FingerprintManager without cryptographic binding</strong></div>",
+        f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
+        "<div style='margin-top:8px;'><strong>Security Risks:</strong></div>",
+        "<ul style='margin-left:20px;'>",
+        "<li>Likely using null CryptoObject (allows Frida bypass)</li>",
+        "<li>Deprecated API since Android 9.0 (API 28)</li>",
+        "<li>No KeyStore crypto binding detected</li>",
+        "</ul>",
+        "<div style='margin-top:8px;'><strong>Files:</strong></div>"
+    ]
+
+    for rel in sorted(fingerprint_files)[:15]:
+        full = os.path.abspath(os.path.join(base, rel))
+        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    lines.append("<br><div><strong>Required Actions:</strong></div>")
+    lines.append("<ol style='margin-left:20px;'>")
+    lines.append("<li>Manual review required - check if authenticate() uses CryptoObject or null</li>")
+    lines.append("<li>If null: CRITICAL vulnerability - implement CryptoObject with KeyStore</li>")
+    lines.append("<li>Migrate to androidx.biometric.BiometricPrompt</li>")
+    lines.append("</ol>")
+
+    return 'FAIL', "<br>\n".join(lines)
 
     
 def check_tls_versions(base):
@@ -7622,6 +7849,580 @@ def check_storage_analysis(base, package_name):
     return status, "<br>\n".join(detail)
 
 
+def check_pending_intent_flags(base):
+    """
+    MASTG-TEST-0030: Vulnerable Implementation of PendingIntent
+
+    Check for PendingIntent usage without FLAG_IMMUTABLE (Android 12+).
+    Mutable PendingIntents can be hijacked by malicious apps.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/
+    """
+    pending_intent_patterns = [
+        r'PendingIntent\.getActivity',
+        r'PendingIntent\.getBroadcast',
+        r'PendingIntent\.getService',
+        r'PendingIntent\.getForegroundService',
+    ]
+
+    flag_immutable = r'PendingIntent\.FLAG_IMMUTABLE'
+    flag_mutable = r'PendingIntent\.FLAG_MUTABLE'
+    flag_update = r'PendingIntent\.FLAG_UPDATE_CURRENT'
+
+    vulnerable_files = []
+    mutable_files = []
+    update_current_files = []
+    immutable_files = set()
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            try:
+                content = open(full, errors='ignore').read()
+                has_pending_intent = any(re.search(pat, content) for pat in pending_intent_patterns)
+                if not has_pending_intent:
+                    continue
+
+                has_immutable = re.search(flag_immutable, content)
+                has_mutable = re.search(flag_mutable, content)
+                has_update_current = re.search(flag_update, content)
+
+                if has_immutable:
+                    immutable_files.add(rel)
+                elif has_mutable:
+                    mutable_files.append(rel)
+                elif has_update_current:
+                    update_current_files.append(rel)
+                else:
+                    vulnerable_files.append(rel)
+            except Exception:
+                pass
+
+    if not immutable_files and not vulnerable_files and not mutable_files and not update_current_files:
+        return 'PASS', "No PendingIntent usage detected"
+
+    issues = []
+    status = 'PASS'
+
+    if vulnerable_files or mutable_files:
+        status = 'FAIL'
+        if vulnerable_files:
+            issues.append(
+                f"<div><strong>CRITICAL: {len(vulnerable_files)} file(s) create PendingIntent without FLAG_IMMUTABLE</strong></div>"
+            )
+            issues.append("<div>This is required on Android 12+ (API 31+) and prevents intent hijacking.</div>")
+            for rel in vulnerable_files[:15]:
+                full = os.path.abspath(os.path.join(base, rel))
+                issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+        if mutable_files:
+            issues.append(
+                f"<div><strong>CRITICAL: {len(mutable_files)} file(s) explicitly use FLAG_MUTABLE</strong></div>"
+            )
+            issues.append("<div>Mutable PendingIntents allow the recipient to modify the underlying Intent.</div>")
+            for rel in mutable_files[:15]:
+                full = os.path.abspath(os.path.join(base, rel))
+                issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    if update_current_files:
+        if status == 'PASS':
+            status = 'WARN'
+        issues.append(
+            f"<div>WARNING: {len(update_current_files)} file(s) use FLAG_UPDATE_CURRENT</div>"
+        )
+        issues.append(
+            "<div>On Android 12+, combine with FLAG_IMMUTABLE: <code>FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE</code></div>"
+        )
+        for rel in update_current_files[:15]:
+            full = os.path.abspath(os.path.join(base, rel))
+            issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    if immutable_files and status == 'PASS':
+        issues.append(f"<div>✓ FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
+
+    if not issues:
+        return 'PASS', "All PendingIntents properly secured with FLAG_IMMUTABLE"
+
+    return status, "<br>\n".join(issues)
+
+
+def check_webview_ssl_error_handling(base):
+    """
+    MASTG-TEST-0284: Incorrect SSL Error Handling in WebViews
+
+    Detect WebViewClient.onReceivedSslError() implementations that accept
+    all certificates by calling proceed() without validation.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0284/
+    """
+    vulnerable_files = []
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            try:
+                with open(full, errors='ignore') as f:
+                    lines = f.readlines()
+
+                in_ssl_error_method = False
+
+                for i, line in enumerate(lines, 1):
+                    if 'onReceivedSslError' in line and '.method' in line:
+                        in_ssl_error_method = True
+
+                    if in_ssl_error_method:
+                        if 'invoke-' in line and 'proceed' in line and 'SslErrorHandler' in line:
+                            snippet = html.escape(lines[i-1].strip()[:100])
+                            link = f'<a href="file://{html.escape(full)}#L{i}">{html.escape(rel)}:{i}</a>'
+                            vulnerable_files.append(f"{link} ⟶ <code>{snippet}</code>")
+                            in_ssl_error_method = False
+                            break
+
+                        if '.end method' in line:
+                            in_ssl_error_method = False
+            except Exception:
+                pass
+
+    if not vulnerable_files:
+        return 'PASS', "No insecure SSL error handling detected in WebViews"
+
+    result = [
+        f"<div><strong>CRITICAL: {len(vulnerable_files)} SSL error handler(s) bypass certificate validation</strong></div>",
+        "<div>WebViewClient.onReceivedSslError() calls proceed(), accepting all certificates.</div>",
+        "<div>This allows man-in-the-middle attacks. Use cancel() instead.</div>",
+        "<br>".join(vulnerable_files[:20])
+    ]
+
+    return 'FAIL', "<br>\n".join(result)
+
+
+def check_recent_screenshot_disabled(base):
+    """
+    MASTG-TEST-0292: setRecentsScreenshotEnabled Not Used
+
+    Check if setRecentsScreenshotEnabled(false) is used to prevent
+    sensitive data in recent tasks screenshot (Android 13+).
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0292/
+    """
+    protection_patterns = [
+        r'setRecentsScreenshotEnabled\s*\(\s*false',
+        r'setExcludeFromRecents\s*\(\s*true',
+        r'excludeFromRecents\s*=\s*["\']true',
+    ]
+
+    protected_files = set()
+
+    for pat in protection_patterns:
+        for root, _, files in os.walk(base):
+            for fn in files:
+                if not fn.endswith(('.smali', '.java', '.xml')):
+                    continue
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, base)
+
+                try:
+                    if re.search(pat, open(full, errors='ignore').read()):
+                        protected_files.add(rel)
+                except Exception:
+                    pass
+
+    if protected_files:
+        lines = [
+            f"<div>✓ Recent screenshot protection detected in {len(protected_files)} file(s)</div>",
+            "<div>setRecentsScreenshotEnabled(false) prevents sensitive data in task switcher.</div>"
+        ]
+        for rel in sorted(protected_files)[:10]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        return 'PASS', "<br>\n".join(lines)
+
+    return 'WARN', (
+        "<div>No recent screenshot protection detected</div>"
+        "<div>Recommendation: Use <code>Activity.setRecentsScreenshotEnabled(false)</code> "
+        "on activities displaying sensitive data (Android 13+).</div>"
+        "<div>This prevents screenshots from appearing in the recent tasks overview.</div>"
+    )
+
+
+def check_dangerous_permissions(manifest):
+    """
+    MASTG-TEST-0254/0255: Dangerous App Permissions Analysis
+
+    Analyze all requested permissions and flag dangerous ones.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/
+    """
+    dangerous_permissions = {
+        'ACCESS_FINE_LOCATION': 'Location (Precise)', 'ACCESS_COARSE_LOCATION': 'Location (Approximate)',
+        'ACCESS_BACKGROUND_LOCATION': 'Location (Background)', 'CAMERA': 'Camera',
+        'RECORD_AUDIO': 'Microphone', 'READ_CONTACTS': 'Contacts (Read)',
+        'WRITE_CONTACTS': 'Contacts (Write)', 'READ_PHONE_STATE': 'Phone (State)',
+        'READ_PHONE_NUMBERS': 'Phone (Numbers)', 'CALL_PHONE': 'Phone (Make Calls)',
+        'READ_CALL_LOG': 'Phone (Call Log)', 'WRITE_CALL_LOG': 'Phone (Call Log Write)',
+        'SEND_SMS': 'SMS (Send)', 'RECEIVE_SMS': 'SMS (Receive)', 'READ_SMS': 'SMS (Read)',
+        'READ_EXTERNAL_STORAGE': 'Storage (Read)', 'WRITE_EXTERNAL_STORAGE': 'Storage (Write)',
+        'READ_MEDIA_IMAGES': 'Media (Images)', 'READ_MEDIA_VIDEO': 'Media (Video)',
+        'READ_CALENDAR': 'Calendar (Read)', 'WRITE_CALENDAR': 'Calendar (Write)',
+        'BODY_SENSORS': 'Body Sensors', 'ACTIVITY_RECOGNITION': 'Activity Recognition',
+        'BLUETOOTH_SCAN': 'Bluetooth (Scan)', 'POST_NOTIFICATIONS': 'Notifications',
+    }
+
+    critical_permissions = {
+        'ACCESS_BACKGROUND_LOCATION', 'RECORD_AUDIO', 'CAMERA', 'READ_SMS',
+        'SEND_SMS', 'READ_CALL_LOG', 'WRITE_CALL_LOG',
+    }
+
+    try:
+        tree = ET.parse(manifest)
+        root = tree.getroot()
+    except Exception as e:
+        return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>"
+
+    permissions = []
+    for perm in root.findall('.//{http://schemas.android.com/apk/res/android}uses-permission'):
+        name = perm.get('{http://schemas.android.com/apk/res/android}name', '')
+        if name.startswith('android.permission.'):
+            permissions.append(name.replace('android.permission.', ''))
+
+    if not permissions:
+        return 'PASS', "<div>No dangerous permissions requested</div>"
+
+    dangerous_found = []
+    critical_found = []
+    normal_found = []
+
+    for perm in permissions:
+        if perm in dangerous_permissions:
+            if perm in critical_permissions:
+                critical_found.append((perm, dangerous_permissions[perm]))
+            else:
+                dangerous_found.append((perm, dangerous_permissions[perm]))
+        else:
+            normal_found.append(perm)
+
+    lines = []
+    status = 'PASS'
+
+    if critical_found:
+        status = 'WARN'
+        lines.append(f"<div><strong>⚠ {len(critical_found)} CRITICAL permission(s) requested:</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        for perm, desc in critical_found:
+            lines.append(
+                f"<li><code>{perm}</code> - {desc} <span style='color:#d97706;'>[High Privacy Risk]</span></li>"
+            )
+        lines.append("</ul>")
+        lines.append("<div><strong>Verify:</strong> Are these absolutely necessary for core functionality?</div>")
+
+    if dangerous_found:
+        if status == 'PASS':
+            status = 'WARN'
+        lines.append(f"<div><strong>{len(dangerous_found)} dangerous permission(s):</strong></div>")
+        lines.append("<ul style='margin-left:20px;'>")
+        for perm, desc in dangerous_found:
+            lines.append(f"<li><code>{perm}</code> - {desc}</li>")
+        lines.append("</ul>")
+
+    if normal_found:
+        lines.append(f"<div>{len(normal_found)} normal permission(s): {', '.join(['<code>' + p + '</code>' for p in normal_found[:5]])}")
+        if len(normal_found) > 5:
+            lines.append(f" and {len(normal_found) - 5} more...")
+        lines.append("</div>")
+
+    lines.append("<br><div><strong>MASTG Recommendations:</strong></div>")
+    lines.append("<ul style='margin-left:20px;'>")
+    lines.append("<li>Request permissions at runtime, not installation</li>")
+    lines.append("<li>Provide clear rationale before requesting</li>")
+    lines.append("<li>Request only when needed</li>")
+    lines.append("</ul>")
+
+    return status, "<br>\n".join(lines)
+
+
+def check_datastore_encryption(base):
+    """
+    MASTG-TEST-0305: Sensitive Data via DataStore
+
+    Check for Jetpack DataStore usage IN APP CODE and verify encryption.
+    Filters out androidx library files.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0305/
+    """
+    # Library paths to exclude
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        """Check if path is library code"""
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
+    # DataStore API usage patterns (in smali)
+    datastore_patterns = [
+        r'Landroidx/datastore/core/DataStore;',
+        r'Landroidx/datastore/preferences/core/Preferences;',
+        r'createDataStore',
+        r'preferencesDataStore',
+    ]
+
+    # Encryption patterns
+    encryption_patterns = [
+        r'Landroidx/security/crypto/EncryptedFile;',
+        r'Landroidx/security/crypto/MasterKey;',
+        r'Lcom/google/crypto/tink/',
+    ]
+
+    datastore_files = set()
+    encrypted_files = set()
+
+    # Scan for DataStore usage in APP CODE only
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
+
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            # SKIP library files
+            if is_library_path(rel):
+                continue
+
+            try:
+                content = open(full, errors='ignore').read()
+
+                # Check for DataStore usage
+                for pat in datastore_patterns:
+                    if re.search(pat, content):
+                        datastore_files.add(rel)
+                        break
+
+                # Check for encryption
+                for pat in encryption_patterns:
+                    if re.search(pat, content):
+                        encrypted_files.add(rel)
+                        break
+
+            except Exception:
+                pass
+
+    if not datastore_files:
+        return 'PASS', "<div>No Jetpack DataStore usage detected in app code</div>"
+
+    if encrypted_files:
+        lines = [
+            f"<div>✓ DataStore encryption detected in {len(encrypted_files)} file(s)</div>",
+            "<div>App code uses EncryptedFile or Tink with DataStore.</div>"
+        ]
+        for rel in sorted(encrypted_files)[:5]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        return 'PASS', "<br>\n".join(lines)
+
+    lines = [
+        f"<div><strong>WARNING: {len(datastore_files)} file(s) in app code use DataStore without encryption</strong></div>",
+        "<div>DataStore stores data in plaintext by default.</div>",
+        "<div>Recommendation: Use <code>EncryptedFile</code> with Tink or <code>MasterKey</code>.</div>",
+        "<br><div><strong>App code files using DataStore:</strong></div>"
+    ]
+    for rel in sorted(datastore_files)[:15]:
+        full = os.path.abspath(os.path.join(base, rel))
+        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    return 'WARN', "<br>\n".join(lines)
+
+
+def check_room_encryption(base):
+    """
+    MASTG-TEST-0306: Sensitive Data via Android Room DB
+
+    Check for Room database usage IN APP CODE and verify SQLCipher encryption.
+    Filters out androidx library files.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0306/
+    """
+    # Library paths to exclude
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        """Check if path is library code"""
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
+    # Room API usage patterns (in smali)
+    room_patterns = [
+        r'Landroidx/room/Database;',
+        r'Landroidx/room/RoomDatabase;',
+        r'Landroidx/room/Room;->databaseBuilder',
+        r'@Database\(',  # Annotation
+    ]
+
+    # SQLCipher encryption patterns
+    encryption_patterns = [
+        r'Lnet/sqlcipher/',
+        r'SQLCipherUtils',
+        r'SupportFactory',
+    ]
+
+    room_files = set()
+    encrypted_files = set()
+
+    # Scan for Room usage in APP CODE only
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
+
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            # SKIP library files
+            if is_library_path(rel):
+                continue
+
+            try:
+                content = open(full, errors='ignore').read()
+
+                # Check for Room usage
+                for pat in room_patterns:
+                    if re.search(pat, content):
+                        room_files.add(rel)
+                        break
+
+                # Check for encryption
+                for pat in encryption_patterns:
+                    if re.search(pat, content):
+                        encrypted_files.add(rel)
+                        break
+
+            except Exception:
+                pass
+
+    if not room_files:
+        return 'PASS', "<div>No Room database usage detected in app code</div>"
+
+    if encrypted_files:
+        lines = [
+            f"<div>✓ Room database encryption detected in {len(encrypted_files)} file(s)</div>",
+            "<div>App code uses SQLCipher with Room.</div>"
+        ]
+        for rel in sorted(encrypted_files)[:5]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        return 'PASS', "<br>\n".join(lines)
+
+    lines = [
+        f"<div><strong>WARNING: {len(room_files)} file(s) in app code use Room database without encryption</strong></div>",
+        "<div>Room databases are stored in plaintext by default.</div>",
+        "<div>Recommendation: Use SQLCipher with Room via <code>SupportFactory</code>.</div>",
+        "<br><div><strong>App code files using Room:</strong></div>"
+    ]
+    for rel in sorted(room_files)[:15]:
+        full = os.path.abspath(os.path.join(base, rel))
+        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    return 'WARN', "<br>\n".join(lines)
+
+
+def check_anti_debugging(base):
+    """
+    MASTG-TEST-0046: Testing Anti-Debugging Detection
+
+    Detect anti-debugging mechanisms.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0046/
+    """
+    anti_debug_patterns = [
+        (r'Debug\.isDebuggerConnected', 'isDebuggerConnected()'),
+        (r'Debug\.waitingForDebugger', 'waitingForDebugger()'),
+        (r'ApplicationInfo\.FLAG_DEBUGGABLE', 'FLAG_DEBUGGABLE check'),
+        (r'TracerPid', 'TracerPid check (native)'),
+    ]
+
+    detections = defaultdict(list)
+
+    for pat, desc in anti_debug_patterns:
+        for rel in grep_code(base, pat):
+            detections[desc].append(rel)
+
+    if not detections:
+        return 'WARN', (
+            "<div>No anti-debugging mechanisms detected</div>"
+            "<div>Acceptable for most apps. Only implement for sensitive apps requiring anti-reverse-engineering.</div>"
+        )
+
+    lines = [f"<div>✓ {len(detections)} anti-debugging mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
+
+    for mechanism, files in sorted(detections.items()):
+        lines.append(f"<li><strong>{mechanism}</strong> in {len(files)} file(s)</li>")
+        for rel in sorted(files)[:3]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f"  <a href='file://{html.escape(full)}'>{html.escape(rel)}</a>")
+        if len(files) > 3:
+            lines.append(f"  ... and {len(files) - 3} more")
+
+    lines.append("</ul>")
+    return 'PASS', "<br>\n".join(lines)
+
+
+def check_gms_security_provider(base):
+    """
+    MASTG-TEST-0023/0295: Testing the Security Provider
+
+    Check if GMS ProviderInstaller is used to update security provider.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0023/
+    """
+    provider_patterns = [
+        r'ProviderInstaller\.installIfNeeded',
+        r'ProviderInstaller\.installIfNeededAsync',
+        r'com/google/android/gms/security/ProviderInstaller',
+    ]
+
+    provider_files = set()
+    for pat in provider_patterns:
+        for rel in grep_code(base, pat):
+            provider_files.add(rel)
+
+    if provider_files:
+        lines = [
+            f"<div>✓ GMS ProviderInstaller usage detected in {len(provider_files)} file(s)</div>",
+            "<div>Security provider will be updated with latest crypto patches.</div>"
+        ]
+        for rel in sorted(provider_files)[:5]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        return 'PASS', "<br>\n".join(lines)
+
+    return 'WARN', (
+        "<div>No GMS ProviderInstaller usage detected</div>"
+        "<div>Recommendation: Call <code>ProviderInstaller.installIfNeeded(context)</code> at app startup.</div>"
+        "<div>This updates the security provider with fixes for Heartbleed, POODLE, etc.</div>"
+    )
+
+
 def print_banner():
     banner = r"""
      ___   ____  _____ _____ 
@@ -7697,6 +8498,8 @@ def main():
                 "External Storage Usage",
                 "Keyboard Cache",
                 "Storage Analysis",
+                "DataStore Encryption",
+                "Room Database Encryption",
             ]
         },
         "MASVS-CRYPTO": {
@@ -7728,6 +8531,8 @@ def main():
                 "Network Security Config",
                 "Insecure HTTP URIs",
                 "Use of TLS 1.0 or 1.1",
+                "WebView SSL Error Handling",
+                "GMS Security Provider",
             ]
         },
         "MASVS-PLATFORM": {
@@ -7742,8 +8547,10 @@ def main():
                 "Allow Backup",
                 "StrictMode APIs",
                 "FLAG_SECURE Usage",
+                "Recent Screenshot Protection",
                 "WebView JavaScript Bridges",
                 "Clipboard Security",
+                "PendingIntent Flags",
             ]
         },
         "MASVS-CODE": {
@@ -7774,6 +8581,7 @@ def main():
                 "Dynamic StrictMode",
                 "StrictMode APIs",
                 "Root Detection",
+                "Anti-Debugging",
             ]
         },
         "MASVS-PRIVACY": {
@@ -7785,6 +8593,7 @@ def main():
                 "Kotlin Metadata",
                 "Logging Statements",
                 "Clipboard Security",
+                "Dangerous Permissions",
             ]
         },
     }
@@ -7890,6 +8699,15 @@ def main():
         ("Keyboard Cache",          lambda: check_keyboard_cache(base, manifest)),
         ("Raw SQL Queries",         lambda: check_raw_sql_queries(base)),
         ("Insecure Package Context", lambda: check_package_context(base)),
+        # NEW MASTG TESTS (2025-11-26)
+        ("PendingIntent Flags",     lambda: check_pending_intent_flags(base)),
+        ("WebView SSL Error Handling", lambda: check_webview_ssl_error_handling(base)),
+        ("Recent Screenshot Protection", lambda: check_recent_screenshot_disabled(base)),
+        ("Dangerous Permissions",   lambda: check_dangerous_permissions(manifest)),
+        ("DataStore Encryption",    lambda: check_datastore_encryption(base)),
+        ("Room Database Encryption", lambda: check_room_encryption(base)),
+        ("Anti-Debugging",          lambda: check_anti_debugging(base)),
+        ("GMS Security Provider",   lambda: check_gms_security_provider(base)),
     ]
     html_special = {
         "X509TrustManager Methods", "Kotlin Assertions",
@@ -7914,6 +8732,11 @@ def main():
         "Keyboard Cache",
         "Raw SQL Queries",          "Insecure Package Context",
         "PII via Ble Wi-Fi Info",   "PII via Location Info",
+        # NEW MASTG TESTS
+        "PendingIntent Flags",      "WebView SSL Error Handling",
+        "Recent Screenshot Protection", "Dangerous Permissions",
+        "DataStore Encryption",     "Room Database Encryption",
+        "Anti-Debugging",           "GMS Security Provider",
     }
 
     # Interactive test selection
