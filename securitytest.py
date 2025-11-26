@@ -5169,51 +5169,19 @@ def check_biometric_auth(base):
     # CRITICAL: BiometricPrompt.authenticate() without CryptoObject - allows Frida bypass
     if null_crypto_files:
         lines = [
-            "<div><strong style='color:#dc2626;'>🔴 CRITICAL: BiometricPrompt.authenticate() without CryptoObject</strong></div>",
-            "<div style='margin-top:8px;'><strong>Security Impact:</strong> Authentication can be bypassed using Frida on rooted devices.</div>",
-            "<div style='margin-top:8px;'><strong>Attack Vector:</strong></div>",
-            "<ul style='margin-left:20px;'>",
-            "<li>Attacker hooks onAuthenticationSucceeded() callback with Frida</li>",
-            "<li>Triggers callback without valid biometric authentication</li>",
-            "<li>Completely bypasses biometric security</li>",
-            "</ul>",
-            f"<div style='margin-top:8px;'><strong>Vulnerable Code ({len(null_crypto_files)} instance(s)):</strong></div>"
+            f"<div><strong>Vulnerable Code ({len(null_crypto_files)} instance(s)):</strong></div>"
         ]
+
         for link, snippet in null_crypto_files[:15]:
+            # e.g. smali_classes3/.../BiometricPromptManager.smali:256 → invoke-virtual {...}
             lines.append(f"{link} → <code>{snippet}</code>")
 
-        lines.append("<br><div><strong>Required Fix:</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
-        lines.append("<li>Create KeyStore key with setUserAuthenticationRequired(true)</li>")
-        lines.append("<li>Create CryptoObject wrapping the key (Cipher/Signature/Mac)</li>")
-        lines.append("<li>Pass CryptoObject to authenticate() method</li>")
-        lines.append("<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate on enrollment changes</li>")
-        lines.append("</ul>")
-
-        lines.append("<div style='margin-top:8px;'><strong>Secure Example:</strong></div>")
-        lines.append("<div style='margin-left:20px;background:#f5f5f5;padding:10px;border-radius:4px;'>")
-        lines.append("<code>")
-        lines.append("// 1. Create KeyStore key<br>")
-        lines.append("KeyGenerator keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, \"AndroidKeyStore\");<br>")
-        lines.append("keyGen.init(new KeyGenParameterSpec.Builder(KEY_NAME, PURPOSE_ENCRYPT | PURPOSE_DECRYPT)<br>")
-        lines.append("&nbsp;&nbsp;.setUserAuthenticationRequired(true)<br>")
-        lines.append("&nbsp;&nbsp;.setInvalidatedByBiometricEnrollment(true)<br>")
-        lines.append("&nbsp;&nbsp;.build());<br>")
-        lines.append("SecretKey key = keyGen.generateKey();<br><br>")
-        lines.append("// 2. Create CryptoObject<br>")
-        lines.append("Cipher cipher = Cipher.getInstance(...);<br>")
-        lines.append("cipher.init(Cipher.ENCRYPT_MODE, key);<br>")
-        lines.append("BiometricPrompt.CryptoObject crypto = new BiometricPrompt.CryptoObject(cipher);<br><br>")
-        lines.append("// 3. Authenticate with CryptoObject<br>")
-        lines.append("<strong>biometricPrompt.authenticate(promptInfo, crypto);</strong>  // Secure - cannot be bypassed")
-        lines.append("</code>")
-        lines.append("</div>")
-
-        lines.append("<br><div><strong>OWASP References:</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
-        lines.append("<li><a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0001/' target='_blank'>MASTG-KNOW-0001: BiometricPrompt Security</a></li>")
-        lines.append("<li><a href='https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md' target='_blank'>MASTG Local Authentication Testing</a></li>")
-        lines.append("</ul>")
+        # Link to the MASTG test case
+        lines.append(
+            "<br><div><strong>Reference:</strong> "
+            "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0017/' "
+            "target='_blank'>MASTG-TEST-0017: Testing Biometric Authentication</a></div>"
+        )
 
         return 'FAIL', "<br>\n".join(lines)
 
@@ -8958,6 +8926,17 @@ def main():
                 cls = 'warn'
             else:  # FAIL
                 status = f"FAIL ({cnt})" if cnt > 0 else "FAIL"
+                cls = 'fail'
+        elif name == "Biometric Authentication":
+            # Keep this simple: explicit FAIL (1), no automatic counting from HTML
+            if ok == 'PASS':
+                status = "PASS"
+                cls = 'pass'
+            elif ok == 'WARN':
+                status = "WARN"
+                cls = 'warn'
+            else:  # FAIL
+                status = "FAIL (1)"
                 cls = 'fail'
         elif isinstance(ok, str):
             # New format with explicit status
