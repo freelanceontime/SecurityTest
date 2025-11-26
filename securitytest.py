@@ -4355,21 +4355,40 @@ def check_sharedprefs_encryption(base):
     FAIL if plain SharedPreferences found without encryption.
     Shows actual API calls with context for better understanding.
     """
-    # Exclude library/framework files
+    # Exclude library/framework files - comprehensive list
     exclude_patterns = [
         r'androidx/',
         r'android/support/',
         r'com/google/android/gms/',
         r'com/google/firebase/',
         r'com/google/crypto/tink/',
+        r'com/google/android/play/',
         r'androidx/work/',
         r'mono/android/',
         r'com/google/android/exoplayer',
         r'/core/content/',
         r'/internal/',
+        r'kotlin/',
+        r'kotlinx/',
+        r'okhttp3/',
+        r'retrofit2/',
+        r'com/squareup/',
+        r'com/facebook/',
+        # Popular third-party libraries
+        r'com/skydoves/balloon/',      # Balloon tooltip library
+        r'com/yariksoffice/lingver/',   # Lingver localization library
+        r'com/github/mikephil/charting/',  # MPAndroidChart
+        r'com/permissionx/guolindev/',     # PermissionX
+        r'com/bumptech/glide/',            # Glide
+        r'com/airbnb/lottie/',             # Lottie
+        r'io/reactivex/',                  # RxJava
+        r'com/jakewharton/',               # JakeWharton libraries
+        r'/lib/',
+        r'/jetified-',
     ]
 
     def is_library_file(path):
+        """Check if path is library code"""
         return any(re.search(pattern, path) for pattern in exclude_patterns)
 
     # Find actual SharedPreferences calls with context
@@ -4437,19 +4456,19 @@ def check_sharedprefs_encryption(base):
     unencrypted_count = len(findings['unencrypted'])
 
     if unencrypted_count == 0 and encrypted_count == 0:
-        return 'PASS', f"<div>No SharedPreferences usage detected</div><div>Scanned {scanned_files} files</div>"
+        return 'PASS', f"<div>No SharedPreferences usage detected in app code</div><div>Scanned {scanned_files} app code files</div>"
 
     if unencrypted_count == 0:
-        return 'PASS', f"<div> All SharedPreferences usage is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>"
+        return 'PASS', f"<div>✓ All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>"
 
     # Build detailed report with collapsible sections
     lines = []
-    lines.append(f"<div><strong>Scanned:</strong> {scanned_files} app files</div>")
+    lines.append(f"<div><strong>Scanned:</strong> {scanned_files} app code files (libraries excluded)</div>")
 
     if encrypted_count > 0:
-        lines.append(f"<div><strong> Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
+        lines.append(f"<div><strong>✓ Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
 
-    lines.append(f"<div><strong>WARNING: Unencrypted usage found:</strong> {unencrypted_count} instance(s)</div><br>")
+    lines.append(f"<div><strong>⚠ WARNING: Unencrypted usage found in app code:</strong> {unencrypted_count} instance(s)</div><br>")
 
     # Group by file for better organization
     files_with_unencrypted = {}
@@ -4462,7 +4481,7 @@ def check_sharedprefs_encryption(base):
     # Collapsible section for unencrypted findings
     lines.append('<details open>')
     lines.append('<summary class="warning">')
-    lines.append(f'WARNING: Unencrypted SharedPreferences ({len(files_with_unencrypted)} files) - Click to expand/collapse')
+    lines.append(f'⚠ Unencrypted SharedPreferences in App Code ({len(files_with_unencrypted)} files) - Click to expand/collapse')
     lines.append('</summary>')
     lines.append('<div>')
 
@@ -4544,18 +4563,36 @@ def check_external_storage(base):
         'READ_EXTERNAL_STORAGE': 'Read permission',
     }
 
-    # Library exclusions
+    # Library exclusions - comprehensive list
     exclude_patterns = [
         r'androidx/',
         r'android/support/',
         r'com/google/android/gms/',
         r'com/google/firebase/',
         r'com/google/android/exoplayer',
+        r'com/google/android/play/',
+        r'com/google/common/',
         r'io/sentry/',
         r'/core/content/',
+        r'kotlin/',
+        r'kotlinx/',
+        r'okhttp3/',
+        r'retrofit2/',
+        r'com/squareup/',
+        r'com/facebook/',
+        # Popular third-party libraries
+        r'com/github/mikephil/charting/',  # MPAndroidChart
+        r'com/permissionx/guolindev/',      # PermissionX
+        r'com/bumptech/glide/',             # Glide image loading
+        r'com/airbnb/lottie/',              # Lottie animations
+        r'io/reactivex/',                   # RxJava
+        r'com/jakewharton/',                # JakeWharton libraries
+        r'/lib/',
+        r'/jetified-',
     ]
 
     def is_library_file(path):
+        """Check if path is library code"""
         return any(re.search(pattern, path) for pattern in exclude_patterns)
 
     risky_findings = {}
@@ -4576,42 +4613,55 @@ def check_external_storage(base):
 
     for pattern, desc in permission_patterns.items():
         hits = grep_code(base, pattern)
-        if hits:
-            permission_findings[desc] = hits
+        app_hits = {h for h in hits if not is_library_file(h)}
+        if app_hits:
+            permission_findings[desc] = app_hits
 
     if not (risky_findings or safe_findings or permission_findings):
-        return True, "No external storage usage detected"
+        return 'PASS', "<div>No external storage usage detected in app code</div>"
 
     lines = []
     has_risk = bool(risky_findings)
 
     # Show risky usage
     if risky_findings:
-        lines.append(f"<div><strong>WARNING: High-risk external storage usage:</strong></div>")
+        lines.append(f"<div><strong>WARNING: High-risk external storage usage in app code:</strong></div>")
         for desc, hits in risky_findings.items():
             lines.append(f"<div><strong>{desc}:</strong> {len(hits)} file(s)</div>")
             for rel in sorted(hits)[:10]:
                 full = os.path.abspath(os.path.join(base, rel))
                 lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
             if len(hits) > 10:
-                lines.append(f"...and {len(hits) - 10} more<br>")
+                lines.append(f"<div>...and {len(hits) - 10} more</div>")
 
     # Show safe usage
     if safe_findings:
-        lines.append(f"<div><em>ℹ Scoped storage (lower risk):</em></div>")
+        lines.append(f"<br><div><em>ℹ Scoped storage in app code (lower risk):</em></div>")
         for desc, hits in safe_findings.items():
             lines.append(f"<div>{desc}: {len(hits)} file(s)</div>")
+            for rel in sorted(hits)[:5]:
+                full = os.path.abspath(os.path.join(base, rel))
+                lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            if len(hits) > 5:
+                lines.append(f"<div>...and {len(hits) - 5} more</div>")
 
     # Show permissions
     if permission_findings:
-        lines.append(f"<div><em>Manifest permissions:</em></div>")
+        lines.append(f"<br><div><em>Storage permissions in app code:</em></div>")
         for desc, hits in permission_findings.items():
             for rel in sorted(hits)[:5]:
                 full = os.path.abspath(os.path.join(base, rel))
                 lines.append(f"<div>{desc} in <a href=\"file://{html.escape(full)}\">{html.escape(rel)}</a></div>")
+            if len(hits) > 5:
+                lines.append(f"<div>...and {len(hits) - 5} more</div>")
 
     # Only FAIL if risky patterns found in app code
-    return (not has_risk), "<br>\n".join(lines)
+    if has_risk:
+        return 'FAIL', "<br>\n".join(lines)
+    elif safe_findings or permission_findings:
+        return 'WARN', "<br>\n".join(lines)
+    else:
+        return 'PASS', "<br>\n".join(lines)
 
 def check_hardcoded_keys(base):
     """
