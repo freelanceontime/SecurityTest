@@ -3550,7 +3550,34 @@ def check_insecure_webview(base):
 
     if not hits:
         return True, "None"
-    return False, "<br>\n".join(hits)
+        # Append MASTG references for the WebView checks
+    mastg_base = "https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/"
+    mastg_tests = [
+        "MASTG-TEST-0027",
+        "MASTG-TEST-0031",
+        "MASTG-TEST-0032",
+        "MASTG-TEST-0033",
+        "MASTG-TEST-0037",
+        "MASTG-TEST-0250-253",
+        "MASTG-TEST-0284",
+    ]
+
+    refs = [
+        (
+            f"<a href='{mastg_base}{test}/' target='_blank'>{test}</a>"
+        )
+        for test in mastg_tests
+    ]
+
+    details = "<br>\n".join(hits)
+    details += (
+        "<br><br><div><strong>MASTG References (Insecure WebView Usage):</strong></div>"
+        "<ul style='margin-left:20px;'>"
+        + "".join(f"<li>{ref}</li>" for ref in refs)
+        + "</ul>"
+    )
+
+    return False, details
 
 
 def check_keyboard_cache(base, manifest):
