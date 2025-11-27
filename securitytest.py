@@ -7393,6 +7393,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             if (stack.indexOf("EncryptedSharedPreferences") >= 0) {
               encrypted = true;
             }
+            console.log("📁 getSharedPreferences: " + name + " (encrypted: " + encrypted + ")");
             send({
               type: "prefs_access",
               name: name,
@@ -7405,40 +7406,120 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook Editor methods to catch stored data
           var Editor = Java.use("android.content.SharedPreferences$Editor");
 
-          ["putString", "putInt", "putBoolean", "putLong", "putFloat"].forEach(function(method) {
-            try {
-              var original = Editor[method];
-              Editor[method].implementation = function(key, value) {
-                var valueStr = String(value);
-                var entropy = calculateEntropy(valueStr);
-                var sensitive = hasSensitiveKeyword(key) || hasSensitiveKeyword(valueStr);
+          // Hook putString
+          try {
+            Editor.putString.overload("java.lang.String", "java.lang.String").implementation = function(key, value) {
+              var valueStr = String(value);
+              var entropy = calculateEntropy(valueStr);
+              var sensitive = hasSensitiveKeyword(key) || hasSensitiveKeyword(valueStr);
+              var highEntropy = entropy > 4.5;
+              var isBase64 = /^[A-Za-z0-9+\/]+=*$/.test(valueStr) && valueStr.length >= 16;
+              var isHex = /^[0-9a-fA-F]+$/.test(valueStr) && valueStr.length >= 32;
+              var isJWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(valueStr);
 
-                // Check for high-entropy values (likely encrypted/random)
-                var highEntropy = entropy > 4.5;
+              console.log("✏️  putString: " + key + " = " + valueStr.substring(0, 30) + (valueStr.length > 30 ? "..." : ""));
+              send({
+                type: "prefs_write",
+                method: "putString",
+                key: key,
+                value: valueStr.substring(0, 100),
+                entropy: entropy.toFixed(2),
+                sensitive: sensitive,
+                highEntropy: highEntropy,
+                isBase64: isBase64,
+                isHex: isHex,
+                isJWT: isJWT,
+                valueLength: valueStr.length
+              });
+              return this.putString(key, value);
+            };
+          } catch(e) { console.log("putString hook error: " + e); }
 
-                // Check for known secret patterns
-                var isBase64 = /^[A-Za-z0-9+\/]+=*$/.test(valueStr) && valueStr.length >= 16;
-                var isHex = /^[0-9a-fA-F]+$/.test(valueStr) && valueStr.length >= 32;
-                var isJWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(valueStr);
+          // Hook putInt
+          try {
+            Editor.putInt.overload("java.lang.String", "int").implementation = function(key, value) {
+              console.log("✏️  putInt: " + key + " = " + value);
+              send({
+                type: "prefs_write",
+                method: "putInt",
+                key: key,
+                value: String(value),
+                entropy: 0,
+                sensitive: hasSensitiveKeyword(key),
+                highEntropy: false,
+                isBase64: false,
+                isHex: false,
+                isJWT: false,
+                valueLength: String(value).length
+              });
+              return this.putInt(key, value);
+            };
+          } catch(e) { console.log("putInt hook error: " + e); }
 
-                send({
-                  type: "prefs_write",
-                  method: method,
-                  key: key,
-                  value: valueStr.substring(0, 100),
-                  entropy: entropy.toFixed(2),
-                  sensitive: sensitive,
-                  highEntropy: highEntropy,
-                  isBase64: isBase64,
-                  isHex: isHex,
-                  isJWT: isJWT,
-                  valueLength: valueStr.length
-                });
-                return original.call(this, key, value);
-              };
-            } catch(e) {}
-          });
+          // Hook putBoolean
+          try {
+            Editor.putBoolean.overload("java.lang.String", "boolean").implementation = function(key, value) {
+              console.log("✏️  putBoolean: " + key + " = " + value);
+              send({
+                type: "prefs_write",
+                method: "putBoolean",
+                key: key,
+                value: String(value),
+                entropy: 0,
+                sensitive: hasSensitiveKeyword(key),
+                highEntropy: false,
+                isBase64: false,
+                isHex: false,
+                isJWT: false,
+                valueLength: String(value).length
+              });
+              return this.putBoolean(key, value);
+            };
+          } catch(e) { console.log("putBoolean hook error: " + e); }
 
+          // Hook putLong
+          try {
+            Editor.putLong.overload("java.lang.String", "long").implementation = function(key, value) {
+              console.log("✏️  putLong: " + key + " = " + value);
+              send({
+                type: "prefs_write",
+                method: "putLong",
+                key: key,
+                value: String(value),
+                entropy: 0,
+                sensitive: hasSensitiveKeyword(key),
+                highEntropy: false,
+                isBase64: false,
+                isHex: false,
+                isJWT: false,
+                valueLength: String(value).length
+              });
+              return this.putLong(key, value);
+            };
+          } catch(e) { console.log("putLong hook error: " + e); }
+
+          // Hook putFloat
+          try {
+            Editor.putFloat.overload("java.lang.String", "float").implementation = function(key, value) {
+              console.log("✏️  putFloat: " + key + " = " + value);
+              send({
+                type: "prefs_write",
+                method: "putFloat",
+                key: key,
+                value: String(value),
+                entropy: 0,
+                sensitive: hasSensitiveKeyword(key),
+                highEntropy: false,
+                isBase64: false,
+                isHex: false,
+                isJWT: false,
+                valueLength: String(value).length
+              });
+              return this.putFloat(key, value);
+            };
+          } catch(e) { console.log("putFloat hook error: " + e); }
+
+          console.log("✅ SharedPreferences hooks installed successfully");
           send({type: "ready", msg: "SharedPreferences hooks installed"});
         });
       } else {
