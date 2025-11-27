@@ -7765,11 +7765,10 @@ def check_frida_sharedprefs(base, wait_secs=10):
     ]
     logs = interactive_frida_monitor(proc, "SHAREDPREFERENCES/DATASTORE", instructions)
 
-    # Parse collected logs
-    findings = []
-    encrypted_count = 0
-    plain_count = 0
-    critical_findings = []
+    # Parse collected logs and organize by storage type
+    prefs_accessed = {}  # {filename: {'encrypted': bool, 'reads': [], 'writes': []}}
+    datastore_ops = []
+    file_writes = set()
 
     for line in logs:
         if 'message:' in line:
@@ -7778,73 +7777,49 @@ def check_frida_sharedprefs(base, wait_secs=10):
                 msg = ast.literal_eval(part)
                 if msg.get('type') == 'send':
                     payload = msg.get('payload', {})
+
                     if payload.get('type') == 'prefs_access':
-                        if payload.get('encrypted'):
-                            encrypted_count += 1
-                            findings.append(f" Encrypted: {payload.get('name')}")
-                        else:
-                            plain_count += 1
-                            findings.append(f"WARNING: Plain: {payload.get('name')}")
+                        name = payload.get('name', 'unknown')
+                        encrypted = payload.get('encrypted', False)
+                        if name not in prefs_accessed:
+                            prefs_accessed[name] = {
+                                'encrypted': encrypted,
+                                'reads': [],
+                                'writes': []
+                            }
+
                     elif payload.get('type') == 'datastore_write':
-                        # Handle DataStore writes
                         key = payload.get('key', '')
                         value = payload.get('value', '')
                         sensitive = payload.get('sensitive', False)
-                        value_len = payload.get('valueLength', 0)
+                        datastore_ops.append({
+                            'operation': 'WRITE',
+                            'key': key,
+                            'value': value,
+                            'sensitive': sensitive
+                        })
 
-                        marker = "⚠️" if sensitive else "📝"
-                        flags = []
-                        if sensitive:
-                            flags.append("sensitive")
-                            critical_findings.append(f"DataStore: {key}")
-
-                        flag_str = f" [{', '.join(flags)}]" if flags else ""
-                        findings.append(f"{marker} DataStore.set('{key}', '{value[:30]}...'){flag_str}")
                     elif payload.get('type') == 'file_write':
-                        # Handle direct file writes to shared_prefs
                         filename = payload.get('filename', '')
-                        # Filter out Google analytics noise
                         if 'gms.measurement' not in filename and 'firebase' not in filename:
-                            findings.append(f"📁 File write: {filename}")
+                            file_writes.add(filename)
+
                     elif payload.get('type') == 'prefs_write':
+                        # Track which prefs file was written to (we need to match context)
                         key = payload.get('key', '')
                         value = payload.get('value', '')
-                        entropy = float(payload.get('entropy', 0))
+                        method = payload.get('method', 'put')
                         sensitive = payload.get('sensitive', False)
-                        high_entropy = payload.get('highEntropy', False)
-                        is_base64 = payload.get('isBase64', False)
-                        is_hex = payload.get('isHex', False)
-                        is_jwt = payload.get('isJWT', False)
-                        value_len = payload.get('valueLength', 0)
 
-                        # Determine criticality
-                        flags = []
-                        marker = "📝"
-
-                        if is_jwt:
-                            marker = ""
-                            flags.append("JWT token")
-                            critical_findings.append(f"{key}: JWT detected")
-                        elif sensitive and (high_entropy or is_base64 or is_hex):
-                            marker = ""
-                            if high_entropy:
-                                flags.append(f"entropy {entropy}")
-                            if is_base64:
-                                flags.append("base64")
-                            if is_hex:
-                                flags.append("hex")
-                            critical_findings.append(f"{key}: sensitive + high entropy")
-                        elif sensitive:
-                            marker = ""
-                            flags.append("sensitive keyword")
-                        elif high_entropy and value_len > 32:
-                            marker = ""
-                            flags.append(f"entropy {entropy}")
-                        elif is_base64 or is_hex:
-                            flags.append("base64" if is_base64 else "hex")
-
-                        flag_str = f" [{', '.join(flags)}]" if flags else ""
-                        findings.append(f"{marker} {payload.get('method')}('{key}', '{value[:30]}...'){flag_str}")
+                        # Add to most recent prefs access or create entry
+                        if prefs_accessed:
+                            last_prefs = list(prefs_accessed.keys())[-1]
+                            prefs_accessed[last_prefs]['writes'].append({
+                                'method': method,
+                                'key': key,
+                                'value': value,
+                                'sensitive': sensitive
+                            })
             except:
                 pass
 
@@ -7853,28 +7828,64 @@ def check_frida_sharedprefs(base, wait_secs=10):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
-    if not findings:
-        return 'INFO', "<strong>No SharedPreferences/DataStore usage observed during runtime</strong>"
+    # Build clean report
+    if not prefs_accessed and not datastore_ops and not file_writes:
+        mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+        return 'INFO', f"<strong>No SharedPreferences/DataStore usage observed during runtime</strong>{mastg_ref}"
 
-    detail = [
-        f"<div><strong>Summary:</strong></div>",
-        f"<div> Encrypted SharedPreferences: {encrypted_count}</div>",
-        f"<div> Plain SharedPreferences: {plain_count}</div>",
-    ]
+    detail = []
 
-    if critical_findings:
-        detail.append(f"<div>⚠️ Sensitive data detected: {len(critical_findings)}</div>")
-        for cf in critical_findings[:5]:
-            detail.append(f"<div class='detail-list-item'>{html.escape(cf)}</div>")
+    # DataStore operations
+    if datastore_ops:
+        detail.append("<div><strong>DataStore Operations:</strong></div>")
+        for op in datastore_ops[:20]:
+            value_preview = op['value'][:50] + ('...' if len(op['value']) > 50 else '')
+            sensitive_note = " <em>(sensitive)</em>" if op['sensitive'] else ""
+            detail.append(
+                f"<div style='margin-left:15px'>{op['operation']}: "
+                f"<code>{html.escape(op['key'])}</code> = <code>{html.escape(value_preview)}</code>"
+                f"{sensitive_note}</div>"
+            )
+        if len(datastore_ops) > 20:
+            detail.append(f"<div style='margin-left:15px'><em>...and {len(datastore_ops) - 20} more operations</em></div>")
+        detail.append("<br>")
 
-    detail.append("<br><div><strong>Details:</strong></div>")
-    detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:50]])
-    if len(findings) > 50:
-        detail.append(f"<div>...and {len(findings) - 50} more</div>")
+    # SharedPreferences operations
+    if prefs_accessed:
+        detail.append("<div><strong>SharedPreferences Files Accessed:</strong></div>")
+        for prefs_name, data in prefs_accessed.items():
+            encryption_status = "Encrypted" if data['encrypted'] else "Plain"
+            detail.append(
+                f"<div style='margin-left:15px'><strong>{html.escape(prefs_name)}</strong> "
+                f"<em>({encryption_status})</em></div>"
+            )
 
-    detail.append("<br><div><em>Legend: =Critical ⚠️=Sensitive =High entropy 📝=Normal</em></div>")
+            if data['writes']:
+                for write in data['writes'][:10]:
+                    value_preview = write['value'][:50] + ('...' if len(write['value']) > 50 else '')
+                    sensitive_note = " <em>(sensitive)</em>" if write['sensitive'] else ""
+                    detail.append(
+                        f"<div style='margin-left:30px'>WRITE: "
+                        f"<code>{html.escape(write['key'])}</code> = <code>{html.escape(value_preview)}</code>"
+                        f"{sensitive_note}</div>"
+                    )
+                if len(data['writes']) > 10:
+                    detail.append(f"<div style='margin-left:30px'><em>...and {len(data['writes']) - 10} more writes</em></div>")
+        detail.append("<br>")
 
-    # Always return INFO status - this is informational monitoring
+    # File writes
+    if file_writes:
+        detail.append("<div><strong>Direct File Writes to shared_prefs/:</strong></div>")
+        for filename in sorted(file_writes)[:10]:
+            detail.append(f"<div style='margin-left:15px'><code>{html.escape(filename)}</code></div>")
+        if len(file_writes) > 10:
+            detail.append(f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>")
+        detail.append("<br>")
+
+    # MASTG reference
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+    detail.append(mastg_ref)
+
     return 'INFO', "<br>\n".join(detail)
 
 
