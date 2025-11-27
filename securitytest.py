@@ -7403,6 +7403,50 @@ def check_frida_sharedprefs(base, wait_secs=10):
             return this.getSharedPreferences(name, mode);
           };
 
+          // Hook EncryptedSharedPreferences.create (androidx.security.crypto)
+          try {
+            var EncPrefs = Java.use("androidx.security.crypto.EncryptedSharedPreferences");
+            EncPrefs.create.overload("java.lang.String", "java.lang.String", "android.content.Context",
+                                     "androidx.security.crypto.EncryptedSharedPreferences$PrefKeyEncryptionScheme",
+                                     "androidx.security.crypto.EncryptedSharedPreferences$PrefValueEncryptionScheme")
+                           .implementation = function(fileName, masterKeyAlias, context, keyScheme, valueScheme) {
+              console.log("🔐 EncryptedSharedPreferences.create: " + fileName);
+              send({
+                type: "prefs_access",
+                name: fileName,
+                encrypted: true,
+                mode: 0
+              });
+              return this.create(fileName, masterKeyAlias, context, keyScheme, valueScheme);
+            };
+          } catch(e) { console.log("EncryptedSharedPreferences hook skipped (not available)"); }
+
+          // Hook PreferenceManager.getDefaultSharedPreferences (common for settings)
+          try {
+            var PrefManager = Java.use("android.preference.PreferenceManager");
+            PrefManager.getDefaultSharedPreferences.overload("android.content.Context").implementation = function(context) {
+              console.log("📁 PreferenceManager.getDefaultSharedPreferences called");
+              var prefs = this.getDefaultSharedPreferences(context);
+              send({
+                type: "prefs_access",
+                name: "default_prefs",
+                encrypted: false,
+                mode: 0
+              });
+              return prefs;
+            };
+          } catch(e) { console.log("PreferenceManager hook skipped: " + e); }
+
+          // Hook getString to see reads
+          try {
+            var SharedPrefs = Java.use("android.content.SharedPreferences");
+            SharedPrefs.getString.overload("java.lang.String", "java.lang.String").implementation = function(key, defValue) {
+              var result = this.getString(key, defValue);
+              console.log("📖 getString: " + key + " = " + (result ? result.substring(0, 30) : "null"));
+              return result;
+            };
+          } catch(e) { console.log("getString hook error: " + e); }
+
           // Hook Editor methods to catch stored data
           var Editor = Java.use("android.content.SharedPreferences$Editor");
 
@@ -7518,6 +7562,21 @@ def check_frida_sharedprefs(base, wait_secs=10):
               return this.putFloat(key, value);
             };
           } catch(e) { console.log("putFloat hook error: " + e); }
+
+          // Hook commit and apply to see when data is actually persisted
+          try {
+            Editor.commit.implementation = function() {
+              console.log("💾 Editor.commit() called - saving to disk");
+              return this.commit();
+            };
+          } catch(e) { console.log("commit hook error: " + e); }
+
+          try {
+            Editor.apply.implementation = function() {
+              console.log("💾 Editor.apply() called - saving to disk async");
+              this.apply();
+            };
+          } catch(e) { console.log("apply hook error: " + e); }
 
           console.log("✅ SharedPreferences hooks installed successfully");
           send({type: "ready", msg: "SharedPreferences hooks installed"});
