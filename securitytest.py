@@ -17,6 +17,7 @@ import curses
 import hashlib
 import urllib.request
 import urllib.error
+from datetime import datetime
 
 # Version tracking for auto-update
 __version__ = "3.1.0"
@@ -186,6 +187,66 @@ def check_for_updates():
         print("[*] Continuing with current version...")
 
     print()  # Empty line for spacing
+
+def interactive_frida_monitor(proc, test_name, instructions):
+    """
+    Interactive Frida log collection with user prompt.
+    Replaces hardcoded timeouts with "Press ENTER when done" workflow.
+
+    Args:
+        proc: Frida subprocess
+        test_name: Name of test (e.g., "CERTIFICATE PINNING")
+        instructions: List of strings with testing instructions
+
+    Returns:
+        List of collected log lines (HTML escaped)
+    """
+    print("\n" + "="*70)
+    print(f"DYNAMIC {test_name} TEST - FRIDA ACTIVE")
+    print("="*70)
+    print(f"[*] Frida is monitoring {test_name.lower()} in real-time")
+    print("\n[!] INSTRUCTIONS:")
+    for i, instruction in enumerate(instructions, 1):
+        print(f"    {i}. {instruction}")
+    print("    {0}. When done testing, press ENTER to stop and analyze results".format(len(instructions) + 1))
+    print("\n[*] Frida output will appear below as you use the app...")
+    print("="*70 + "\n")
+
+    logs = []
+    fd = proc.stdout.fileno()
+
+    # Make stdout non-blocking for real-time output
+    import fcntl
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+    # Real-time log collection with user prompt
+    try:
+        while True:
+            # Check for user input (Enter key)
+            user_ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if user_ready:
+                input()  # User pressed Enter
+                print("\n[*] Stopping Frida and analyzing results...")
+                break
+
+            # Collect Frida output
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                try:
+                    line = proc.stdout.readline()
+                    if not line:
+                        continue
+                    # Print to console for real-time feedback
+                    print(line.rstrip())
+                    logs.append(html.escape(line.rstrip()))
+                except:
+                    pass
+    except KeyboardInterrupt:
+        print("\n[!] Test interrupted by user")
+        pass
+
+    return logs
 
 # HTML template with professional, client-ready styling
 HTML_TEMPLATE = '''
@@ -751,7 +812,38 @@ function applyFilters() {{
 </script>
 </head>
 <body>
-<h1>Automated Test Results</h1>
+<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; margin-bottom: 30px; color: white; box-shadow: 0 4px 20px rgba(0,0,0,0.15);">
+  <h1 style="color: white; border: none; margin: 0; padding: 0; font-size: 32px; margin-bottom: 20px;">Mobile Security Assessment Report</h1>
+
+  <div style="background: rgba(255,255,255,0.15); border-radius: 8px; padding: 20px; backdrop-filter: blur(10px);">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 15px;">
+      <div>
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.9; margin-bottom: 5px;">Package</div>
+        <div style="font-size: 16px; font-weight: 600; font-family: 'Courier New', monospace;">{package}</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.9; margin-bottom: 5px;">Version</div>
+        <div style="font-size: 16px; font-weight: 600;">{version_name} ({version_code})</div>
+      </div>
+      <div>
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.9; margin-bottom: 5px;">Size</div>
+        <div style="font-size: 16px; font-weight: 600;">{size_mb} MB</div>
+      </div>
+    </div>
+
+    <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 15px; margin-top: 5px;">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 13px;">
+        <div>
+          <span style="opacity: 0.9;">Started:</span> <strong>{start_time}</strong>
+        </div>
+        <div>
+          <span style="opacity: 0.9;">Finished:</span> <strong>{finish_time}</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 {sections}
 </body>
 </html>
@@ -762,6 +854,43 @@ def run_cmd(cmd):
         return subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True, universal_newlines=True)
     except subprocess.CalledProcessError as e:
         return e.output
+
+def extract_apk_metadata(apk_path, manifest_path):
+    """
+    Extract APK metadata for the report header.
+    Returns: dict with package, version_name, version_code, size_mb
+    """
+    metadata = {
+        'package': 'Unknown',
+        'version_name': 'Unknown',
+        'version_code': 'Unknown',
+        'size_mb': 'Unknown'
+    }
+
+    # Get package name and version from manifest
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+        metadata['package'] = root.get('package', 'Unknown')
+
+        # Version info
+        version_code = root.get('{http://schemas.android.com/apk/res/android}versionCode', 'Unknown')
+        version_name = root.get('{http://schemas.android.com/apk/res/android}versionName', 'Unknown')
+        metadata['version_code'] = version_code
+        metadata['version_name'] = version_name
+    except Exception as e:
+        print(f"[!] Could not parse manifest: {e}")
+
+    # Get APK file size
+    if apk_path and os.path.exists(apk_path):
+        try:
+            size_bytes = os.path.getsize(apk_path)
+            size_mb = size_bytes / (1024 * 1024)
+            metadata['size_mb'] = f"{size_mb:.1f}"
+        except Exception as e:
+            print(f"[!] Could not get APK size: {e}")
+
+    return metadata
 
 # Helper to grep code patterns
 
@@ -6429,25 +6558,18 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     except Exception:
         pass
 
-    # 5) collect logs for wait_secs
-    logs = []
-    legacy_neg = False
-    legacy_enabled = False
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
+    # 5) Interactive mode - wait for user to finish testing
+    instructions = [
+        f"App '{spawn_name}' is now running with Frida instrumentation",
+        "Use the app and trigger network connections",
+        "Navigate to features that use HTTPS/TLS (login, API calls, etc.)",
+        "Watch the Frida output below for TLS activity"
+    ]
+    logs = interactive_frida_monitor(proc, "TLS NEGOTIATION", instructions)
 
-    while time.time() < deadline:
-        r, _, _ = select.select([fd], [], [], 0.1)
-        if not r:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        logs.append(html.escape(line.rstrip()))
-        if 'VERDICT: LEGACY_NEGOTIATED' in line:
-            legacy_neg = True
-        elif 'VERDICT: LEGACY_ENABLED_BY_APP' in line:
-            legacy_enabled = True
+    # Parse collected logs for verdicts
+    legacy_neg = any('VERDICT: LEGACY_NEGOTIATED' in line for line in logs)
+    legacy_enabled = any('VERDICT: LEGACY_ENABLED_BY_APP' in line for line in logs)
 
     # 6) cleanup
     proc.terminate()
@@ -6641,31 +6763,25 @@ def check_frida_pinning(base, wait_secs=15):
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
 
-    print(f"    → Launching app with Frida hooks (monitoring for {wait_secs}s)...")
-
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
-    # 6) collect for wait_secs
+    # 6) Interactive collection with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with certificate pinning detection hooks",
+        "Use the app and trigger HTTPS/network connections",
+        "Try features that connect to servers (login, sync, API calls)",
+        "Watch for pinning method calls below"
+    ]
+    all_output = interactive_frida_monitor(proc, "CERTIFICATE PINNING", instructions)
+
+    # Parse collected logs
     hits = set()
     pinning_indicators = []
-    all_output = []
-    deadline = time.time() + wait_secs
 
-    fd = proc.stdout.fileno()
-    while time.time() < deadline:
-        # wait up to 0.1s for any Frida output
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            continue
-
-        all_output.append(line)
-
+    for line in all_output:
         # Check for pinning bypass indicators in output
         if any(pattern in line for pattern in [
             'Bypassing', 'bypass', 'pinning', 'Pinning', 'PINNING',
@@ -6787,18 +6903,17 @@ def check_frida_file_reads(base, wait_secs=7):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
-    # 6) collect with non-blocking reads
+    # 6) interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with file read monitoring",
+        "Use app features that may read files (settings, data loading, etc.)",
+        "Watch for file read operations below"
+    ]
+    logs = interactive_frida_monitor(proc, "FILE READS", instructions)
+
+    # Parse collected logs for file reads
     reads = []
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
-    while time.time() < deadline:
-        # wait up to 0.1s for stdout data
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
+    for line in logs:
         if 'message:' in line:
             try:
                 part = line.split('message:',1)[1].split('data:',1)[0].strip()
@@ -6899,18 +7014,13 @@ def check_frida_strict_mode(base, wait_secs=7):
     proc.stdin.write('\n')
     proc.stdin.flush()
 
-    # 6) collect ALL of stdout for wait_secs
-    logs = []
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
-    while time.time() < deadline:
-        r, _, _ = select.select([fd], [], [], 0.1)
-        if not r:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
-        logs.append(html.escape(line.rstrip()))
+    # 6) interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with StrictMode monitoring",
+        "Navigate through app features and settings",
+        "Watch for StrictMode policy violations below"
+    ]
+    logs = interactive_frida_monitor(proc, "STRICTMODE", instructions)
 
     # 7) cleanup
     proc.terminate()
@@ -7136,7 +7246,16 @@ def check_frida_task_hijack(base, manifest,
             proc.terminate()
             raise RuntimeError("Timed out waiting for hooks installation")
 
-    # ── 6) fire each candidate activity ────────────────────────────
+    # ── 6) interactive monitoring with user prompt ────────────────
+    instructions = [
+        f"App '{pkg}' is running with task hijack monitoring",
+        f"The system will automatically test {len(bad)} exported activities",
+        "Navigate between apps and activities to test task hijacking",
+        "Watch for activity lifecycle events below"
+    ]
+
+    # Launch activities before monitoring
+    print(f"\n[*] Launching {len(bad)} exported activities...")
     for comp in bad:
         subprocess.run(
             ['adb','shell','am','start','-W','-n', f"{pkg}/{comp}"],
@@ -7144,22 +7263,19 @@ def check_frida_task_hijack(base, manifest,
         )
         time.sleep(per_launch_pause)
 
-    # ── 7) collect all `ev:"life"` messages for final_wait seconds ─
-    seen = {}
-    def reader():
-        for out_line in proc.stdout:
-            if 'message:' in out_line:
-                try:
-                    part = out_line.split('message:',1)[1].split('data:',1)[0].strip()
-                    msg  = ast.literal_eval(part)
-                    if msg.get('type')=='send' and msg['payload'].get('ev')=='life':
-                        seen[msg['payload']['cls']] = msg['payload']['m']
-                except Exception:
-                    pass
+    logs = interactive_frida_monitor(proc, "TASK HIJACKING", instructions)
 
-    t = threading.Thread(target=reader, daemon=True)
-    t.start()
-    t.join(timeout=final_wait)
+    # ── 7) parse collected logs for lifecycle events ───────────────
+    seen = {}
+    for out_line in logs:
+        if 'message:' in out_line:
+            try:
+                part = out_line.split('message:',1)[1].split('data:',1)[0].strip()
+                msg  = ast.literal_eval(part)
+                if msg.get('type')=='send' and msg['payload'].get('ev')=='life':
+                    seen[msg['payload']['cls']] = msg['payload']['m']
+            except Exception:
+                pass
 
     # ── 8) cleanup ─────────────────────────────────────────────────
     proc.terminate()
@@ -7308,20 +7424,21 @@ def check_frida_sharedprefs(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
+    # Interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with SharedPreferences monitoring",
+        "Use app features that save/load settings or data",
+        "Watch for SharedPreferences read/write operations below"
+    ]
+    logs = interactive_frida_monitor(proc, "SHAREDPREFERENCES", instructions)
+
+    # Parse collected logs
     findings = []
     encrypted_count = 0
     plain_count = 0
     critical_findings = []
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
 
-    while time.time() < deadline:
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
+    for line in logs:
         if 'message:' in line:
             try:
                 part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
@@ -7490,17 +7607,17 @@ def check_frida_external_storage(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
-    findings = []
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
+    # Interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with external storage monitoring",
+        "Use features that might save files (photos, downloads, exports)",
+        "Watch for external storage access below"
+    ]
+    logs = interactive_frida_monitor(proc, "EXTERNAL STORAGE", instructions)
 
-    while time.time() < deadline:
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
+    # Parse collected logs
+    findings = []
+    for line in logs:
         if 'message:' in line:
             try:
                 part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
@@ -7619,18 +7736,18 @@ def check_frida_crypto_keys(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
+    # Interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with cryptographic key monitoring",
+        "Use features that might use encryption (login, data storage, API calls)",
+        "Watch for cryptographic key operations below"
+    ]
+    logs = interactive_frida_monitor(proc, "CRYPTO KEYS", instructions)
+
+    # Parse collected logs
     findings = []
     weak_keys = []
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
-
-    while time.time() < deadline:
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
+    for line in logs:
         if 'message:' in line:
             try:
                 part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
@@ -7750,18 +7867,18 @@ def check_frida_clipboard(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
 
+    # Interactive monitoring with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with clipboard monitoring",
+        "Use features that may copy data to clipboard (passwords, codes, etc.)",
+        "Watch for clipboard operations below"
+    ]
+    logs = interactive_frida_monitor(proc, "CLIPBOARD", instructions)
+
+    # Parse collected logs
     findings = []
     sensitive_count = 0
-    deadline = time.time() + wait_secs
-    fd = proc.stdout.fileno()
-
-    while time.time() < deadline:
-        rlist, _, _ = select.select([fd], [], [], 0.1)
-        if not rlist:
-            continue
-        line = proc.stdout.readline()
-        if not line:
-            break
+    for line in logs:
         if 'message:' in line:
             try:
                 part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
@@ -8617,6 +8734,10 @@ def main():
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     args = parser.parse_args()
 
+    # Track start time
+    start_timestamp = datetime.now()
+    start_time_str = start_timestamp.strftime("%B %d, %Y, %H:%M:%S")
+
     apk_path = None
     if args.file:
         base = os.path.splitext(args.file)[0]
@@ -9165,7 +9286,15 @@ def main():
             if not placed:
                 ungrouped.append(html_block)
 
-    # 7) Assemble final report
+    # 7) Extract APK metadata for report header
+    manifest = os.path.join(base, 'AndroidManifest.xml')
+    metadata = extract_apk_metadata(apk_path, manifest)
+
+    # 8) Track finish time
+    finish_timestamp = datetime.now()
+    finish_time_str = finish_timestamp.strftime("%B %d, %Y, %H:%M:%S")
+
+    # 9) Assemble final report
     sections = checksec_block  # ensure checksec is at top
 
     # Add MASVS category sections
@@ -9178,10 +9307,25 @@ def main():
     if ungrouped:
         sections += "<h4>Other Checks</h4>\n" + ''.join(ungrouped)
 
-    # Write out
+    # 10) Write out HTML report with metadata
     with open('report.html', 'w') as f:
-        f.write(HTML_TEMPLATE.format(sections=sections))
+        f.write(HTML_TEMPLATE.format(
+            package=metadata['package'],
+            version_name=metadata['version_name'],
+            version_code=metadata['version_code'],
+            size_mb=metadata['size_mb'],
+            start_time=start_time_str,
+            finish_time=finish_time_str,
+            sections=sections
+        ))
     print('[+] Report generated: report.html')
+
+    # Display summary
+    duration = finish_timestamp - start_timestamp
+    duration_str = str(duration).split('.')[0]  # Remove microseconds
+    print(f'[+] Scan completed in {duration_str}')
+    print(f'[+] Package: {metadata["package"]}')
+    print(f'[+] Version: {metadata["version_name"]} ({metadata["version_code"]})')
 
 if __name__ == '__main__':
     main()
