@@ -199,7 +199,7 @@ def interactive_frida_monitor(proc, test_name, instructions):
         instructions: List of strings with testing instructions
 
     Returns:
-        List of collected log lines (HTML escaped)
+        List of collected log lines (raw, not escaped)
     """
     print("\n" + "="*70)
     print(f"DYNAMIC {test_name} TEST - FRIDA ACTIVE")
@@ -237,9 +237,10 @@ def interactive_frida_monitor(proc, test_name, instructions):
                     line = proc.stdout.readline()
                     if not line:
                         continue
-                    # Print to console for real-time feedback
+                    # Print RAW to console for real-time feedback
                     print(line.rstrip())
-                    logs.append(html.escape(line.rstrip()))
+                    # Store BOTH raw and escaped versions
+                    logs.append(line.rstrip())
                 except:
                     pass
     except KeyboardInterrupt:
@@ -867,19 +868,51 @@ def extract_apk_metadata(apk_path, manifest_path):
         'size_mb': 'Unknown'
     }
 
-    # Get package name and version from manifest
-    try:
-        tree = ET.parse(manifest_path)
-        root = tree.getroot()
-        metadata['package'] = root.get('package', 'Unknown')
+    # Try aapt first (most reliable for version info)
+    if apk_path and os.path.exists(apk_path):
+        try:
+            result = subprocess.check_output(
+                ['aapt', 'dump', 'badging', apk_path],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10
+            )
+            # Parse aapt output
+            for line in result.splitlines():
+                if line.startswith('package:'):
+                    # package: name='com.example' versionCode='1276' versionName='6.5.0'
+                    import shlex
+                    parts = shlex.split(line)
+                    for part in parts:
+                        if part.startswith('name='):
+                            metadata['package'] = part.split('=', 1)[1]
+                        elif part.startswith('versionCode='):
+                            metadata['version_code'] = part.split('=', 1)[1]
+                        elif part.startswith('versionName='):
+                            metadata['version_name'] = part.split('=', 1)[1]
+                    break
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass  # aapt not available or failed, fall back to XML parsing
 
-        # Version info
-        version_code = root.get('{http://schemas.android.com/apk/res/android}versionCode', 'Unknown')
-        version_name = root.get('{http://schemas.android.com/apk/res/android}versionName', 'Unknown')
-        metadata['version_code'] = version_code
-        metadata['version_name'] = version_name
-    except Exception as e:
-        print(f"[!] Could not parse manifest: {e}")
+    # Fallback: Get package name and version from manifest XML
+    if metadata['package'] == 'Unknown' or metadata['version_name'] == 'Unknown':
+        try:
+            tree = ET.parse(manifest_path)
+            root = tree.getroot()
+            if metadata['package'] == 'Unknown':
+                metadata['package'] = root.get('package', 'Unknown')
+
+            # Version info from XML
+            if metadata['version_code'] == 'Unknown':
+                version_code = root.get('{http://schemas.android.com/apk/res/android}versionCode')
+                if version_code:
+                    metadata['version_code'] = version_code
+            if metadata['version_name'] == 'Unknown':
+                version_name = root.get('{http://schemas.android.com/apk/res/android}versionName')
+                if version_name:
+                    metadata['version_name'] = version_name
+        except Exception as e:
+            print(f"[!] Could not parse manifest: {e}")
 
     # Get APK file size
     if apk_path and os.path.exists(apk_path):
@@ -8714,7 +8747,7 @@ def print_banner():
       python3 securitytest.py --help
       
     Requirements:  These must be on your $PATH
-      [Frida],[apktool],[adb],[checksec],[apksigner],[readelf]
+      [Frida],[apktool],[adb],[checksec],[apksigner],[readelf],[aapt]
     
     """
     print(banner)
