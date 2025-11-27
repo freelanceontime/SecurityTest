@@ -7439,23 +7439,67 @@ def check_frida_sharedprefs(base, wait_secs=10):
           } catch(e) {}
 
           // Hook direct File writes to shared_prefs directory
+          var currentFileStream = null;
           try {
             var FileOutputStream = Java.use("java.io.FileOutputStream");
             FileOutputStream.$init.overload("java.io.File", "boolean").implementation = function(file, append) {
               var path = file.getAbsolutePath();
               if (path.indexOf("shared_prefs") >= 0) {
-                // Extract just the filename from the path
                 var filename = path.substring(path.lastIndexOf("/") + 1);
-                console.log("📁 FileOutputStream writing to shared_prefs: " + filename);
+                var timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+                console.log("📁 [" + timestamp + "] FileOutputStream writing to: " + filename);
+
+                // Store current file context for write tracking
+                currentFileStream = {
+                  filename: filename,
+                  path: path,
+                  timestamp: timestamp
+                };
+
                 send({
                   type: "file_write",
                   filename: filename,
-                  path: path
+                  path: path,
+                  timestamp: timestamp
                 });
               }
               return this.$init(file, append);
             };
-          } catch(e) {}
+
+            // Hook write to capture actual data
+            FileOutputStream.write.overload("[B").implementation = function(bytes) {
+              if (currentFileStream && bytes.length < 10000) {
+                try {
+                  var str = Java.use("java.lang.String").$new(bytes, "UTF-8");
+                  // Only log if it looks like XML preference data
+                  if (str.indexOf("<?xml") >= 0 || str.indexOf("<map>") >= 0) {
+                    console.log("  └─ Writing preference data (" + bytes.length + " bytes)");
+                    // Extract key-value pairs if possible
+                    var keyMatches = str.match(/<string name="([^"]+)">([^<]*)</g);
+                    if (keyMatches) {
+                      for (var i = 0; i < Math.min(keyMatches.length, 5); i++) {
+                        var match = keyMatches[i].match(/<string name="([^"]+)">([^<]*)/);
+                        if (match) {
+                          var key = match[1];
+                          var value = match[2].substring(0, 50);
+                          console.log("     " + key + " = " + value + (match[2].length > 50 ? "..." : ""));
+                          send({
+                            type: "file_write_detail",
+                            filename: currentFileStream.filename,
+                            timestamp: currentFileStream.timestamp,
+                            key: key,
+                            value: match[2],
+                            value_length: match[2].length
+                          });
+                        }
+                      }
+                    }
+                  }
+                } catch(e) {}
+              }
+              return this.write(bytes);
+            };
+          } catch(e) { console.log("FileOutputStream hook error: " + e); }
 
           // Entropy calculation function
           function calculateEntropy(str) {
@@ -7768,7 +7812,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     # Parse collected logs and organize by storage type
     prefs_accessed = {}  # {filename: {'encrypted': bool, 'reads': [], 'writes': []}}
     datastore_ops = []
-    file_writes = set()
+    file_writes = {}  # {filename: {'timestamp': str, 'details': [...]}}
 
     for line in logs:
         if 'message:' in line:
@@ -7801,8 +7845,25 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
                     elif payload.get('type') == 'file_write':
                         filename = payload.get('filename', '')
+                        timestamp = payload.get('timestamp', 'unknown')
                         if 'gms.measurement' not in filename and 'firebase' not in filename:
-                            file_writes.add(filename)
+                            if filename not in file_writes:
+                                file_writes[filename] = {
+                                    'timestamp': timestamp,
+                                    'details': []
+                                }
+
+                    elif payload.get('type') == 'file_write_detail':
+                        filename = payload.get('filename', '')
+                        timestamp = payload.get('timestamp', 'unknown')
+                        key = payload.get('key', '')
+                        value = payload.get('value', '')
+
+                        if filename in file_writes:
+                            file_writes[filename]['details'].append({
+                                'key': key,
+                                'value': value
+                            })
 
                     elif payload.get('type') == 'prefs_write':
                         # Track which prefs file was written to (we need to match context)
@@ -7876,8 +7937,28 @@ def check_frida_sharedprefs(base, wait_secs=10):
     # File writes
     if file_writes:
         detail.append("<div><strong>Direct File Writes to shared_prefs/:</strong></div>")
-        for filename in sorted(file_writes)[:10]:
-            detail.append(f"<div style='margin-left:15px'><code>{html.escape(filename)}</code></div>")
+        for filename in sorted(file_writes.keys())[:10]:
+            write_data = file_writes[filename]
+            timestamp = write_data['timestamp']
+            details = write_data['details']
+
+            detail.append(
+                f"<div style='margin-left:15px'><strong>{html.escape(filename)}</strong> "
+                f"<em>at {html.escape(timestamp)}</em></div>"
+            )
+
+            if details:
+                for item in details[:5]:
+                    value_preview = item['value'][:50] + ('...' if len(item['value']) > 50 else '')
+                    detail.append(
+                        f"<div style='margin-left:30px'>WRITE: "
+                        f"<code>{html.escape(item['key'])}</code> = <code>{html.escape(value_preview)}</code></div>"
+                    )
+                if len(details) > 5:
+                    detail.append(f"<div style='margin-left:30px'><em>...and {len(details) - 5} more writes</em></div>")
+            else:
+                detail.append(f"<div style='margin-left:30px'><em>No content details captured</em></div>")
+
         if len(file_writes) > 10:
             detail.append(f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>")
         detail.append("<br>")
@@ -7885,6 +7966,16 @@ def check_frida_sharedprefs(base, wait_secs=10):
     # MASTG reference
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
     detail.append(mastg_ref)
+
+    # Add collapsible Frida output section
+    if logs:
+        detail.append("<br>")
+        detail.append(
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+            "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+        )
+        detail.append("\n".join(logs[-600:]))  # cap output to last 600 lines
+        detail.append("\n</pre></details>")
 
     return 'INFO', "<br>\n".join(detail)
 
