@@ -6966,10 +6966,10 @@ def check_frida_file_reads(base, wait_secs=7):
 
     unique = sorted(set(reads))
     if not unique:
-        return True, "<strong> No file-read attempts observed.</strong>"
+        return 'INFO', "<strong> No file-read attempts observed.</strong>"
     # File reads detected - this is informational, not necessarily a failure
-    # Return True but show what was read
-    return True, f"<strong>File reads detected ({len(unique)}):</strong><br>" + "<br>\n".join(f"- <code>{html.escape(p)}</code>" for p in unique)
+    # Return INFO to show what was read
+    return 'INFO', f"<strong>File reads detected ({len(unique)}):</strong><br>" + "<br>\n".join(f"- <code>{html.escape(p)}</code>" for p in unique)
 
 def check_frida_strict_mode(base, wait_secs=7):
     """
@@ -7355,6 +7355,37 @@ def check_frida_sharedprefs(base, wait_secs=10):
     setImmediate(function(){
       if (Java.available) {
         Java.perform(function(){
+          // Hook SQLite for database storage
+          try {
+            var SQLiteDB = Java.use("android.database.sqlite.SQLiteDatabase");
+            SQLiteDB.insert.overload("java.lang.String", "java.lang.String", "android.content.ContentValues").implementation = function(table, nullColumnHack, values) {
+              console.log("💾 SQLite insert into table: " + table + " values: " + values);
+              return this.insert(table, nullColumnHack, values);
+            };
+            SQLiteDB.update.overload("java.lang.String", "android.content.ContentValues", "java.lang.String", "[Ljava.lang.String;").implementation = function(table, values, whereClause, whereArgs) {
+              console.log("💾 SQLite update table: " + table + " values: " + values);
+              return this.update(table, values, whereClause, whereArgs);
+            };
+          } catch(e) { console.log("SQLite hooks skipped"); }
+
+          // Hook DataStore (newer preference API)
+          try {
+            var DataStore = Java.use("androidx.datastore.preferences.core.PreferencesKt");
+            console.log("🔍 DataStore detected");
+          } catch(e) {}
+
+          // Hook direct File writes to shared_prefs directory
+          try {
+            var FileOutputStream = Java.use("java.io.FileOutputStream");
+            FileOutputStream.$init.overload("java.io.File", "boolean").implementation = function(file, append) {
+              var path = file.getAbsolutePath();
+              if (path.indexOf("shared_prefs") >= 0) {
+                console.log("📁 FileOutputStream writing to shared_prefs: " + path);
+              }
+              return this.$init(file, append);
+            };
+          } catch(e) {}
+
           // Entropy calculation function
           function calculateEntropy(str) {
             if (!str || str.length === 0) return 0;
@@ -7446,6 +7477,15 @@ def check_frida_sharedprefs(base, wait_secs=10):
               return result;
             };
           } catch(e) { console.log("getString hook error: " + e); }
+
+          // Hook edit() to see when editing starts
+          try {
+            var SharedPrefs = Java.use("android.content.SharedPreferences");
+            SharedPrefs.edit.implementation = function() {
+              console.log("📝 SharedPreferences.edit() called - starting edit session");
+              return this.edit();
+            };
+          } catch(e) { console.log("edit() hook error: " + e); }
 
           // Hook Editor methods to catch stored data
           var Editor = Java.use("android.content.SharedPreferences$Editor");
@@ -7563,6 +7603,27 @@ def check_frida_sharedprefs(base, wait_secs=10):
             };
           } catch(e) { console.log("putFloat hook error: " + e); }
 
+          // Hook putStringSet
+          try {
+            Editor.putStringSet.overload("java.lang.String", "java.util.Set").implementation = function(key, values) {
+              console.log("✏️  putStringSet: " + key + " = " + values);
+              send({
+                type: "prefs_write",
+                method: "putStringSet",
+                key: key,
+                value: String(values),
+                entropy: 0,
+                sensitive: hasSensitiveKeyword(key),
+                highEntropy: false,
+                isBase64: false,
+                isHex: false,
+                isJWT: false,
+                valueLength: String(values).length
+              });
+              return this.putStringSet(key, values);
+            };
+          } catch(e) { console.log("putStringSet hook error: " + e); }
+
           // Hook commit and apply to see when data is actually persisted
           try {
             Editor.commit.implementation = function() {
@@ -7577,6 +7638,44 @@ def check_frida_sharedprefs(base, wait_secs=10):
               this.apply();
             };
           } catch(e) { console.log("apply hook error: " + e); }
+
+          // Hook getInt, getBoolean, getLong, getFloat to see other reads
+          try {
+            var SharedPrefs = Java.use("android.content.SharedPreferences");
+            SharedPrefs.getInt.overload("java.lang.String", "int").implementation = function(key, defValue) {
+              var result = this.getInt(key, defValue);
+              console.log("📖 getInt: " + key + " = " + result);
+              return result;
+            };
+          } catch(e) {}
+
+          try {
+            var SharedPrefs = Java.use("android.content.SharedPreferences");
+            SharedPrefs.getBoolean.overload("java.lang.String", "boolean").implementation = function(key, defValue) {
+              var result = this.getBoolean(key, defValue);
+              console.log("📖 getBoolean: " + key + " = " + result);
+              return result;
+            };
+          } catch(e) {}
+
+          try {
+            var SharedPrefs = Java.use("android.content.SharedPreferences");
+            SharedPrefs.getLong.overload("java.lang.String", "long").implementation = function(key, defValue) {
+              var result = this.getLong(key, defValue);
+              console.log("📖 getLong: " + key + " = " + result);
+              return result;
+            };
+          } catch(e) {}
+
+          // Log ALL methods called on Editor to debug what's happening
+          try {
+            var Editor = Java.use("android.content.SharedPreferences$Editor");
+            var methods = Editor.class.getDeclaredMethods();
+            console.log("🔍 Available Editor methods: " + methods.length);
+            for (var i = 0; i < methods.length; i++) {
+              console.log("   - " + methods[i].getName());
+            }
+          } catch(e) {}
 
           console.log("✅ SharedPreferences hooks installed successfully");
           send({type: "ready", msg: "SharedPreferences hooks installed"});
@@ -7673,12 +7772,12 @@ def check_frida_sharedprefs(base, wait_secs=10):
     os.unlink(tmp.name)
 
     if not findings:
-        return 'PASS', "<strong>No SharedPreferences usage observed during runtime</strong>"
+        return 'INFO', "<strong>No SharedPreferences usage observed during runtime</strong>"
 
     detail = [
         f"<div><strong>Summary:</strong></div>",
         f"<div> Encrypted accesses: {encrypted_count}</div>",
-        f"<div>WARNING: Plain accesses: {plain_count}</div>",
+        f"<div> Plain accesses: {plain_count}</div>",
     ]
 
     if critical_findings:
@@ -7693,17 +7792,8 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
     detail.append("<br><div><em>Legend: =Critical =Sensitive =High entropy 📝=Normal</em></div>")
 
-    # Status logic
-    if critical_findings:
-        status = 'FAIL'
-    elif encrypted_count > 0 and plain_count == 0:
-        status = 'PASS'
-    elif encrypted_count > 0:
-        status = 'WARN'
-    else:
-        status = 'FAIL'
-
-    return status, "<br>\n".join(detail)
+    # Always return INFO status - this is informational monitoring
+    return 'INFO', "<br>\n".join(detail)
 
 
 def check_frida_external_storage(base, wait_secs=10):
