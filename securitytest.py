@@ -1047,6 +1047,8 @@ def check_debug_symbols(lib_dir):
     and if any debug sections are found, include the command and output.
     """
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0040/' target='_blank'>MASTG-TEST-0040: Testing for Debugging Symbols</a></div>"
+
     details = []
     for root, _, files in os.walk(lib_dir):
         for f in files:
@@ -1065,10 +1067,10 @@ def check_debug_symbols(lib_dir):
                     details.append("  " + line)
 
     if not details:
-        return True, "None"
+        return True, "None" + mastg_ref
 
     # Fail and show the detailed output
-    return False, "\n".join(details)
+    return False, "\n".join(details) + mastg_ref
 
 def check_x509(base):
     """
@@ -1081,6 +1083,8 @@ def check_x509(base):
          – Otherwise flag it, showing link, method name, line, snippet.
       2) For HostnameVerifier.verify() stubs returning true, flag as before.
     """
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0021/' target='_blank'>MASTG-TEST-0021: Testing Endpoint Identify Verification</a></div>"
 
     issues = []
     seen = set()
@@ -1180,8 +1184,8 @@ def check_x509(base):
                 i += 1
 
     if not issues:
-        return True, "None"
-    return False, "<br>\n".join(issues)
+        return True, "None" + mastg_ref
+    return False, "<br>\n".join(issues) + mastg_ref
 
 
 def check_strict_mode(base):
@@ -1190,6 +1194,8 @@ def check_strict_mode(base):
     StrictMode should be disabled in production builds as it can leak debug info.
     Shows actual API calls with line numbers and context.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0263/' target='_blank'>MASTG-TEST-0263: Logging of StrictMode Violations</a></div>"
+
     # StrictMode API patterns
     strictmode_apis = {
         'setThreadPolicy': r'StrictMode;->setThreadPolicy',
@@ -1250,7 +1256,7 @@ def check_strict_mode(base):
                 continue
 
     if not findings:
-        return 'PASS', f"<div>No StrictMode usage detected</div><div>Scanned {scanned_files} files</div>"
+        return 'PASS', f"<div>No StrictMode usage detected</div><div>Scanned {scanned_files} files</div>" + mastg_ref
 
     # Build detailed report
     lines = []
@@ -1315,7 +1321,7 @@ def check_strict_mode(base):
     )
 
     # Return WARN since StrictMode in production is a concern but not always critical
-    return 'WARN', '\n'.join(lines)
+    return 'WARN', '\n'.join(lines) + mastg_ref
     
 def check_kotlin_assert(base):
     """
@@ -1324,6 +1330,8 @@ def check_kotlin_assert(base):
     Only the first 100 hits are shown; total_hits is the real count.
     Filters out library code to show only app code issues.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
+
     # Library paths to exclude (same pattern as other checks)
     lib_paths = (
         '/androidx/', '/android/support/',
@@ -1366,7 +1374,7 @@ def check_kotlin_assert(base):
 
     total = len(hits)
     if total == 0:
-        return True, "None", 0
+        return True, "None" + mastg_ref, 0
 
     # only show first 100
     display = hits[:100]
@@ -1380,7 +1388,7 @@ def check_kotlin_assert(base):
     if total > 100:
         lines.append(f"...and {total-100} more")
 
-    return False, "<br>\n".join(lines), total
+    return False, "<br>\n".join(lines) + mastg_ref, total
 
 
 def check_uri_scheme(manifest):
@@ -1405,6 +1413,8 @@ def check_uri_scheme(manifest):
     3. Common OAuth redirect patterns (higher severity)
     4. Provides ADB test commands for manual verification
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028: Testing Deep Links</a></div>"
+
     ANDROID_NS = 'http://schemas.android.com/apk/res/android'
     def ns(a): return f'{{{ANDROID_NS}}}{a}'
 
@@ -1542,7 +1552,7 @@ def check_uri_scheme(manifest):
     issues = list(vulnerable_schemes.values())
 
     if not issues:
-        return True, "No custom URI schemes detected", 0
+        return True, "No custom URI schemes detected" + mastg_ref, 0
 
     result = (
         f"<div class='warning-box'><strong>WARNING: CUSTOM URI SCHEME VULNERABILITY</strong></div>"
@@ -1553,6 +1563,7 @@ def check_uri_scheme(manifest):
         "Custom schemes are vulnerable to hijacking attacks where malicious apps register the same scheme. "
         "Replace with HTTPS App Links with android:autoVerify for secure deep linking. "
         "http/https scheme issues are checked separately in 'Browsable DeepLinks' test.</em></div>"
+        + mastg_ref
     )
 
     return False, result, len(issues)
@@ -1612,9 +1623,12 @@ def check_logging(base):
     if total_all > len(display):
         lines.append(f"...and {total_all - len(display)} more")
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0003/' target='_blank'>MASTG-TEST-0003: Testing Logs for Sensitive Data</a></div>"
+
     details = (
         f"<div><em>Log calls summary:</em> {html.escape(summary)}</div>"
         + "<br>\n" + "<br>\n".join(lines)
+        + mastg_ref
     )
 
     # 6) Always FAIL if any logs found
@@ -1634,6 +1648,8 @@ def check_updates(base):
       • latestVersion / minimumVersion (version comparison fields)
       • market://details (Play Store redirect intent)
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0036/' target='_blank'>MASTG-TEST-0036: Testing Enforced Updating</a></div>"
+
     # Search patterns for Google Play In-App Updates API
     google_play_patterns = {
         'AppUpdateManager': 'Google Play Core library usage',
@@ -1715,12 +1731,13 @@ def check_updates(base):
 
         details += "<div style='margin-top:10px;'><em>Neither Google Play In-App Updates API nor custom server-side update mechanism detected.</em></div>"
 
-    return ok, details
+    return ok, details + mastg_ref
 
 def check_memtag(manifest):
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
     txt = open(manifest, errors='ignore').read()
     ok = bool(re.search(r'memtagMode="(async|sync)"', txt))
-    return ok, 'Enabled' if ok else 'Memtag Not Enabled'
+    return ok, ('Enabled' if ok else 'Memtag Not Enabled') + mastg_ref
 
 def check_min_sdk(manifest, apk_path=None, threshold=28):
     """
@@ -1729,6 +1746,8 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
     1) Parse the decompiled XML <uses-sdk> if present.
     2) Otherwise fall back to `aapt dump badging` on the APK.
     """
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
 
     # 1) Try decompiled XML
     try:
@@ -1741,8 +1760,8 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
             if minSdk:
                 v = int(minSdk)
                 if v < threshold:
-                    return False, f"minSdkVersion={v} (below recommended {threshold})"
-                return True, f"minSdkVersion={v}"
+                    return False, f"minSdkVersion={v} (below recommended {threshold})" + mastg_ref
+                return True, f"minSdkVersion={v}" + mastg_ref
     except Exception:
         # ignore and fall back
         pass
@@ -1759,16 +1778,16 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
             if m:
                 v = int(m.group(1))
                 if v < threshold:
-                    return False, f"minSdkVersion={v} (below recommended {threshold})"
-                return True, f"minSdkVersion={v}"
+                    return False, f"minSdkVersion={v} (below recommended {threshold})" + mastg_ref
+                return True, f"minSdkVersion={v}" + mastg_ref
         except Exception:
             pass
 
-    # If we still don’t have a valid value:
+    # If we still don't have a valid value:
     return False, (
         "minSdkVersion is missing (neither decompiled manifest nor aapt badging "
         "produced a value)"
-    )
+    ) + mastg_ref
 
 def check_file_provider(res_dir):
     """
@@ -1777,6 +1796,8 @@ def check_file_provider(res_dir):
       2) Overly-broad <grant-uri-permission> or <path-permission>
     Emits clickable file:// links with the XML filename.
     """
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
     issues = []
     xml_dir = os.path.join(res_dir, 'xml')
@@ -1809,8 +1830,8 @@ def check_file_provider(res_dir):
                         )
 
     if not issues:
-        return True, "None"
-    return False, "<br>\n".join(issues)
+        return True, "None" + mastg_ref
+    return False, "<br>\n".join(issues) + mastg_ref
 
 def check_serialize(base):
     """
@@ -1828,6 +1849,8 @@ def check_serialize(base):
 
     Also filters out third-party library code.
     """
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0034/' target='_blank'>MASTG-TEST-0034: Testing Object Persistence</a></div>"
 
     # Library paths to exclude
     lib_paths = (
@@ -1904,13 +1927,13 @@ def check_serialize(base):
                     )
 
     if not hits:
-        return True, "None"
+        return True, "None" + mastg_ref
 
     # Add summary information
     summary = f"<strong>Found {len(hits)} potentially unsafe deserialization call(s)</strong><br>"
     summary += "Note: Calls with proper API version checks (SDK_INT >= 33) are filtered out.<br><br>"
 
-    return False, summary + "<br>\n".join(hits)
+    return False, summary + "<br>\n".join(hits) + mastg_ref
 
 def check_browsable_deeplinks(manifest):
     """
@@ -2068,8 +2091,10 @@ def check_browsable_deeplinks(manifest):
                 )
 
     total_issues = len(issues)
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028: Testing Deep Links</a></div>"
+
     if not issues:
-        return True, "No overly-broad deep-link filters detected", 0
+        return True, f"No overly-broad deep-link filters detected{mastg_ref}", 0
 
     result = (
         f"<div><strong>Found {total_issues} deep link security issue(s)</strong></div><br>"
@@ -2078,6 +2103,7 @@ def check_browsable_deeplinks(manifest):
         "Custom URI schemes (myapp://) without BROWSABLE category are not flagged. "
         "MainActivity is excluded from checks. "
         "<strong>Test commands use intent-filter resolution (no -n flag) to verify actual vulnerability.</strong></em></div>"
+        + mastg_ref
     )
 
     return False, result, total_issues
@@ -2093,6 +2119,8 @@ def check_deep_link_misconfiguration(manifest):
 
     Also resolves @string references to accurately assess the configuration.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028: Testing Deep Links</a></div>"
+
     ANDROID_NS = 'http://schemas.android.com/apk/res/android'
     def ns(a): return f'{{{ANDROID_NS}}}{a}'
 
@@ -2210,9 +2238,9 @@ def check_deep_link_misconfiguration(manifest):
 
     total_issues = len(issues)
     if not issues:
-        return True, "No intent filter Cartesian product vulnerabilities detected (all have host restrictions)", 0
+        return True, "No intent filter Cartesian product vulnerabilities detected (all have host restrictions)" + mastg_ref, 0
 
-    return False, "<br><br>\n".join(issues), total_issues
+    return False, "<br><br>\n".join(issues) + mastg_ref, total_issues
 
 
 def render_checksec_table(text):
@@ -2299,6 +2327,8 @@ def check_task_hijack(manifest):
       3) Any exported activity with NO android:permission attribute (unprotected export).
     Returns ('PASS'|'WARN'|'FAIL', details_html: str).
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0029/' target='_blank'>MASTG-TEST-0029: Testing for Sensitive Functionality Exposure Through IPC</a></div>"
+
     ANDROID_NS = 'http://schemas.android.com/apk/res/android'
     def ns(a): return f'{{{ANDROID_NS}}}{a}'
 
@@ -2463,17 +2493,18 @@ def check_task_hijack(manifest):
             f"<strong style='color:red'>CRITICAL ISSUES ({len(failures)}):</strong><br><br>" +
             "<br><br>\n".join(failures) +
             f"<br><br><hr><strong style='color:#d98e00'>RECOMMENDATIONS ({len(warnings)}):</strong><br><br>" +
-            "<br><br>\n".join(warnings)
+            "<br><br>\n".join(warnings) +
+            mastg_ref
         )
         return 'FAIL', output, total_activities
     elif failures:
-        output = f"<strong style='color:red'>CRITICAL ISSUES ({len(failures)}):</strong><br><br>" + "<br><br>\n".join(failures)
+        output = f"<strong style='color:red'>CRITICAL ISSUES ({len(failures)}):</strong><br><br>" + "<br><br>\n".join(failures) + mastg_ref
         return 'FAIL', output, total_activities
     elif warnings:
-        output = f"<strong style='color:#d98e00'>DEFENSE-IN-DEPTH RECOMMENDATIONS ({len(warnings)}):</strong><br><br>" + "<br><br>\n".join(warnings)
+        output = f"<strong style='color:#d98e00'>DEFENSE-IN-DEPTH RECOMMENDATIONS ({len(warnings)}):</strong><br><br>" + "<br><br>\n".join(warnings) + mastg_ref
         return 'WARN', output, total_activities
     else:
-        return 'PASS', "No task hijacking vulnerabilities detected", 0
+        return 'PASS', "No task hijacking vulnerabilities detected" + mastg_ref, 0
 
 def check_network_security_config(base):
     """
@@ -2544,17 +2575,21 @@ def check_network_security_config(base):
                             f"Domain `{domain}` missing <pin-set> (no certificate pinning)"
                         )
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
+
     # 5) Final result
     if fail_issues:
         # Critical issues found - return FAIL
         all_issues = fail_issues + warn_issues
+        all_issues.append(mastg_ref)
         return 'FAIL', "<br>\n".join(all_issues)
     elif warn_issues:
         # Only recommendations - return WARN
+        warn_issues.append(mastg_ref)
         return 'WARN', "<br>\n".join(warn_issues)
     else:
         # Everything good
-        return 'PASS', "None"
+        return 'PASS', f"None{mastg_ref}"
     
 def check_http_uris(base):
     """
@@ -2625,8 +2660,12 @@ def check_http_uris(base):
             except:
                 pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0233/' target='_blank'>MASTG-TEST-0233: Hardcoded HTTP URLs</a></div>"
+
     if not hits:
-        return True, "None"
+        return True, f"None{mastg_ref}"
+
+    hits.append(mastg_ref)
     return False, "<br>\n".join(hits)
 
 def check_debuggable(manifest, base):
@@ -2637,10 +2676,12 @@ def check_debuggable(manifest, base):
     PASS otherwise.
     """
     txt = open(manifest, errors='ignore').read()
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0039/' target='_blank'>MASTG-TEST-0039: Testing whether the App is Debuggable</a></div>"
+
     if re.search(r'<application\b[^>]*\bandroid:debuggable="true"', txt, re.IGNORECASE):
-        return False, "android:debuggable=\"true\" in manifest"
+        return False, f"android:debuggable=\"true\" in manifest{mastg_ref}"
     if re.search(r'<application\b[^>]*\bandroid:testOnly="true"', txt, re.IGNORECASE):
-        return False, "android:testOnly=\"true\" in manifest"
+        return False, f"android:testOnly=\"true\" in manifest{mastg_ref}"
 
     # patterns to check
     patterns = {
@@ -2661,12 +2702,12 @@ def check_debuggable(manifest, base):
                 for idx, line in enumerate(f, 1):
                     if re.search(pat, line):
                         link = f'<a href="file://{abs_path}:{idx}">{rel}:{idx}</a>'
-                        return False, f"{link} {msg}"
+                        return False, f"{link} {msg}{mastg_ref}"
             # fallback if line not found
             link = f'<a href="file://{abs_path}">{rel}</a>'
-            return False, f"{link} {msg}"
+            return False, f"{link} {msg}{mastg_ref}"
 
-    return True, "No debug flags or debug-enabling calls found"
+    return True, f"No debug flags or debug-enabling calls found{mastg_ref}"
 
 def check_root_detection(manifest, base):
     """
@@ -2706,8 +2747,10 @@ def check_root_detection(manifest, base):
         if hits:
             findings[msg] = hits
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0045/' target='_blank'>MASTG-TEST-0045: Testing Root Detection</a></div>"
+
     if not findings:
-        return False, 'No root detection code found'
+        return False, f'No root detection code found{mastg_ref}'
 
     # Report all detection methods found with line numbers and snippets
     lines = []
@@ -2767,6 +2810,7 @@ def check_root_detection(manifest, base):
 
         lines.append('</details>')
 
+    lines.append(mastg_ref)
     return True, "\n".join(lines)
 
 def check_allow_backup(manifest):
@@ -2776,12 +2820,14 @@ def check_allow_backup(manifest):
     FAIL if android:allowBackup="true" or missing (backups enabled - insecure).
     """
     txt = open(manifest, errors='ignore').read()
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0009/' target='_blank'>MASTG-TEST-0009: Testing Backups for Sensitive Data</a></div>"
+
     m = re.search(r'<application\b[^>]*\bandroid:allowBackup="(true|false)"', txt)
     if not m:
-        return False, "android:allowBackup is missing (defaults to true - backups enabled). Set to false to prevent backup extraction."
+        return False, f"android:allowBackup is missing (defaults to true - backups enabled). Set to false to prevent backup extraction.{mastg_ref}"
     if m.group(1).lower() != 'false':
-        return False, f"android:allowBackup=\"{m.group(1)}\" - backups are enabled. Change to false to prevent data extraction via adb backup."
-    return True, "android:allowBackup=\"false\" - backups properly disabled"
+        return False, f"android:allowBackup=\"{m.group(1)}\" - backups are enabled. Change to false to prevent data extraction via adb backup.{mastg_ref}"
+    return True, f"android:allowBackup=\"false\" - backups properly disabled{mastg_ref}"
     
 def check_safe_browsing(manifest, base):
     """
@@ -2796,6 +2842,8 @@ def check_safe_browsing(manifest, base):
     INFO-ish PASS note if target/min < 26.
     Special handling for React Native apps (setSafeBrowsingEnabled not available).
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0031/' target='_blank'>MASTG-TEST-0031: Testing JavaScript Execution in WebViews</a></div>"
+
     # --- detect any WebView usage (smali/Java/RN) ---
     webview_patterns = [
         r'android\.webkit\.WebView\b',
@@ -2822,7 +2870,7 @@ def check_safe_browsing(manifest, base):
     for pat in webview_patterns:
         webview_hits += grep_code(base, pat)
     if not webview_hits:
-        return True, "No WebView usage detected"
+        return True, "No WebView usage detected" + mastg_ref
 
     # --- manifest explicit opt-out? ---
     try:
@@ -2835,7 +2883,7 @@ def check_safe_browsing(manifest, base):
         manifest_txt, re.IGNORECASE
     )
     if m and m.group(1).lower() == 'false':
-        return False, "Safe Browsing explicitly disabled via manifest meta-data"
+        return False, "Safe Browsing explicitly disabled via manifest meta-data" + mastg_ref
 
     # --- SDK applicability quick note ---
     def _sdk(txt):
@@ -2892,7 +2940,7 @@ def check_safe_browsing(manifest, base):
         for rel in sorted(set(disable_hits)):
             file_rel = rel.split(':', 1)[0]
             links.append(_first_anchor(file_rel, r'setSafeBrowsingEnabled'))
-        return False, "Safe Browsing disabled at runtime via code:<br>" + "<br>".join(links)
+        return False, "Safe Browsing disabled at runtime via code:<br>" + "<br>".join(links) + mastg_ref
 
     # 3) Suppressing the interstitial? Only if proceed() is called from the app's onSafeBrowsingHit(...)
     #    Ignore library namespaces to avoid false positives (androidx, chromium, RN, etc.)
@@ -2938,22 +2986,22 @@ def check_safe_browsing(manifest, base):
         for rel, start_ln in real_suppress:
             full = os.path.join(base, rel)
             links.append(f'<a href="file://{os.path.abspath(full)}:{start_ln}">{html.escape(rel)}:{start_ln}</a>')
-        return False, "App suppresses Safe Browsing interstitial (proceed() inside onSafeBrowsingHit):<br>" + "<br>".join(links)
+        return False, "App suppresses Safe Browsing interstitial (proceed() inside onSafeBrowsingHit):<br>" + "<br>".join(links) + mastg_ref
 
     # explicit enable → PASS
     if enable_hits:
-        return True, "Safe Browsing enabled at runtime via code"
+        return True, "Safe Browsing enabled at runtime via code" + mastg_ref
 
     # API applicability note
     if (min_sdk and min_sdk < 26) or (target_sdk and target_sdk < 26):
-        return True, "Targets < API 26; default enablement may not apply. No opt-out found."
+        return True, "Targets < API 26; default enablement may not apply. No opt-out found." + mastg_ref
 
     # React Native special case
     if is_react_native:
-        return True, "React Native app detected. Safe Browsing control limited in RN WebView. No opt-out found; default is ENABLED on API 26+"
+        return True, "React Native app detected. Safe Browsing control limited in RN WebView. No opt-out found; default is ENABLED on API 26+" + mastg_ref
 
     # default PASS (no opt-out found)
-    return True, "No Safe Browsing opt-out detected; default is ENABLED on API 26+"
+    return True, "No Safe Browsing opt-out detected; default is ENABLED on API 26+" + mastg_ref
 
 
 def check_exported_components(manifest, base=None):
@@ -2967,6 +3015,8 @@ def check_exported_components(manifest, base=None):
     - Launcher activities (MAIN + LAUNCHER)
     - App widgets (required to be exported)
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0029/' target='_blank'>MASTG-TEST-0029: Testing for Sensitive Functionality Exposure Through IPC</a></div>"
+
     tree = ET.parse(manifest)
     root = tree.getroot()
     pkg  = root.attrib.get('package', '')
@@ -3078,7 +3128,7 @@ def check_exported_components(manifest, base=None):
                     issues.append((tag, name, perm, has_if))
 
     if not issues:
-        return True, "None", 0
+        return True, "None" + mastg_ref, 0
 
     # 4) Format details
     lines = []
@@ -3112,7 +3162,7 @@ def check_exported_components(manifest, base=None):
 
         lines.append(detail)
 
-    return False, "<br><br>\n".join(lines), len(issues)
+    return False, "<br><br>\n".join(lines) + mastg_ref, len(issues)
 
 
 def check_sql_injection(base, manifest):
@@ -3122,6 +3172,8 @@ def check_sql_injection(base, manifest):
       • Grep for rawQuery(…) without args
       • For each hit, show a placeholder `adb shell content query` command
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0025/' target='_blank'>MASTG-TEST-0025: Testing for Injection Flaws</a></div>"
+
     AND_NS   = "http://schemas.android.com/apk/res/android"
     auth_attr = f"{{{AND_NS}}}authorities"
     exp_attr  = f"{{{AND_NS}}}exported"
@@ -3170,9 +3222,9 @@ def check_sql_injection(base, manifest):
         )
 
     if not issues:
-        return True, "None"
+        return True, "None" + mastg_ref
 
-    return False, "<br>\n".join(issues)
+    return False, "<br>\n".join(issues) + mastg_ref
 
 
 def check_raw_sql_queries(base):
@@ -3187,6 +3239,8 @@ def check_raw_sql_queries(base):
 
     Maps to MASVS-STORAGE and MASVS-CODE injection controls.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0304/' target='_blank'>MASTG-TEST-0304: Sensitive Data Stored Unencrypted via SQLite</a></div>"
+
     findings = {
         'Critical': [],  # rawQuery/execSQL with obvious concatenation
         'High': [],      # SQL methods with StringBuilder
@@ -3263,7 +3317,7 @@ def check_raw_sql_queries(base):
     total = sum(len(findings[k]) for k in ['Critical', 'High', 'Medium'])
 
     if total == 0:
-        return 'PASS', f"<div>No raw SQL injection risks detected</div><div>Scanned {scanned_files} files</div>"
+        return 'PASS', f"<div>No raw SQL injection risks detected</div><div>Scanned {scanned_files} files</div>" + mastg_ref
 
     lines = []
     lines.append(f"<div style='margin:2px 0'><strong>Scanned:</strong> {scanned_files} smali files • <strong>Total:</strong> {total} findings</div>")
@@ -3322,9 +3376,9 @@ def check_raw_sql_queries(base):
     has_critical_high = len(findings['Critical']) + len(findings['High']) > 0
 
     if has_critical_high:
-        return 'FAIL', '\n'.join(lines)
+        return 'FAIL', '\n'.join(lines) + mastg_ref
     else:
-        return 'WARN', '\n'.join(lines)
+        return 'WARN', '\n'.join(lines) + mastg_ref
 
 
 def analyze_sql_context(api_name, context, api_line_index):
@@ -3548,34 +3602,13 @@ def check_insecure_webview(base):
             except:
                 pass
 
-    if not hits:
-        return True, "None"
-        # Append MASTG references for the WebView checks
-    mastg_base = "https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/"
-    mastg_tests = [
-        "MASTG-TEST-0027",
-        "MASTG-TEST-0031",
-        "MASTG-TEST-0032",
-        "MASTG-TEST-0033",
-        "MASTG-TEST-0037",
-        "MASTG-TEST-0250-253",
-        "MASTG-TEST-0284",
-    ]
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0031/' target='_blank'>MASTG-TEST-0031: Testing JavaScript Execution in WebViews</a></div>"
 
-    refs = [
-        (
-            f"<a href='{mastg_base}{test}/' target='_blank'>{test}</a>"
-        )
-        for test in mastg_tests
-    ]
+    if not hits:
+        return True, f"None{mastg_ref}"
 
     details = "<br>\n".join(hits)
-    details += (
-        "<br><br><div><strong>MASTG References (Insecure WebView Usage):</strong></div>"
-        "<ul style='margin-left:20px;'>"
-        + "".join(f"<li>{ref}</li>" for ref in refs)
-        + "</ul>"
-    )
+    details += mastg_ref
 
     return False, details
 
@@ -3602,6 +3635,8 @@ def check_keyboard_cache(base, manifest):
     MASVS: MASVS-STORAGE-2 (Sensitive Data Disclosure)
     MASTG: MASTG-TEST-0001 (Testing Local Storage for Sensitive Data)
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0006/' target='_blank'>MASTG-TEST-0006: Determining Whether the Keyboard Cache Is Disabled for Text Input Fields</a></div>"
+
     issues = []
 
     # Get package name for ADB commands
@@ -3757,7 +3792,7 @@ def check_keyboard_cache(base, manifest):
                 continue
 
     if not issues:
-        return True, "No keyboard cache vulnerabilities detected", 0
+        return True, "No keyboard cache vulnerabilities detected" + mastg_ref, 0
 
     # Sort by severity (CRITICAL > HIGH > MEDIUM)
     severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2}
@@ -3772,7 +3807,7 @@ def check_keyboard_cache(base, manifest):
     for severity, issue_html in issues:
         lines.append(issue_html)
 
-    return False, "<br>\n".join(lines), len(issues)
+    return False, "<br>\n".join(lines) + mastg_ref, len(issues)
 
 
 def check_os_command_injection(base):
@@ -3791,6 +3826,8 @@ def check_os_command_injection(base):
     MASVS: MASVS-CODE-4 (Injection Flaws)
     MASTG: MASTG-TEST-0025
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0025/' target='_blank'>MASTG-TEST-0025: Testing for Injection Flaws</a></div>"
+
     # Use dict to deduplicate by activity class (group inner classes with parent)
     vulnerable_activities = {}
 
@@ -3894,7 +3931,7 @@ def check_os_command_injection(base):
                 continue
 
     if not vulnerable_activities:
-        return True, "No OS command injection risks detected", 0
+        return True, "No OS command injection risks detected" + mastg_ref, 0
 
     # Build output from deduplicated results
     hits = []
@@ -3909,7 +3946,7 @@ def check_os_command_injection(base):
         )
         hits.append(hit)
 
-    return False, "<br><br>\n".join(hits), len(vulnerable_activities)
+    return False, "<br><br>\n".join(hits) + mastg_ref, len(vulnerable_activities)
 
 
 def check_weak_crypto(base):
@@ -3973,8 +4010,12 @@ def check_weak_crypto(base):
                 issues.append(f"{link} – <code>{snippet}</code>")
                 break  # one hit per file
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0221/' target='_blank'>MASTG-TEST-0221: Broken Symmetric Encryption Algorithms</a></div>"
+
     if not issues:
-        return True, "None"
+        return True, f"None{mastg_ref}"
+
+    issues.append(mastg_ref)
     return False, "<br>\n".join(issues)
 
     
@@ -3985,6 +4026,8 @@ def check_kotlin_metadata(base):
     Only the first 100 hits are shown; total_hits is the real count.
     Filters out library code to show only app code issues.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0040/' target='_blank'>MASTG-TEST-0040: Testing for Debugging Symbols</a></div>"
+
     # Library paths to exclude (same pattern as other checks)
     lib_paths = (
         '/androidx/', '/android/support/',
@@ -4024,7 +4067,7 @@ def check_kotlin_metadata(base):
 
     total = len(hits)
     if total == 0:
-        return True, "None", 0
+        return True, "None" + mastg_ref, 0
 
     # only show first 100
     display = hits[:100]
@@ -4038,7 +4081,7 @@ def check_kotlin_metadata(base):
     if total > 100:
         lines.append(f"...and {total-100} more")
 
-    return False, "<br>\n".join(lines), total
+    return False, "<br>\n".join(lines) + mastg_ref, total
 
 
 def check_file_permissions(base):
@@ -4047,6 +4090,8 @@ def check_file_permissions(base):
     or if code sets file perms to 0666/0777.
     Links each .smali/.java file found.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+
     patterns = [
         # openFileOutput(..., MODE_WORLD_READABLE)
         r'openFileOutput\([\w, ]*,\s*MODE_WORLD_READABLE\)',
@@ -4057,18 +4102,18 @@ def check_file_permissions(base):
         # File.setPermissions(..., 0777, ...)
         r'\.setPermissions\([^,]+,\s*0+7+7+7+,[^)]*\)',
     ]
-    
+
     hits = set()
     for pat in patterns:
         for rel in grep_code(base, pat):
             hits.add(rel)
     if not hits:
-        return True, "None"
+        return True, "None" + mastg_ref
     lines = []
     for rel in sorted(hits):
         full = os.path.join(base, rel)
         lines.append(f'<a href="file://{full}">{rel}</a>')
-    return False, "<br>\n".join(lines)
+    return False, "<br>\n".join(lines) + mastg_ref
 
 def check_package_context(base):
     """
@@ -4080,6 +4125,7 @@ def check_package_context(base):
     Filters out third-party library code (Google Play Services, etc.)
     as these legitimately use this for dynamic module loading.
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0002/' target='_blank'>MASTG-TEST-0002: Testing Local Storage for Input Validation</a></div>"
 
     # Library paths to exclude (these use createPackageContext legitimately)
     lib_paths = (
@@ -4117,14 +4163,14 @@ def check_package_context(base):
                 hits.add(rel)
 
     if not hits:
-        return ('PASS', "No insecure createPackageContext usage detected")
+        return ('PASS', "No insecure createPackageContext usage detected" + mastg_ref)
 
     lines = []
     for rel in sorted(hits):
         full = os.path.join(base, rel)
         lines.append(f'<a href="file://{full}">{rel}</a>')
 
-    return ('FAIL', "<br>\n".join(lines))
+    return ('FAIL', "<br>\n".join(lines) + mastg_ref)
 
 def check_certificate_pinning(base):
     """
@@ -4310,6 +4356,7 @@ def check_certificate_pinning(base):
     summary_html = "<div>" + "</div><div>".join(summary_parts) + "</div><br>" if summary_parts else ""
 
     detail_html = summary_html + "<br>\n".join(sections)
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0022/' target='_blank'>MASTG-TEST-0022: Testing Custom Certificate Stores and Certificate Pinning</a></div>"
 
     # Decide PASS / WARN / FAIL
     if lib_hits or sslfactory_hits:
@@ -4318,7 +4365,7 @@ def check_certificate_pinning(base):
             "<br><div><em> Definitive certificate pinning detected. "
             "Dynamic testing recommended to verify pinning is active for all connections.</em></div>"
         )
-        return True, detail_html + confidence_note
+        return True, detail_html + confidence_note + mastg_ref
     if manual_hits or hv_hits:
         # only heuristics found -> warn
         warn_banner = (
@@ -4326,9 +4373,9 @@ def check_certificate_pinning(base):
             "No definitive pinning API found; heuristic patterns detected — "
             "please review above.</em><br><br>"
         )
-        return True, warn_banner + detail_html
+        return True, warn_banner + detail_html + mastg_ref
     # nothing found -> fail
-    return False, "<strong>No certificate pinning detected.</strong>"
+    return False, f"<strong>No certificate pinning detected.</strong>{mastg_ref}"
 
 def check_sharedprefs_encryption(base):
     """
@@ -4436,11 +4483,13 @@ def check_sharedprefs_encryption(base):
     encrypted_count = len(findings['encrypted'])
     unencrypted_count = len(findings['unencrypted'])
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0287/' target='_blank'>MASTG-TEST-0287: Sensitive Data Stored Unencrypted via the SharedPreferences API</a></div>"
+
     if unencrypted_count == 0 and encrypted_count == 0:
-        return 'PASS', f"<div>No SharedPreferences usage detected in app code</div><div>Scanned {scanned_files} app code files</div>"
+        return 'PASS', f"<div>No SharedPreferences usage detected in app code</div><div>Scanned {scanned_files} app code files</div>{mastg_ref}"
 
     if unencrypted_count == 0:
-        return 'PASS', f"<div>✓ All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>"
+        return 'PASS', f"<div>✓ All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>{mastg_ref}"
 
     # Build detailed report with collapsible sections
     lines = []
@@ -4497,6 +4546,8 @@ def check_sharedprefs_encryption(base):
         'See: <a href="https://developer.android.com/reference/androidx/security/crypto/EncryptedSharedPreferences" '
         'target="_blank">Android Security Crypto</a></em></div>'
     )
+
+    lines.append(mastg_ref)
 
     return 'FAIL', '\n'.join(lines)
 
@@ -4598,8 +4649,10 @@ def check_external_storage(base):
         if app_hits:
             permission_findings[desc] = app_hits
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>MASTG-TEST-0200: Files Written to External Storage</a></div>"
+
     if not (risky_findings or safe_findings or permission_findings):
-        return 'PASS', "<div>No external storage usage detected in app code</div>"
+        return 'PASS', f"<div>No external storage usage detected in app code</div>{mastg_ref}"
 
     lines = []
     has_risk = bool(risky_findings)
@@ -4635,6 +4688,8 @@ def check_external_storage(base):
                 lines.append(f"<div>{desc} in <a href=\"file://{html.escape(full)}\">{html.escape(rel)}</a></div>")
             if len(hits) > 5:
                 lines.append(f"<div>...and {len(hits) - 5} more</div>")
+
+    lines.append(mastg_ref)
 
     # Only FAIL if risky patterns found in app code
     if has_risk:
@@ -4914,8 +4969,10 @@ def check_hardcoded_keys(base):
     # Build report
     total_findings = sum(len(findings_by_confidence[cat]) for cat in findings_by_confidence)
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0212/' target='_blank'>MASTG-TEST-0212: Use of Hardcoded Cryptographic Keys in Code</a></div>"
+
     if total_findings == 0:
-        return True, f"<div>No hardcoded keys detected</div><div>Scanned {scanned_files} app files</div>"
+        return True, f"<div>No hardcoded keys detected</div><div>Scanned {scanned_files} app files</div>{mastg_ref}"
 
     lines = []
     lines.append(f"<div style='margin:2px 0'><strong>Scanned:</strong> {scanned_files} app files • <strong>Total:</strong> {total_findings} findings</div>")
@@ -4984,6 +5041,8 @@ def check_hardcoded_keys(base):
         f"Entropy analysis and pattern matching used to reduce false positives.</em></div>"
     )
 
+    lines.append(mastg_ref)
+
     # FAIL if critical or high confidence findings
     has_critical_or_high = len(findings_by_confidence['Critical']) + len(findings_by_confidence['High']) > 0
 
@@ -5026,10 +5085,12 @@ def check_key_sizes(base):
         except:
             pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0208/' target='_blank'>MASTG-TEST-0208: Insufficient Key Sizes</a></div>"
+
     if not issues:
         if rsa_files or aes_files:
-            return True, f"Key generation found in {len(rsa_files) + len(aes_files)} files, sizes appear adequate"
-        return True, "No key generation detected"
+            return True, f"Key generation found in {len(rsa_files) + len(aes_files)} files, sizes appear adequate{mastg_ref}"
+        return True, f"No key generation detected{mastg_ref}"
 
     lines = []
     for rel, msg in issues[:50]:
@@ -5038,6 +5099,8 @@ def check_key_sizes(base):
 
     if len(issues) > 50:
         lines.append(f"...and {len(issues) - 50} more")
+
+    lines.append(mastg_ref)
 
     return False, "<br>\n".join(lines)
 
@@ -5238,6 +5301,8 @@ def check_flag_secure(base, manifest):
     except:
         activity_count = 0
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0010/' target='_blank'>MASTG-TEST-0010: Finding Sensitive Information in Auto-Generated Screenshots</a></div>"
+
     if hits:
         lines = [
             f"<div> FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
@@ -5245,15 +5310,16 @@ def check_flag_secure(base, manifest):
         for rel in sorted(hits)[:15]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
-    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em> Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>"
+    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em> Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>{mastg_ref}"
 
 def check_webview_javascript_bridge(base):
     """
     Check for insecure WebView JavaScript interfaces.
 
-    CRITICAL VULNERABILITY: addJavascriptInterface() + remote content loading allows
+    VULNERABILITY: addJavascriptInterface() + remote content loading allows
     any JavaScript from the internet to call exposed Android methods.
 
     This checks:
@@ -5288,7 +5354,7 @@ def check_webview_javascript_bridge(base):
             with open(full_path, 'r', errors='ignore') as f:
                 content = f.read()
 
-            # Check if this file loads REMOTE content (critical vulnerability indicator)
+            # Check if this file loads REMOTE content (vulnerability indicator)
             remote_loading_patterns = [
                 r'loadUrl.*"https?://',           # loadUrl("http://...")
                 r'loadUrl.*Ljava/lang/String;',   # loadUrl(stringVar) - might be remote
@@ -5408,6 +5474,9 @@ def check_webview_javascript_bridge(base):
     # FAIL if remote content loading detected, regardless of annotations
     is_secure = len(files_with_remote_loading) == 0 and len(vulnerable_interfaces) == 0
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0033/' target='_blank'>MASTG-TEST-0033: Testing for Java Objects Exposed Through WebViews</a></div>"
+    lines.append(mastg_ref)
+
     return is_secure, "<br>\n".join(lines)
 
 def check_clipboard_security(base):
@@ -5510,8 +5579,10 @@ def check_clipboard_security(base):
             except Exception:
                 continue
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+
     if not critical_findings and not findings:
-        return 'PASS', f"<div>No clipboard usage detected</div><div>Scanned {scanned_files} files</div>", 0
+        return 'PASS', f"<div>No clipboard usage detected</div><div>Scanned {scanned_files} files</div>{mastg_ref}", 0
 
     # Build detailed report
     report_lines = []
@@ -5520,7 +5591,7 @@ def check_clipboard_security(base):
     if critical_findings:
         report_lines.append(
             f"<div style='background:#f8d7da; border-left:4px solid #dc3545; padding:10px; margin:10px 0;'>"
-            f"<strong>🚨 CRITICAL: Sensitive Data Copied to Clipboard</strong><br>"
+            f"<strong>Sensitive Data Copied to Clipboard</strong><br>"
             f"Found {len(critical_findings)} instance(s) of sensitive data (OTP, passwords, tokens) being copied to clipboard<br>"
             f"<strong>Risk:</strong> Any app can read clipboard and steal sensitive authentication data"
             f"</div><br>"
@@ -5597,6 +5668,8 @@ def check_clipboard_security(base):
         'Avoid copying sensitive data (OTP, passwords, tokens, credit cards) to clipboard.</em></div>'
     )
 
+    report_lines.append(mastg_ref)
+
     # Return FAIL if critical findings, WARN otherwise
     if critical_findings:
         return False, '\n'.join(report_lines), len(critical_findings)
@@ -5669,14 +5742,16 @@ def check_pii_location_info(base):
                     continue
                 break  # stop after first match in this file
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>"
+
     if not issues:
-        return True, "None"
+        return True, f"None{mastg_ref}"
 
     # Add context note for informational purposes
     note = "<strong>Note:</strong> Location usage detected in app code. "
     note += "Verify this is disclosed in privacy policy and necessary for app functionality.<br><br>"
 
-    return False, note + "<br>\n".join(issues)
+    return False, note + "<br>\n".join(issues) + mastg_ref
 
 
 def check_pii_wifi_info(base):
@@ -5724,10 +5799,12 @@ def check_pii_wifi_info(base):
                     continue
                 break  # stop after first match in this file
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>"
+
     if not issues:
-        return True, "None"
-    return False, "<br>\n".join(issues)
-    
+        return True, f"None{mastg_ref}"
+    return False, "<br>\n".join(issues) + mastg_ref
+
 def check_signature_schemes(apk_path):
     """
     Runs `apksigner verify --verbose --print-certs` on the APK and reports:
@@ -5757,8 +5834,10 @@ def check_signature_schemes(apk_path):
     missing = [v for v in all_schemes if v not in present]
 
     # Build base report with clear structure
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0224/' target='_blank'>MASTG-TEST-0224: Usage of Insecure Signature Version</a></div>"
+
     if not present:
-        return False, "No signature schemes found"
+        return False, f"No signature schemes found{mastg_ref}"
 
     report_lines = []
     has_failures = False
@@ -5810,6 +5889,7 @@ def check_signature_schemes(apk_path):
             )
 
     # Final verdict
+    report_lines.append(mastg_ref)
     if has_failures:
         return False, "<br>\n".join(report_lines)
 
@@ -5885,8 +5965,12 @@ def check_insecure_randomness(base):
                     continue
                 break  # only first hit per file
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0204/' target='_blank'>MASTG-TEST-0204: Insecure Random API Usage</a></div>"
+
     if not issues:
-        return True, "None"
+        return True, f"None{mastg_ref}"
+
+    issues.append(mastg_ref)
     return False, "<br>\n".join(issues)
     
 def check_insecure_fingerprint_api(base):
@@ -5903,6 +5987,7 @@ def check_insecure_fingerprint_api(base):
 
     MASTG Reference: https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/' target='_blank'>MASTG-TEST-0018: Testing Biometric Authentication</a></div>"
 
     # Library paths to exclude (not your app code)
     lib_paths = (
@@ -5983,12 +6068,12 @@ def check_insecure_fingerprint_api(base):
 
     # No FingerprintManager API usage detected
     if not fingerprint_files:
-        return 'PASS', "<div>No FingerprintManager API usage detected in app code</div>"
+        return 'PASS', "<div>No FingerprintManager API usage detected in app code</div>" + mastg_ref
 
     # CRITICAL: null CryptoObject detected - allows Frida bypass
     if null_crypto_files:
         lines = [
-            "<div><strong style='color:#dc2626;'>🔴 CRITICAL: FingerprintManager.authenticate() with NULL CryptoObject</strong></div>",
+            "<div><strong style='color:#dc2626;'>FingerprintManager.authenticate() with NULL CryptoObject</strong></div>",
             "<div style='margin-top:8px;'><strong>Security Impact:</strong> Authentication can be bypassed using Frida on rooted devices.</div>",
             "<div style='margin-top:8px;'><strong>Attack Vector:</strong></div>",
             "<ul style='margin-left:20px;'>",
@@ -6001,35 +6086,11 @@ def check_insecure_fingerprint_api(base):
         for link, snippet in null_crypto_files[:15]:
             lines.append(f"{link} → <code>{snippet}</code>")
 
-        lines.append("<br><div><strong>Required Fix:</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
-        lines.append("<li>Create KeyStore key with setUserAuthenticationRequired(true)</li>")
-        lines.append("<li>Create CryptoObject wrapping the key</li>")
-        lines.append("<li>Pass CryptoObject as first parameter to authenticate()</li>")
-        lines.append("<li>Use setInvalidatedByBiometricEnrollment(true) to invalidate on enrollment changes</li>")
-        lines.append("</ul>")
-
-        lines.append("<div style='margin-top:8px;'><strong>Secure Example:</strong></div>")
-        lines.append("<div style='margin-left:20px;background:#f5f5f5;padding:10px;border-radius:4px;'>")
-        lines.append("<code>")
-        lines.append("KeyGenerator keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, \"AndroidKeyStore\");<br>")
-        lines.append("keyGen.init(new KeyGenParameterSpec.Builder(KEY_NAME, PURPOSE_ENCRYPT | PURPOSE_DECRYPT)<br>")
-        lines.append("&nbsp;&nbsp;.setUserAuthenticationRequired(true)<br>")
-        lines.append("&nbsp;&nbsp;.setInvalidatedByBiometricEnrollment(true)<br>")
-        lines.append("&nbsp;&nbsp;.build());<br>")
-        lines.append("SecretKey key = keyGen.generateKey();<br>")
-        lines.append("Cipher cipher = Cipher.getInstance(...);<br>")
-        lines.append("cipher.init(Cipher.ENCRYPT_MODE, key);<br>")
-        lines.append("FingerprintManager.CryptoObject crypto = new FingerprintManager.CryptoObject(cipher);<br>")
-        lines.append("<strong>fingerprintManager.authenticate(crypto, ...);</strong>  // Secure - cannot be bypassed")
-        lines.append("</code>")
-        lines.append("</div>")
-
         lines.append("<br><div><strong>OWASP Reference:</strong> ")
         lines.append("<a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0002/' target='_blank'>")
         lines.append("MASTG-KNOW-0002: FingerprintManager Security</a></div>")
 
-        return 'FAIL', "<br>\n".join(lines)
+        return 'FAIL', "<br>\n".join(lines) + mastg_ref
 
     # FingerprintManager used - check for crypto binding
     if crypto_files or keystore_files:
@@ -6062,11 +6123,11 @@ def check_insecure_fingerprint_api(base):
         lines.append("<li>Maintain KeyStore crypto binding (setUserAuthenticationRequired)</li>")
         lines.append("</ul>")
 
-        return 'WARN', "<br>\n".join(lines)
+        return 'WARN', "<br>\n".join(lines) + mastg_ref
 
     # FingerprintManager used without crypto binding - potentially vulnerable
     lines = [
-        f"<div><strong style='color:#dc2626;'>❌ FAIL: FingerprintManager without cryptographic binding</strong></div>",
+        f"<div><strong style='color:#dc2626;'>FAIL: FingerprintManager without cryptographic binding</strong></div>",
         f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
         "<div style='margin-top:8px;'><strong>Security Risks:</strong></div>",
         "<ul style='margin-left:20px;'>",
@@ -6084,11 +6145,11 @@ def check_insecure_fingerprint_api(base):
     lines.append("<br><div><strong>Required Actions:</strong></div>")
     lines.append("<ol style='margin-left:20px;'>")
     lines.append("<li>Manual review required - check if authenticate() uses CryptoObject or null</li>")
-    lines.append("<li>If null: CRITICAL vulnerability - implement CryptoObject with KeyStore</li>")
+    lines.append("<li>If null: VULNERABILITY - implement CryptoObject with KeyStore</li>")
     lines.append("<li>Migrate to androidx.biometric.BiometricPrompt</li>")
     lines.append("</ol>")
 
-    return 'FAIL', "<br>\n".join(lines)
+    return 'FAIL', "<br>\n".join(lines) + mastg_ref
 
     
 def check_tls_versions(base):
@@ -6155,10 +6216,12 @@ def check_tls_versions(base):
         else:
             soft_hits.append(rel)
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
+
     if hard_hits:
         return False, (
             "App code may use legacy TLS:\n"
-            "• " + "<br>• ".join(hard_hits)
+            "• " + "<br>• ".join(hard_hits) + mastg_ref
         )
 
     # No app-owned risky usage; only library mentions or nothing
@@ -6168,9 +6231,9 @@ def check_tls_versions(base):
         libs_only = len(examples) == 0
         note = "Only library constants/enums mention TLSv1/1.1 (e.g., OkHttp/Conscrypt/React Native)." \
                if libs_only else "Mentions found, but no enabling/initialization detected."
-        return True, note
+        return True, note + mastg_ref
 
-    return True, "None"
+    return True, f"None{mastg_ref}"
 
 def check_frida_tls_negotiation(base, wait_secs=12):
     """
@@ -7747,6 +7810,8 @@ def check_storage_analysis(base, package_name):
 
     Returns (status, detail) where status is 'PASS'|'WARN'|'FAIL'
     """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+
     import difflib
 
     def get_storage_listing(pkg):
@@ -7792,7 +7857,7 @@ def check_storage_analysis(base, package_name):
     # Step 1: Get initial storage state
     initial_output, error = get_storage_listing(package_name)
     if error:
-        return 'FAIL', f"<div>Failed to get initial storage state: {html.escape(error)}</div>"
+        return 'FAIL', f"<div>Failed to get initial storage state: {html.escape(error)}</div>" + mastg_ref
     initial_files = parse_storage_output(initial_output)
 
     # Step 2: Clear app data
@@ -7800,7 +7865,7 @@ def check_storage_analysis(base, package_name):
         subprocess.run(['adb', 'shell', 'pm', 'clear', package_name],
                       capture_output=True, timeout=10, check=True)
     except Exception as e:
-        return 'FAIL', f"<div>Failed to clear app data: {html.escape(str(e))}</div>"
+        return 'FAIL', f"<div>Failed to clear app data: {html.escape(str(e))}</div>" + mastg_ref
 
     # Step 3: Launch app
     try:
@@ -7809,12 +7874,12 @@ def check_storage_analysis(base, package_name):
                       capture_output=True, timeout=10)
         time.sleep(5)
     except Exception as e:
-        return 'FAIL', f"<div>Failed to launch app: {html.escape(str(e))}</div>"
+        return 'FAIL', f"<div>Failed to launch app: {html.escape(str(e))}</div>" + mastg_ref
 
     # Step 4: Get final storage state
     final_output, error = get_storage_listing(package_name)
     if error:
-        return 'FAIL', f"<div>Failed to get final storage state: {html.escape(error)}</div>"
+        return 'FAIL', f"<div>Failed to get final storage state: {html.escape(error)}</div>" + mastg_ref
     final_files = parse_storage_output(final_output)
 
     new_dirs = set(final_files.keys()) - set(initial_files.keys())
@@ -7903,7 +7968,7 @@ def check_storage_analysis(base, package_name):
     else:
         status = 'PASS'
 
-    return status, "<br>\n".join(detail)
+    return status, "<br>\n".join(detail) + mastg_ref
 
 
 def check_pending_intent_flags(base):
@@ -7959,8 +8024,10 @@ def check_pending_intent_flags(base):
             except Exception:
                 pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/' target='_blank'>MASTG-TEST-0030: Testing for Vulnerable Implementation of PendingIntent</a></div>"
+
     if not immutable_files and not vulnerable_files and not mutable_files and not update_current_files:
-        return 'PASS', "No PendingIntent usage detected"
+        return 'PASS', f"No PendingIntent usage detected{mastg_ref}"
 
     issues = []
     status = 'PASS'
@@ -8002,8 +8069,9 @@ def check_pending_intent_flags(base):
         issues.append(f"<div>✓ FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
 
     if not issues:
-        return 'PASS', "All PendingIntents properly secured with FLAG_IMMUTABLE"
+        return 'PASS', f"All PendingIntents properly secured with FLAG_IMMUTABLE{mastg_ref}"
 
+    issues.append(mastg_ref)
     return status, "<br>\n".join(issues)
 
 
@@ -8048,14 +8116,17 @@ def check_webview_ssl_error_handling(base):
             except Exception:
                 pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0284/' target='_blank'>MASTG-TEST-0284: Incorrect SSL Error Handling in WebViews</a></div>"
+
     if not vulnerable_files:
-        return 'PASS', "No insecure SSL error handling detected in WebViews"
+        return 'PASS', f"No insecure SSL error handling detected in WebViews{mastg_ref}"
 
     result = [
         f"<div><strong>CRITICAL: {len(vulnerable_files)} SSL error handler(s) bypass certificate validation</strong></div>",
         "<div>WebViewClient.onReceivedSslError() calls proceed(), accepting all certificates.</div>",
         "<div>This allows man-in-the-middle attacks. Use cancel() instead.</div>",
-        "<br>".join(vulnerable_files[:20])
+        "<br>".join(vulnerable_files[:20]),
+        mastg_ref
     ]
 
     return 'FAIL', "<br>\n".join(result)
@@ -8092,6 +8163,8 @@ def check_recent_screenshot_disabled(base):
                 except Exception:
                     pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0292/' target='_blank'>MASTG-TEST-0292: setRecentsScreenshotEnabled Not Used to Prevent Screenshots When Backgrounded</a></div>"
+
     if protected_files:
         lines = [
             f"<div>✓ Recent screenshot protection detected in {len(protected_files)} file(s)</div>",
@@ -8100,6 +8173,7 @@ def check_recent_screenshot_disabled(base):
         for rel in sorted(protected_files)[:10]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
     return 'WARN', (
@@ -8107,6 +8181,7 @@ def check_recent_screenshot_disabled(base):
         "<div>Recommendation: Use <code>Activity.setRecentsScreenshotEnabled(false)</code> "
         "on activities displaying sensitive data (Android 13+).</div>"
         "<div>This prevents screenshots from appearing in the recent tasks overview.</div>"
+        f"{mastg_ref}"
     )
 
 
@@ -8202,6 +8277,8 @@ def check_dangerous_permissions(manifest):
     lines.append("<li>Request only when needed</li>")
     lines.append("</ul>")
 
+    lines.append("<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>")
+
     return status, "<br>\n".join(lines)
 
 
@@ -8278,8 +8355,10 @@ def check_datastore_encryption(base):
             except Exception:
                 pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0305/' target='_blank'>MASTG-TEST-0305: Sensitive Data Stored Unencrypted via DataStore</a></div>"
+
     if not datastore_files:
-        return 'PASS', "<div>No Jetpack DataStore usage detected in app code</div>"
+        return 'PASS', f"<div>No Jetpack DataStore usage detected in app code</div>{mastg_ref}"
 
     if encrypted_files:
         lines = [
@@ -8289,6 +8368,7 @@ def check_datastore_encryption(base):
         for rel in sorted(encrypted_files)[:5]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
     lines = [
@@ -8301,6 +8381,7 @@ def check_datastore_encryption(base):
         full = os.path.abspath(os.path.join(base, rel))
         lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
 
+    lines.append(mastg_ref)
     return 'WARN', "<br>\n".join(lines)
 
 
@@ -8377,8 +8458,10 @@ def check_room_encryption(base):
             except Exception:
                 pass
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0306/' target='_blank'>MASTG-TEST-0306: Sensitive Data Stored Unencrypted via Android Room DB</a></div>"
+
     if not room_files:
-        return 'PASS', "<div>No Room database usage detected in app code</div>"
+        return 'PASS', f"<div>No Room database usage detected in app code</div>{mastg_ref}"
 
     if encrypted_files:
         lines = [
@@ -8388,6 +8471,7 @@ def check_room_encryption(base):
         for rel in sorted(encrypted_files)[:5]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
     lines = [
@@ -8400,6 +8484,7 @@ def check_room_encryption(base):
         full = os.path.abspath(os.path.join(base, rel))
         lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
 
+    lines.append(mastg_ref)
     return 'WARN', "<br>\n".join(lines)
 
 
@@ -8424,10 +8509,13 @@ def check_anti_debugging(base):
         for rel in grep_code(base, pat):
             detections[desc].append(rel)
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0046/' target='_blank'>MASTG-TEST-0046: Testing Anti-Debugging Detection</a></div>"
+
     if not detections:
         return 'WARN', (
             "<div>No anti-debugging mechanisms detected</div>"
             "<div>Acceptable for most apps. Only implement for sensitive apps requiring anti-reverse-engineering.</div>"
+            f"{mastg_ref}"
         )
 
     lines = [f"<div>✓ {len(detections)} anti-debugging mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
@@ -8441,6 +8529,7 @@ def check_anti_debugging(base):
             lines.append(f"  ... and {len(files) - 3} more")
 
     lines.append("</ul>")
+    lines.append(mastg_ref)
     return 'PASS', "<br>\n".join(lines)
 
 
@@ -8463,6 +8552,8 @@ def check_gms_security_provider(base):
         for rel in grep_code(base, pat):
             provider_files.add(rel)
 
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0295/' target='_blank'>MASTG-TEST-0295: GMS Security Provider Not Updated</a></div>"
+
     if provider_files:
         lines = [
             f"<div>✓ GMS ProviderInstaller usage detected in {len(provider_files)} file(s)</div>",
@@ -8471,12 +8562,14 @@ def check_gms_security_provider(base):
         for rel in sorted(provider_files)[:5]:
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
     return 'WARN', (
         "<div>No GMS ProviderInstaller usage detected</div>"
         "<div>Recommendation: Call <code>ProviderInstaller.installIfNeeded(context)</code> at app startup.</div>"
         "<div>This updates the security provider with fixes for Heartbleed, POODLE, etc.</div>"
+        f"{mastg_ref}"
     )
 
 
