@@ -18,6 +18,7 @@ import hashlib
 import urllib.request
 import urllib.error
 from datetime import datetime
+from html import escape, unescape
 
 # Version tracking for auto-update
 __version__ = "3.1.0"
@@ -7360,6 +7361,52 @@ def check_frida_sharedprefs(base, wait_secs=10):
     setImmediate(function(){
       if (Java.available) {
         Java.perform(function(){
+          // Convert a byte[] to UTF-8 string
+            function bytesToUtf8(bytes, off, len) {
+            try {
+                var JavaString = Java.use("java.lang.String");
+                return JavaString.$new(bytes, off, len, "UTF-8").toString();
+            } catch (e) {
+                // Fallback – do a crude conversion if JavaString fails
+                var s = "";
+                for (var i = off; i < off + len; i++) {
+                s += String.fromCharCode(bytes[i] & 0xff);
+                }
+                return s;
+            }
+            }
+
+            // Extract key/value pairs from SharedPreferences XML
+            function parseSharedPrefsXml(xmlString) {
+            var results = [];
+            if (!xmlString) return results;
+
+            // <string name="foo">bar</string>
+            var reString = /<string\s+name="([^"]*)">([^<]*)<\/string>/g;
+            // <boolean name="foo" value="true" />
+            var reBool   = /<boolean\s+name="([^"]*)"\s+value="([^"]*)"\s*\/>/g;
+            // <int name="foo" value="123" />
+            var reInt    = /<int\s+name="([^"]*)"\s+value="([^"]*)"\s*\/>/g;
+            // <long name="foo" value="123" />
+            var reLong   = /<long\s+name="([^"]*)"\s+value="([^"]*)"\s*\/>/g;
+
+            var m;
+            while ((m = reString.exec(xmlString)) !== null) {
+                results.push({ key: m[1], value: m[2] });
+            }
+            while ((m = reBool.exec(xmlString)) !== null) {
+                results.push({ key: m[1], value: m[2] });
+            }
+            while ((m = reInt.exec(xmlString)) !== null) {
+                results.push({ key: m[1], value: m[2] });
+            }
+            while ((m = reLong.exec(xmlString)) !== null) {
+                results.push({ key: m[1], value: m[2] });
+            }
+
+            return results;
+        }                  
+
           // Hook SQLite for database storage (with noise filtering)
           try {
             var SQLiteDB = Java.use("android.database.sqlite.SQLiteDatabase");
@@ -7466,39 +7513,128 @@ def check_frida_sharedprefs(base, wait_secs=10):
               return this.$init(file, append);
             };
 
-            // Hook write to capture actual data
-            FileOutputStream.write.overload("[B").implementation = function(bytes) {
-              if (currentFileStream && bytes.length < 10000) {
+            // Hook all write overloads to capture actual data
+            try {
+              var originalWrite1 = FileOutputStream.write.overload("[B");
+              FileOutputStream.write.overload("[B").implementation = function(bytes) {
+                captureWrite(bytes);
+                return originalWrite1.call(this, bytes);
+              };
+            } catch(e) {}
+
+            try {
+              var originalWrite2 = FileOutputStream.write.overload("[B", "int", "int");
+              FileOutputStream.write.overload("[B", "int", "int").implementation = function(bytes, off, len) {
+                if (currentFileStream && off === 0) {
+                  captureWrite(bytes);
+                }
+                return originalWrite2.call(this, bytes, off, len);
+              };
+            } catch(e) {}
+
+            try {
+              var originalWrite3 = FileOutputStream.write.overload("int");
+              FileOutputStream.write.overload("int").implementation = function(b) {
+                return originalWrite3.call(this, b);
+              };
+            } catch(e) {}
+
+            function captureWrite(bytes) {
+            if (currentFileStream && bytes && bytes.length > 0 && bytes.length < 50000) {
                 try {
-                  var str = Java.use("java.lang.String").$new(bytes, "UTF-8");
-                  // Only log if it looks like XML preference data
-                  if (str.indexOf("<?xml") >= 0 || str.indexOf("<map>") >= 0) {
+                // Convert to a plain JS string
+                var jsStr = bytesToUtf8(bytes, 0, bytes.length);
+
+                // Check if it's XML preference data
+                if (jsStr.indexOf("<?xml") >= 0 ||
+                    jsStr.indexOf("<map>") >= 0 ||
+                    jsStr.indexOf("<string name=") >= 0) {
+
                     console.log("  └─ Writing preference data (" + bytes.length + " bytes)");
-                    // Extract key-value pairs if possible
-                    var keyMatches = str.match(/<string name="([^"]+)">([^<]*)</g);
-                    if (keyMatches) {
-                      for (var i = 0; i < Math.min(keyMatches.length, 5); i++) {
-                        var match = keyMatches[i].match(/<string name="([^"]+)">([^<]*)/);
+
+                    var allMatches = [];
+
+                    // String values
+                    var stringMatches = jsStr.match(/<string name="([^"]+)">([^<]*)<\/string>/g);
+                    if (stringMatches) {
+                    for (var i = 0; i < stringMatches.length; i++) {
+                        var match = stringMatches[i].match(/<string name="([^"]+)">([^<]*)<\/string>/);
                         if (match) {
-                          var key = match[1];
-                          var value = match[2].substring(0, 50);
-                          console.log("     " + key + " = " + value + (match[2].length > 50 ? "..." : ""));
-                          send({
-                            type: "file_write_detail",
-                            filename: currentFileStream.filename,
-                            timestamp: currentFileStream.timestamp,
-                            key: key,
-                            value: match[2],
-                            value_length: match[2].length
-                          });
+                        allMatches.push({key: match[1], value: match[2], type: "string"});
                         }
-                      }
                     }
-                  }
-                } catch(e) {}
-              }
-              return this.write(bytes);
-            };
+                    }
+
+                    // Boolean values
+                    var boolMatches = jsStr.match(/<boolean name="([^"]+)" value="([^"]+)" \/>/g);
+                    if (boolMatches) {
+                    for (var i = 0; i < boolMatches.length; i++) {
+                        var match = boolMatches[i].match(/<boolean name="([^"]+)" value="([^"]+)" \/>/);
+                        if (match) {
+                        allMatches.push({key: match[1], value: match[2], type: "boolean"});
+                        }
+                    }
+                    }
+
+                    // Int values
+                    var intMatches = jsStr.match(/<int name="([^"]+)" value="([^"]+)" \/>/g);
+                    if (intMatches) {
+                    for (var i = 0; i < intMatches.length; i++) {
+                        var match = intMatches[i].match(/<int name="([^"]+)" value="([^"]+)" \/>/);
+                        if (match) {
+                        allMatches.push({key: match[1], value: match[2], type: "int"});
+                        }
+                    }
+                    }
+
+                    // Long values
+                    var longMatches = jsStr.match(/<long name="([^"]+)" value="([^"]+)" \/>/g);
+                    if (longMatches) {
+                    for (var i = 0; i < longMatches.length; i++) {
+                        var match = longMatches[i].match(/<long name="([^"]+)" value="([^"]+)" \/>/);
+                        if (match) {
+                        allMatches.push({key: match[1], value: match[2], type: "long"});
+                        }
+                    }
+                    }
+
+                    // Float values
+                    var floatMatches = jsStr.match(/<float name="([^"]+)" value="([^"]+)" \/>/g);
+                    if (floatMatches) {
+                    for (var i = 0; i < floatMatches.length; i++) {
+                        var match = floatMatches[i].match(/<float name="([^"]+)" value="([^"]+)" \/>/);
+                        if (match) {
+                        allMatches.push({key: match[1], value: match[2], type: "float"});
+                        }
+                    }
+                    }
+
+                    // Log and send first 10 entries
+                    for (var i = 0; i < Math.min(allMatches.length, 10); i++) {
+                    var entry = allMatches[i];
+                    var valuePreview = entry.value.substring(0, 50);
+                    console.log("     " + entry.key + " = " + valuePreview + (entry.value.length > 50 ? "..." : ""));
+
+                    send({
+                        type: "file_write_detail",
+                        filename: currentFileStream.filename,
+                        timestamp: currentFileStream.timestamp,
+                        key: entry.key,
+                        value: entry.value,
+                        value_type: entry.type,
+                        value_length: entry.value.length
+                    });
+                    }
+
+                    if (allMatches.length > 10) {
+                    console.log("     ...and " + (allMatches.length - 10) + " more entries");
+                    }
+                }
+                } catch(e) {
+                console.log("  └─ Error parsing write: " + e);
+                }
+            }
+            }
           } catch(e) { console.log("FileOutputStream hook error: " + e); }
 
           // Entropy calculation function
@@ -7900,11 +8036,13 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if datastore_ops:
         detail.append("<div><strong>DataStore Operations:</strong></div>")
         for op in datastore_ops[:20]:
-            value_preview = op['value'][:50] + ('...' if len(op['value']) > 50 else '')
+            raw_value = unescape(op['value'])
+            value_preview = raw_value[:50] + ('...' if len(raw_value) > 50 else '')
             sensitive_note = " <em>(sensitive)</em>" if op['sensitive'] else ""
             detail.append(
                 f"<div style='margin-left:15px'>{op['operation']}: "
-                f"<code>{html.escape(op['key'])}</code> = <code>{html.escape(value_preview)}</code>"
+                f"<code>{escape(op['key'])}</code> = "
+                f"<code>{escape(value_preview, quote=False)}</code>"
                 f"{sensitive_note}</div>"
             )
         if len(datastore_ops) > 20:
@@ -7917,47 +8055,63 @@ def check_frida_sharedprefs(base, wait_secs=10):
         for prefs_name, data in prefs_accessed.items():
             encryption_status = "Encrypted" if data['encrypted'] else "Plain"
             detail.append(
-                f"<div style='margin-left:15px'><strong>{html.escape(prefs_name)}</strong> "
+                f"<div style='margin-left:15px'><strong>{escape(prefs_name)}</strong> "
                 f"<em>({encryption_status})</em></div>"
             )
 
             if data['writes']:
                 for write in data['writes'][:10]:
-                    value_preview = write['value'][:50] + ('...' if len(write['value']) > 50 else '')
+                    raw_value = unescape(write['value'])
+                    value_preview = raw_value[:50] + ('...' if len(raw_value) > 50 else '')
                     sensitive_note = " <em>(sensitive)</em>" if write['sensitive'] else ""
                     detail.append(
                         f"<div style='margin-left:30px'>WRITE: "
-                        f"<code>{html.escape(write['key'])}</code> = <code>{html.escape(value_preview)}</code>"
+                        f"<code>{escape(write['key'])}</code> = "
+                        f"<code>{escape(value_preview, quote=False)}</code>"
                         f"{sensitive_note}</div>"
                     )
                 if len(data['writes']) > 10:
                     detail.append(f"<div style='margin-left:30px'><em>...and {len(data['writes']) - 10} more writes</em></div>")
         detail.append("<br>")
 
-    # File writes
     if file_writes:
         detail.append("<div><strong>Direct File Writes to shared_prefs/:</strong></div>")
+        MAX_FILE_WRITE_ENTRIES = 30  # per file
+
         for filename in sorted(file_writes.keys())[:10]:
             write_data = file_writes[filename]
-            timestamp = write_data['timestamp']
             details = write_data['details']
 
+            # Just show the file name – no date/time
             detail.append(
-                f"<div style='margin-left:15px'><strong>{html.escape(filename)}</strong> "
-                f"<em>at {html.escape(timestamp)}</em></div>"
+                f"<div style='margin-left:15px'><strong>{escape(filename)}</strong></div>"
             )
 
             if details:
-                for item in details[:5]:
-                    value_preview = item['value'][:50] + ('...' if len(item['value']) > 50 else '')
+                # How many entries we’ll actually render for this file
+                to_show = min(len(details), MAX_FILE_WRITE_ENTRIES)
+
+                for item in details[:to_show]:
+                    # Undo any entity encoding (e.g. &quot;) then escape safely without touching quotes
+                    raw_value = unescape(item['value'])
+                    # For MASTG, show the full value (JSON etc.), not cropped
+                    value_preview = raw_value
+
                     detail.append(
                         f"<div style='margin-left:30px'>WRITE: "
-                        f"<code>{html.escape(item['key'])}</code> = <code>{html.escape(value_preview)}</code></div>"
+                        f"<code>{escape(item['key'])}</code> = "
+                        f"<code>{escape(value_preview, quote=False)}</code></div>"
                     )
-                if len(details) > 5:
-                    detail.append(f"<div style='margin-left:30px'><em>...and {len(details) - 5} more writes</em></div>")
+
+                if len(details) > to_show:
+                    detail.append(
+                        f"<div style='margin-left:30px'><em>.and {len(details) - to_show} more writes</em></div>"
+                    )
             else:
-                detail.append(f"<div style='margin-left:30px'><em>No content details captured</em></div>")
+                # Write observed, but we couldn't parse XML content
+                detail.append(
+                    "<div style='margin-left:30px'><em>Write observed, XML content not parsed</em></div>"
+                )
 
         if len(file_writes) > 10:
             detail.append(f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>")
