@@ -328,6 +328,11 @@ HTML_TEMPLATE = '''
     font-weight: 600;
   }}
 
+  .info {{
+    color: #2563eb;
+    font-weight: 600;
+  }}
+
   /* === DETAILS/SUMMARY (Collapsible Sections) === */
   details {{
     background: white;
@@ -7439,7 +7444,14 @@ def check_frida_sharedprefs(base, wait_secs=10):
             FileOutputStream.$init.overload("java.io.File", "boolean").implementation = function(file, append) {
               var path = file.getAbsolutePath();
               if (path.indexOf("shared_prefs") >= 0) {
-                console.log("📁 FileOutputStream writing to shared_prefs: " + path);
+                // Extract just the filename from the path
+                var filename = path.substring(path.lastIndexOf("/") + 1);
+                console.log("📁 FileOutputStream writing to shared_prefs: " + filename);
+                send({
+                  type: "file_write",
+                  filename: filename,
+                  path: path
+                });
               }
               return this.$init(file, append);
             };
@@ -7788,6 +7800,12 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
                         flag_str = f" [{', '.join(flags)}]" if flags else ""
                         findings.append(f"{marker} DataStore.set('{key}', '{value[:30]}...'){flag_str}")
+                    elif payload.get('type') == 'file_write':
+                        # Handle direct file writes to shared_prefs
+                        filename = payload.get('filename', '')
+                        # Filter out Google analytics noise
+                        if 'gms.measurement' not in filename and 'firebase' not in filename:
+                            findings.append(f"📁 File write: {filename}")
                     elif payload.get('type') == 'prefs_write':
                         key = payload.get('key', '')
                         value = payload.get('value', '')
@@ -9464,6 +9482,8 @@ def main():
                 count = det.count('<a href=') or (det.count('<br>') + 1)
                 if count > 1:
                     status = f"WARN ({count})"
+            elif ok == 'INFO':
+                cls = 'info'
             else:  # FAIL
                 cls = 'fail'
                 count = det.count('<a href=') or (det.count('<br>') + 1)
@@ -9582,7 +9602,7 @@ def main():
             # Back-compat: existing fns return (bool, detail); new fns return ('PASS'|'WARN'|'FAIL', detail)
             if isinstance(res[0], str):
                 status, det = res[0], res[1]
-                cls = {'PASS':'pass', 'WARN':'warn', 'FAIL':'fail'}.get(status, 'fail')
+                cls = {'PASS':'pass', 'WARN':'warn', 'FAIL':'fail', 'INFO':'info'}.get(status, 'fail')
             else:
                 ok, det = res
                 status  = 'PASS' if ok else 'FAIL'
