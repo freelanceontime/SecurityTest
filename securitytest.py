@@ -7355,15 +7355,36 @@ def check_frida_sharedprefs(base, wait_secs=10):
     setImmediate(function(){
       if (Java.available) {
         Java.perform(function(){
-          // Hook SQLite for database storage
+          // Hook SQLite for database storage (with noise filtering)
           try {
             var SQLiteDB = Java.use("android.database.sqlite.SQLiteDatabase");
             SQLiteDB.insert.overload("java.lang.String", "java.lang.String", "android.content.ContentValues").implementation = function(table, nullColumnHack, values) {
-              console.log("💾 SQLite insert into table: " + table + " values: " + values);
+              // Filter out noisy analytics tables
+              var noiseFilter = ['events', 'event_metadata', 'crashlytics', 'analytics', 'firebase', 'log'];
+              var isNoise = false;
+              for (var i = 0; i < noiseFilter.length; i++) {
+                if (table.toLowerCase().indexOf(noiseFilter[i]) >= 0) {
+                  isNoise = true;
+                  break;
+                }
+              }
+              if (!isNoise) {
+                console.log("💾 SQLite insert into table: " + table + " values: " + values);
+              }
               return this.insert(table, nullColumnHack, values);
             };
             SQLiteDB.update.overload("java.lang.String", "android.content.ContentValues", "java.lang.String", "[Ljava.lang.String;").implementation = function(table, values, whereClause, whereArgs) {
-              console.log("💾 SQLite update table: " + table + " values: " + values);
+              var noiseFilter = ['events', 'event_metadata', 'crashlytics', 'analytics', 'firebase', 'log'];
+              var isNoise = false;
+              for (var i = 0; i < noiseFilter.length; i++) {
+                if (table.toLowerCase().indexOf(noiseFilter[i]) >= 0) {
+                  isNoise = true;
+                  break;
+                }
+              }
+              if (!isNoise) {
+                console.log("💾 SQLite update table: " + table + " values: " + values);
+              }
               return this.update(table, values, whereClause, whereArgs);
             };
           } catch(e) { console.log("SQLite hooks skipped"); }
@@ -7372,6 +7393,44 @@ def check_frida_sharedprefs(base, wait_secs=10):
           try {
             var DataStore = Java.use("androidx.datastore.preferences.core.PreferencesKt");
             console.log("🔍 DataStore detected");
+
+            // Hook DataStore edit/write operations
+            try {
+              var MutablePreferences = Java.use("androidx.datastore.preferences.core.MutablePreferences");
+
+              // Hook set() for string values
+              var stringKey = Java.use("androidx.datastore.preferences.core.Preferences$Key");
+              MutablePreferences.set.overload("androidx.datastore.preferences.core.Preferences$Key", "java.lang.Object").implementation = function(key, value) {
+                var keyName = key.getName ? key.getName() : String(key);
+                var valueStr = String(value);
+                console.log("✏️  DataStore.set: " + keyName + " = " + valueStr.substring(0, 50));
+
+                // Check for sensitive data
+                var sensitive = false;
+                var keywords = ['password', 'passwd', 'pwd', 'token', 'secret', 'key', 'auth', 'pin', 'code'];
+                var lowerKey = String(keyName).toLowerCase();
+                var lowerVal = valueStr.toLowerCase();
+                for (var i = 0; i < keywords.length; i++) {
+                  if (lowerKey.indexOf(keywords[i]) >= 0 || lowerVal.indexOf(keywords[i]) >= 0) {
+                    sensitive = true;
+                    break;
+                  }
+                }
+
+                send({
+                  type: "datastore_write",
+                  key: keyName,
+                  value: valueStr.substring(0, 100),
+                  sensitive: sensitive,
+                  valueLength: valueStr.length
+                });
+
+                return this.set(key, value);
+              };
+              console.log("✅ DataStore hooks installed");
+            } catch(e) {
+              console.log("DataStore hook error: " + e);
+            }
           } catch(e) {}
 
           // Hook direct File writes to shared_prefs directory
@@ -7408,7 +7467,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             if (!text) return false;
             var keywords = ['password', 'passwd', 'pwd', 'token', 'secret', 'key', 'auth',
                            'bearer', 'credential', 'api', 'private', 'credit', 'card', 'ssn',
-                           'session', 'oauth', 'jwt', 'cipher', 'encrypt'];
+                           'session', 'oauth', 'jwt', 'cipher', 'encrypt', 'pin', 'code', 'passcode'];
             var lower = text.toLowerCase();
             for (var i = 0; i < keywords.length; i++) {
               if (lower.indexOf(keywords[i]) >= 0) return true;
@@ -7667,17 +7726,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             };
           } catch(e) {}
 
-          // Log ALL methods called on Editor to debug what's happening
-          try {
-            var Editor = Java.use("android.content.SharedPreferences$Editor");
-            var methods = Editor.class.getDeclaredMethods();
-            console.log("🔍 Available Editor methods: " + methods.length);
-            for (var i = 0; i < methods.length; i++) {
-              console.log("   - " + methods[i].getName());
-            }
-          } catch(e) {}
-
-          console.log("✅ SharedPreferences hooks installed successfully");
+          console.log("✅ SharedPreferences/DataStore hooks installed successfully");
           send({type: "ready", msg: "SharedPreferences hooks installed"});
         });
       } else {
@@ -7698,11 +7747,11 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
     # Interactive monitoring with user prompt
     instructions = [
-        f"App '{spawn_name}' is running with SharedPreferences monitoring",
-        "Use app features that save/load settings or data",
-        "Watch for SharedPreferences read/write operations below"
+        f"App '{spawn_name}' is running with SharedPreferences/DataStore monitoring",
+        "Use app features that save/load settings or data (PINs, passwords, tokens)",
+        "Watch for preference write operations below"
     ]
-    logs = interactive_frida_monitor(proc, "SHAREDPREFERENCES", instructions)
+    logs = interactive_frida_monitor(proc, "SHAREDPREFERENCES/DATASTORE", instructions)
 
     # Parse collected logs
     findings = []
@@ -7724,6 +7773,21 @@ def check_frida_sharedprefs(base, wait_secs=10):
                         else:
                             plain_count += 1
                             findings.append(f"WARNING: Plain: {payload.get('name')}")
+                    elif payload.get('type') == 'datastore_write':
+                        # Handle DataStore writes
+                        key = payload.get('key', '')
+                        value = payload.get('value', '')
+                        sensitive = payload.get('sensitive', False)
+                        value_len = payload.get('valueLength', 0)
+
+                        marker = "⚠️" if sensitive else "📝"
+                        flags = []
+                        if sensitive:
+                            flags.append("sensitive")
+                            critical_findings.append(f"DataStore: {key}")
+
+                        flag_str = f" [{', '.join(flags)}]" if flags else ""
+                        findings.append(f"{marker} DataStore.set('{key}', '{value[:30]}...'){flag_str}")
                     elif payload.get('type') == 'prefs_write':
                         key = payload.get('key', '')
                         value = payload.get('value', '')
@@ -7772,16 +7836,16 @@ def check_frida_sharedprefs(base, wait_secs=10):
     os.unlink(tmp.name)
 
     if not findings:
-        return 'INFO', "<strong>No SharedPreferences usage observed during runtime</strong>"
+        return 'INFO', "<strong>No SharedPreferences/DataStore usage observed during runtime</strong>"
 
     detail = [
         f"<div><strong>Summary:</strong></div>",
-        f"<div> Encrypted accesses: {encrypted_count}</div>",
-        f"<div> Plain accesses: {plain_count}</div>",
+        f"<div> Encrypted SharedPreferences: {encrypted_count}</div>",
+        f"<div> Plain SharedPreferences: {plain_count}</div>",
     ]
 
     if critical_findings:
-        detail.append(f"<div> Critical issues: {len(critical_findings)}</div>")
+        detail.append(f"<div>⚠️ Sensitive data detected: {len(critical_findings)}</div>")
         for cf in critical_findings[:5]:
             detail.append(f"<div class='detail-list-item'>{html.escape(cf)}</div>")
 
@@ -7790,7 +7854,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if len(findings) > 50:
         detail.append(f"<div>...and {len(findings) - 50} more</div>")
 
-    detail.append("<br><div><em>Legend: =Critical =Sensitive =High entropy 📝=Normal</em></div>")
+    detail.append("<br><div><em>Legend: =Critical ⚠️=Sensitive =High entropy 📝=Normal</em></div>")
 
     # Always return INFO status - this is informational monitoring
     return 'INFO', "<br>\n".join(detail)
