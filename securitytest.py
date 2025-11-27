@@ -8088,24 +8088,32 @@ def check_frida_sharedprefs(base, wait_secs=10):
             )
 
             if details:
-                # How many entries we’ll actually render for this file
-                to_show = min(len(details), MAX_FILE_WRITE_ENTRIES)
-
-                for item in details[:to_show]:
-                    # Undo any entity encoding (e.g. &quot;) then escape safely without touching quotes
+                # Build an ordered list of UNIQUE (key, value) pairs
+                unique_entries = []
+                seen = set()
+                for item in details:
                     raw_value = unescape(item['value'])
-                    # For MASTG, show the full value (JSON etc.), not cropped
-                    value_preview = raw_value
+                    sig = (item['key'], raw_value)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    unique_entries.append((item['key'], raw_value))
 
+                to_show = min(len(unique_entries), MAX_FILE_WRITE_ENTRIES)
+
+                for key, raw_value in unique_entries[:to_show]:
+                    # For MASTG, show full value but wrap long JSON so it doesn't run off the page
+                    value_preview = raw_value
                     detail.append(
-                        f"<div style='margin-left:30px'>WRITE: "
-                        f"<code>{escape(item['key'])}</code> = "
+                        "<div style='margin-left:30px; "
+                        "white-space:pre-wrap; word-break:break-all;'>"
+                        f"WRITE: <code>{escape(key)}</code> = "
                         f"<code>{escape(value_preview, quote=False)}</code></div>"
                     )
 
-                if len(details) > to_show:
+                if len(unique_entries) > to_show:
                     detail.append(
-                        f"<div style='margin-left:30px'><em>.and {len(details) - to_show} more writes</em></div>"
+                        f"<div style='margin-left:30px'><em>.and {len(unique_entries) - to_show} more unique writes</em></div>"
                     )
             else:
                 # Write observed, but we couldn't parse XML content
@@ -8114,7 +8122,9 @@ def check_frida_sharedprefs(base, wait_secs=10):
                 )
 
         if len(file_writes) > 10:
-            detail.append(f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>")
+            detail.append(
+                f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>"
+            )
         detail.append("<br>")
 
     # MASTG reference
