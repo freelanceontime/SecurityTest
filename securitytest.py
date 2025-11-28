@@ -1182,13 +1182,21 @@ def is_likely_secret(value, key_name=""):
         confidence += 0.2
         reasons.append(f"sensitive value: {', '.join(val_categories)}")
 
-    # Common secret prefixes
+    # Common secret prefixes and patterns
     secret_prefixes = ['sk_', 'pk_', 'AKIA', 'AIza', 'ya29.', 'glpat-', 'ghp_', 'github_pat_']
     for prefix in secret_prefixes:
         if value.startswith(prefix):
             confidence += 0.5
             reasons.append(f"known secret prefix: {prefix}")
             break
+
+    # Check for known secret patterns (not just prefixes)
+    if re.match(r'^[0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com$', value):
+        confidence += 0.6
+        reasons.append("Google OAuth Client ID pattern")
+    elif value.endswith('.apps.googleusercontent.com'):
+        confidence += 0.6
+        reasons.append("Google OAuth Client ID domain")
 
     # Cap confidence at 1.0
     confidence = min(confidence, 1.0)
@@ -4886,7 +4894,6 @@ def check_hardcoded_keys(base):
         r'/debug/',
         r'/BuildConfig',
         r'/R\.',
-        r'res/values/',      # Exclude Android resource XML files
         r'res/color/',
         r'res/drawable/',
         r'res/layout/',
@@ -4907,21 +4914,31 @@ def check_hardcoded_keys(base):
         # Key-value patterns with sensitive keywords (captures both key and value)
         (r'(?i)(api[_-]?key|apikey|secret[_-]?key|private[_-]?key|access[_-]?token|client[_-]?secret)["\']?\s*[:=]\s*["\']([^"\']{8,})["\']', 2, 1),
 
-        # Known secret patterns (high confidence)
-        (r'"(AKIA[0-9A-Z]{16})"', 1, None),  # AWS Access Key
-        (r'"(AIza[0-9A-Za-z\-_]{35})"', 1, None),  # Google API Key
-        (r'"(ya29\.[0-9A-Za-z\-_]+)"', 1, None),  # Google OAuth
-        (r'"(sk_live_[0-9a-zA-Z]{24,})"', 1, None),  # Stripe Secret Key
-        (r'"(pk_live_[0-9a-zA-Z]{24,})"', 1, None),  # Stripe Publishable Key
-        (r'"(sq0atp-[0-9A-Za-z\-_]{22})"', 1, None),  # Square Access Token
-        (r'"(ghp_[0-9a-zA-Z]{36})"', 1, None),  # GitHub Personal Access Token
-        (r'"(glpat-[0-9a-zA-Z\-_]{20})"', 1, None),  # GitLab Personal Access Token
+        # XML string resources (for strings.xml files)
+        (r'<string[^>]*name=["\']([^"\']*)["\'][^>]*>([^<]{8,})</string>', 2, 1),  # Generic XML string
+
+        # Known secret patterns (high confidence) - for both code and XML
+        (r'(AKIA[0-9A-Z]{16})', 1, None),  # AWS Access Key (unquoted for XML)
+        (r'(AIza[0-9A-Za-z\-_]{35})', 1, None),  # Google API Key (unquoted for XML)
+        (r'(ya29\.[0-9A-Za-z\-_]+)', 1, None),  # Google OAuth Access Token (unquoted for XML)
+        (r'([0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com)', 1, None),  # Google OAuth Client ID (unquoted for XML)
+        (r'(sk_live_[0-9a-zA-Z]{24,})', 1, None),  # Stripe Secret Key (unquoted for XML)
+        (r'(pk_live_[0-9a-zA-Z]{24,})', 1, None),  # Stripe Publishable Key (unquoted for XML)
+        (r'(sq0atp-[0-9A-Za-z\-_]{22})', 1, None),  # Square Access Token (unquoted for XML)
+        (r'(ghp_[0-9a-zA-Z]{36})', 1, None),  # GitHub Personal Access Token (unquoted for XML)
+        (r'(glpat-[0-9a-zA-Z\-_]{20})', 1, None),  # GitLab Personal Access Token (unquoted for XML)
 
         # JWT tokens
-        (r'"(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"', 1, None),
+        (r'(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})', 1, None),
 
         # Private keys
         (r'(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)', 1, None),
+
+        # Quoted versions for code files
+        (r'"(AKIA[0-9A-Z]{16})"', 1, None),
+        (r'"(AIza[0-9A-Za-z\-_]{35})"', 1, None),
+        (r'"(ya29\.[0-9A-Za-z\-_]+)"', 1, None),
+        (r'"([0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com)"', 1, None),
 
         # Base64-like strings (must be quoted to avoid class names)
         (r'"([A-Za-z0-9+/=]{40,})"', 1, None),
@@ -4953,28 +4970,23 @@ def check_hardcoded_keys(base):
             if is_library_file(rel_path):
                 continue
 
-            # Skip Android resource XML files entirely
-            # These contain UI strings, colors, dimensions - not secrets
+            # Skip certain Android resource XML files that don't contain secrets
+            # BUT SCAN strings.xml as developers often mistakenly put API keys there!
             if f.endswith('.xml'):
                 # Normalize path separators for cross-platform compatibility
                 normalized_path = rel_path.replace('\\', '/').lower()
-                # Skip if in any res subdirectory, if it's AndroidManifest, or common config files
-                if ('res/' in normalized_path or
-                    'androidmanifest' in normalized_path.lower() or
-                    'strings.xml' in f.lower() or
+                # Skip non-secret XML files (but NOT strings.xml!)
+                if ('androidmanifest' in normalized_path.lower() or
                     'colors.xml' in f.lower() or
                     'dimens.xml' in f.lower() or
-                    'styles.xml' in f.lower()):
+                    'styles.xml' in f.lower() or
+                    'attrs.xml' in f.lower()):
                     continue
 
             scanned_files += 1
 
             try:
                 content = open(full_path, errors='ignore').read()
-
-                # Skip obvious test/example files
-                if any(keyword in content.lower() for keyword in ['example', 'sample', 'demo', 'placeholder', 'fake', 'dummy']):
-                    continue
 
                 # Search for patterns
                 for pattern_tuple in string_patterns:
@@ -5026,14 +5038,28 @@ def check_hardcoded_keys(base):
                                 continue
 
                             # Skip Java/Kotlin package and class names (contain dots and look like com.package.Class)
+                            # BUT DON'T skip known secret patterns like *.apps.googleusercontent.com
                             if '.' in value and not value.startswith('.'):
-                                # Check if it looks like a fully qualified class name
-                                parts = value.split('.')
-                                # If it has multiple parts and most are lowercase (package structure), skip it
-                                if len(parts) >= 3:
-                                    lowercase_parts = sum(1 for p in parts if p and p[0].islower())
-                                    if lowercase_parts >= len(parts) - 2:  # Most parts are lowercase (package names)
-                                        continue
+                                # Check if it's a known secret pattern first
+                                known_secret_patterns = [
+                                    r'AKIA[0-9A-Z]{16}',
+                                    r'AIza[0-9A-Za-z\-_]{35}',
+                                    r'ya29\.[0-9A-Za-z\-_]+',
+                                    r'[0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com',
+                                    r'sk_live_[0-9a-zA-Z]{24,}',
+                                    r'pk_live_[0-9a-zA-Z]{24,}',
+                                    r'.*\.apps\.googleusercontent\.com$',  # Any Google OAuth Client ID
+                                ]
+                                is_known_secret = any(re.match(pattern, value) for pattern in known_secret_patterns)
+
+                                if not is_known_secret:
+                                    # Check if it looks like a fully qualified class name
+                                    parts = value.split('.')
+                                    # If it has multiple parts and most are lowercase (package structure), skip it
+                                    if len(parts) >= 3:
+                                        lowercase_parts = sum(1 for p in parts if p and p[0].islower())
+                                        if lowercase_parts >= len(parts) - 2:  # Most parts are lowercase (package names)
+                                            continue
 
                             # Skip strings that look like error messages or natural language
                             # (contain spaces and common English words, not just identifiers)
@@ -6694,8 +6720,9 @@ def check_frida_pinning(base, wait_secs=15):
     Dynamic pinning *detection* via USB+Frida CLI (inline JS):
       • Discovers installed package
       • Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      • Collects send({ev:…, class:…, method:…}) messages for wait_secs
-      • Terminates Frida, stops app, returns (ok, HTML-report)
+      • Collects send({ev:…, class:…, method:…, host:…}) messages for wait_secs
+      • Monitors ALL network requests (pinned and non-pinned)
+      • Terminates Frida, stops app, returns ('INFO', HTML-report)
     """
     # 1) pkg from manifest
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -6716,84 +6743,212 @@ def check_frida_pinning(base, wait_secs=15):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    # 4) inline JS detection script
+    # 4) inline JS detection script with hostname extraction
     jscode = r"""
     setImmediate(function install(){
       if (!Java.available) return setTimeout(install,100);
       Java.perform(function(){
-        send("🔗 Pinning detection hooks installed");
+        send("🔗 Pinning detection + network monitoring hooks installed");
 
-        function hookClass(className, method, sig){
+        // Extract hostname from URL string
+        function extractHost(urlString) {
+          try {
+            if (!urlString) return null;
+            if (urlString.indexOf('://') > 0) {
+              var host = urlString.split('://')[1].split('/')[0].split(':')[0];
+              return host;
+            }
+            return urlString.split('/')[0].split(':')[0];
+          } catch(e) {
+            return null;
+          }
+        }
+
+        // Hook pinning methods WITH hostname extraction
+        function hookPinWithHost(className, method, sig, hostArgIdx){
           try {
             var C = Java.use(className);
             C[method].overload.apply(C[method], sig).implementation = function(){
-              send({ev:"PIN", class:className, method:method});
+              var host = null;
+              try {
+                if (hostArgIdx !== undefined && arguments[hostArgIdx]) {
+                  var arg = arguments[hostArgIdx];
+                  if (typeof arg === 'string') {
+                    host = arg;
+                  } else if (arg && arg.getPeerHost) {
+                    host = arg.getPeerHost();
+                  } else if (arg && arg.toString) {
+                    host = arg.toString();
+                  }
+                }
+              } catch(e) {}
+
+              send({ev:"PIN", class:className, method:method, host:host});
               return this[method].apply(this, arguments);
             };
           } catch(e){}
         }
 
-        // 1) X509TrustManager
-        hookClass("javax.net.ssl.X509TrustManager","checkServerTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
-        hookClass("javax.net.ssl.X509TrustManager","checkClientTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
+        // Simple hook without hostname (for methods that don't expose it easily)
+        function hookPin(className, method, sig){
+          try {
+            var C = Java.use(className);
+            C[method].overload.apply(C[method], sig).implementation = function(){
+              send({ev:"PIN", class:className, method:method, host:null});
+              return this[method].apply(this, arguments);
+            };
+          } catch(e){}
+        }
+
+        // 1) X509TrustManager (no hostname in signature)
+        hookPin("javax.net.ssl.X509TrustManager","checkServerTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
+        hookPin("javax.net.ssl.X509TrustManager","checkClientTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
 
         // 2) CertificateFactory.generateCertificate
-        hookClass("java.security.cert.CertificateFactory","generateCertificate",["java.io.InputStream"]);
+        hookPin("java.security.cert.CertificateFactory","generateCertificate",["java.io.InputStream"]);
 
         // 3) SSLContext.init
-        hookClass("javax.net.ssl.SSLContext","init",["[Ljavax.net.ssl.KeyManager;","[Ljavax.net.ssl.TrustManager;","java.security.SecureRandom"]);
+        hookPin("javax.net.ssl.SSLContext","init",["[Ljavax.net.ssl.KeyManager;","[Ljavax.net.ssl.TrustManager;","java.security.SecureRandom"]);
 
-        // 4) okhttp3.CertificatePinner.check
-        hookClass("okhttp3.CertificatePinner","check",["java.lang.String","java.util.List"]);
-        hookClass("okhttp3.CertificatePinner","check",["java.lang.String","java.security.cert.Certificate"]);
-        hookClass("okhttp3.CertificatePinner","check",["java.lang.String","[Ljava.security.cert.Certificate;"]);
-        hookClass("okhttp3.CertificatePinner","check$okhttp",["java.lang.String","kotlin.jvm.functions.Function0"]);
+        // 4) okhttp3.CertificatePinner.check - hostname is first arg!
+        hookPinWithHost("okhttp3.CertificatePinner","check",["java.lang.String","java.util.List"], 0);
+        hookPinWithHost("okhttp3.CertificatePinner","check",["java.lang.String","java.security.cert.Certificate"], 0);
+        hookPinWithHost("okhttp3.CertificatePinner","check",["java.lang.String","[Ljava.security.cert.Certificate;"], 0);
+        hookPinWithHost("okhttp3.CertificatePinner","check$okhttp",["java.lang.String","kotlin.jvm.functions.Function0"], 0);
 
-        // 5) Trustkit
-        hookClass("com.datatheorem.android.trustkit.pinning.OkHostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"]);
-        hookClass("com.datatheorem.android.trustkit.pinning.OkHostnameVerifier","verify",["java.lang.String","java.security.cert.X509Certificate"]);
-        hookClass("com.datatheorem.android.trustkit.pinning.PinningTrustManager","checkServerTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
+        // 5) Trustkit - hostname is first arg
+        hookPinWithHost("com.datatheorem.android.trustkit.pinning.OkHostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"], 0);
+        hookPinWithHost("com.datatheorem.android.trustkit.pinning.OkHostnameVerifier","verify",["java.lang.String","java.security.cert.X509Certificate"], 0);
+        hookPin("com.datatheorem.android.trustkit.pinning.PinningTrustManager","checkServerTrusted",["[Ljava.security.cert.X509Certificate;","java.lang.String"]);
 
-        // 6) Conscrypt TrustManagerImpl
-        hookClass("com.android.org.conscrypt.TrustManagerImpl","checkTrustedRecursive",["java.util.List","[B","[B","java.lang.String","boolean","java.util.List","java.util.List","java.util.List"]);
-        hookClass("com.android.org.conscrypt.TrustManagerImpl","verifyChain",["java.util.List","java.util.List","java.lang.String","boolean","[B","[B"]);
+        // 6) Conscrypt TrustManagerImpl - authType (3rd arg) may contain hostname
+        hookPinWithHost("com.android.org.conscrypt.TrustManagerImpl","checkTrustedRecursive",["java.util.List","[B","[B","java.lang.String","boolean","java.util.List","java.util.List","java.util.List"], 3);
+        hookPinWithHost("com.android.org.conscrypt.TrustManagerImpl","verifyChain",["java.util.List","java.util.List","java.lang.String","boolean","[B","[B"], 2);
 
-        // 7) HostnameVerifier.verify
-        hookClass("javax.net.ssl.HostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"]);
+        // 7) HostnameVerifier.verify - hostname is first arg
+        hookPinWithHost("javax.net.ssl.HostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"], 0);
 
         // 8) HttpsURLConnection.setDefaultHostnameVerifier
-        hookClass("javax.net.ssl.HttpsURLConnection","setDefaultHostnameVerifier",["javax.net.ssl.HostnameVerifier"]);
+        hookPin("javax.net.ssl.HttpsURLConnection","setDefaultHostnameVerifier",["javax.net.ssl.HostnameVerifier"]);
 
         // 9) Apache & Cordova WebViewClient
-        hookClass("android.webkit.WebViewClient","onReceivedSslError",["android.webkit.WebView","android.webkit.SslErrorHandler","android.net.http.SslError"]);
-        hookClass("android.webkit.WebViewClient","onReceivedError",["android.webkit.WebView","android.webkit.WebResourceRequest","android.webkit.WebResourceError"]);
+        hookPin("android.webkit.WebViewClient","onReceivedSslError",["android.webkit.WebView","android.webkit.SslErrorHandler","android.net.http.SslError"]);
+        hookPin("android.webkit.WebViewClient","onReceivedError",["android.webkit.WebView","android.webkit.WebResourceRequest","android.webkit.WebResourceError"]);
 
         // 10) PhoneGap sslCertificateChecker
-        hookClass("nl.xservices.plugins.sslCertificateChecker","execute",["java.lang.String","org.json.JSONArray","org.apache.cordova.CallbackContext"]);
+        hookPin("nl.xservices.plugins.sslCertificateChecker","execute",["java.lang.String","org.json.JSONArray","org.apache.cordova.CallbackContext"]);
 
-        // 11) IBM Worklight & MobileFirst
-        hookClass("com.worklight.wlclient.api.WLClient","pinTrustedCertificatePublicKey",["java.lang.String"]);
-        hookClass("com.worklight.wlclient.api.WLClient","pinTrustedCertificatePublicKey",["[Ljava.lang.String;"]);
-        hookClass("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","javax.net.ssl.SSLSocket"]);
-        hookClass("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","java.security.cert.X509Certificate"]);
-        hookClass("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","[Ljava.lang.String;","[Ljava.lang.String;"]);
-        hookClass("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","javax.net.ssl.SSLSession"]);
+        // 11) IBM Worklight & MobileFirst - hostname is first arg
+        hookPinWithHost("com.worklight.wlclient.api.WLClient","pinTrustedCertificatePublicKey",["java.lang.String"], 0);
+        hookPin("com.worklight.wlclient.api.WLClient","pinTrustedCertificatePublicKey",["[Ljava.lang.String;"]);
+        hookPinWithHost("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","javax.net.ssl.SSLSocket"], 0);
+        hookPinWithHost("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","java.security.cert.X509Certificate"], 0);
+        hookPinWithHost("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","[Ljava.lang.String;","[Ljava.lang.String;"], 0);
+        hookPinWithHost("com.worklight.wlclient.certificatepinning.HostNameVerifierWithCertificatePinning","verify",["java.lang.String","javax.net.ssl.SSLSession"], 0);
 
-        // 12) Netty FingerprintTrustManagerFactory
-        hookClass("io.netty.handler.ssl.util.FingerprintTrustManagerFactory","checkTrusted",["java.lang.String","java.util.List"]);
+        // 12) Netty FingerprintTrustManagerFactory - hostname is first arg
+        hookPinWithHost("io.netty.handler.ssl.util.FingerprintTrustManagerFactory","checkTrusted",["java.lang.String","java.util.List"], 0);
 
-        // 13) Squareup (pre-3.x)
-        hookClass("com.squareup.okhttp.CertificatePinner","check",["java.lang.String","java.security.cert.Certificate"]);
-        hookClass("com.squareup.okhttp.CertificatePinner","check",["java.lang.String","java.util.List"]);
-        hookClass("com.squareup.okhttp.internal.tls.OkHostnameVerifier","verify",["java.lang.String","java.security.cert.X509Certificate"]);
-        hookClass("com.squareup.okhttp.internal.tls.OkHostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"]);
+        // 13) Squareup (pre-3.x) - hostname is first arg
+        hookPinWithHost("com.squareup.okhttp.CertificatePinner","check",["java.lang.String","java.security.cert.Certificate"], 0);
+        hookPinWithHost("com.squareup.okhttp.CertificatePinner","check",["java.lang.String","java.util.List"], 0);
+        hookPinWithHost("com.squareup.okhttp.internal.tls.OkHostnameVerifier","verify",["java.lang.String","java.security.cert.X509Certificate"], 0);
+        hookPinWithHost("com.squareup.okhttp.internal.tls.OkHostnameVerifier","verify",["java.lang.String","javax.net.ssl.SSLSession"], 0);
 
-        // 14) Chromium Cronet
-        hookClass("org.chromium.net.impl.CronetEngineBuilderImpl","addPublicKeyPins",["java.lang.String","java.util.Set","boolean","java.util.Date"]);
+        // 14) Chromium Cronet - hostname is first arg
+        hookPinWithHost("org.chromium.net.impl.CronetEngineBuilderImpl","addPublicKeyPins",["java.lang.String","java.util.Set","boolean","java.util.Date"], 0);
 
-        // 15) Flutter plugins
-        hookClass("diefferson.http_certificate_pinning.HttpCertificatePinning","checkConnexion",["java.lang.String","java.util.List","java.util.Map","int","java.lang.String"]);
-        hookClass("com.macif.plugin.sslpinningplugin.SslPinningPlugin","checkConnexion",["java.lang.String","java.util.List","java.util.Map","int","java.lang.String"]);
+        // 15) Flutter plugins - hostname is first arg
+        hookPinWithHost("diefferson.http_certificate_pinning.HttpCertificatePinning","checkConnexion",["java.lang.String","java.util.List","java.util.Map","int","java.lang.String"], 0);
+        hookPinWithHost("com.macif.plugin.sslpinningplugin.SslPinningPlugin","checkConnexion",["java.lang.String","java.util.List","java.util.Map","int","java.lang.String"], 0);
+
+        // === NETWORK REQUEST MONITORING (for non-pinned domains) ===
+
+        // OkHttp3 Request execution
+        try {
+          var RealCall = Java.use("okhttp3.internal.connection.RealCall");
+          RealCall.execute.implementation = function() {
+            try {
+              var req = this.request();
+              if (req) {
+                var url = req.url();
+                if (url) {
+                  var host = url.host();
+                  send({ev:"NET", lib:"OkHttp3", host:host});
+                }
+              }
+            } catch(e) {}
+            return this.execute();
+          };
+        } catch(e) {}
+
+        // OkHttp (old version)
+        try {
+          var Call = Java.use("com.squareup.okhttp.Call");
+          Call.execute.implementation = function() {
+            try {
+              var req = this.request();
+              if (req) {
+                var url = req.httpUrl();
+                if (url) {
+                  var host = url.host();
+                  send({ev:"NET", lib:"OkHttp", host:host});
+                }
+              }
+            } catch(e) {}
+            return this.execute();
+          };
+        } catch(e) {}
+
+        // HttpURLConnection
+        try {
+          var URL = Java.use("java.net.URL");
+          var HttpURLConnection = Java.use("java.net.HttpURLConnection");
+          URL.openConnection.overload().implementation = function() {
+            var conn = this.openConnection();
+            try {
+              var host = this.getHost();
+              if (host) {
+                send({ev:"NET", lib:"HttpURLConnection", host:host});
+              }
+            } catch(e) {}
+            return conn;
+          };
+        } catch(e) {}
+
+        // Apache HttpClient (legacy)
+        try {
+          var DefaultHttpClient = Java.use("org.apache.http.impl.client.DefaultHttpClient");
+          DefaultHttpClient.execute.overload("org.apache.http.client.methods.HttpUriRequest").implementation = function(req) {
+            try {
+              var uri = req.getURI();
+              if (uri) {
+                var host = uri.getHost();
+                if (host) {
+                  send({ev:"NET", lib:"ApacheHttp", host:host});
+                }
+              }
+            } catch(e) {}
+            return this.execute(req);
+          };
+        } catch(e) {}
+
+        // Retrofit (uses OkHttp, but track separately)
+        try {
+          var ServiceMethod = Java.use("retrofit2.ServiceMethod");
+          ServiceMethod.invoke.implementation = function(args) {
+            try {
+              var requestFactory = this.requestFactory.value;
+              if (requestFactory && requestFactory.baseUrl) {
+                var host = extractHost(requestFactory.baseUrl.toString());
+                if (host) {
+                  send({ev:"NET", lib:"Retrofit", host:host});
+                }
+              }
+            } catch(e) {}
+            return this.invoke(args);
+          };
+        } catch(e) {}
       });
     });
     """
@@ -6809,37 +6964,50 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 6) Interactive collection with user prompt
     instructions = [
-        f"App '{spawn_name}' is running with certificate pinning detection hooks",
+        f"App '{spawn_name}' is running with certificate pinning + network monitoring",
         "Use the app and trigger HTTPS/network connections",
         "Try features that connect to servers (login, sync, API calls)",
-        "Watch for pinning method calls below"
+        "Collecting both pinned and non-pinned network activity..."
     ]
-    all_output = interactive_frida_monitor(proc, "CERTIFICATE PINNING", instructions)
+    all_output = interactive_frida_monitor(proc, "CERTIFICATE PINNING ANALYSIS", instructions)
 
     # Parse collected logs
-    hits = set()
-    pinning_indicators = []
+    pinned_hosts = set()  # Hosts with cert pinning
+    non_pinned_hosts = set()  # Hosts without cert pinning
+    pinning_methods = set()
+    logs = []  # Store all output for collapsible section
 
     for line in all_output:
-        # Check for pinning bypass indicators in output
-        if any(pattern in line for pattern in [
-            'Bypassing', 'bypass', 'pinning', 'Pinning', 'PINNING',
-            'SSLPeerUnverifiedException', 'CertificatePinner', 'TrustManager',
-            'checkTrustedRecursive', 'unusual/obfuscated pinner', 'okhttp'
-        ]):
-            pinning_indicators.append(line.strip())
+        logs.append(line)  # Collect all output for later display
 
         if 'message:' not in line:
             continue
         part = line.split('message:',1)[1].split('data:',1)[0].strip()
         try:
             msg = ast.literal_eval(part)
-            if msg.get('payload',{}).get('ev') == 'PIN':
-                cls = msg['payload']['class']
-                mth = msg['payload']['method']
-                hits.add(f"{cls}.{mth}()")
+            payload = msg.get('payload', {})
+
+            # Pinning detection
+            if payload.get('ev') == 'PIN':
+                cls = payload.get('class', '')
+                mth = payload.get('method', '')
+                host = payload.get('host')
+
+                pinning_methods.add(f"{cls}.{mth}()")
+                if host and host != 'null':
+                    pinned_hosts.add(host)
+
+            # Network request detection (non-pinned)
+            elif payload.get('ev') == 'NET':
+                host = payload.get('host')
+                if host and host != 'null':
+                    non_pinned_hosts.add(host)
+
         except:
             pass
+
+    # Remove pinned hosts from non-pinned set (they were categorized as pinned)
+    non_pinned_hosts = non_pinned_hosts - pinned_hosts
 
     # 7) cleanup
     proc.terminate()
@@ -6847,36 +7015,54 @@ def check_frida_pinning(base, wait_secs=15):
                    stdout=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
-    # 8) report
+    # 8) Build detailed report
     detail_parts = []
 
-    # Check both hooked methods and bypass indicators
-    if hits:
-        detail_parts.append("<div><strong>🎯 Pinning Methods Detected:</strong></div>")
+    # Pinned domains section
+    if pinned_hosts:
+        detail_parts.append("<div><strong>Domains WITH Certificate Pinning:</strong></div>")
         detail_parts.append("<div class='detail-list-item'>")
-        for h in sorted(hits):
+        for host in sorted(pinned_hosts):
+            detail_parts.append(f"▹ <code style='color:#28a745'>{html.escape(host)}</code><br>")
+        detail_parts.append("</div><br>")
+
+    # Non-pinned domains section
+    if non_pinned_hosts:
+        detail_parts.append("<div><strong>Domains WITHOUT Certificate Pinning:</strong></div>")
+        detail_parts.append("<div class='detail-list-item'>")
+        for host in sorted(non_pinned_hosts):
+            detail_parts.append(f"▹ <code style='color:#dc3545'>{html.escape(host)}</code><br>")
+        detail_parts.append("</div><br>")
+
+    # Pinning methods detected
+    if pinning_methods:
+        detail_parts.append("<div><strong>Pinning Methods Detected:</strong></div>")
+        detail_parts.append("<div class='detail-list-item'>")
+        for h in sorted(pinning_methods):
             detail_parts.append(f"▹ <code>{html.escape(h)}</code><br>")
         detail_parts.append("</div>")
 
-    if pinning_indicators:
-        if detail_parts:
-            detail_parts.append("<br>")
-        detail_parts.append("<div><strong>🔓 Pinning Bypass Evidence:</strong></div>")
-        detail_parts.append("<div class='code-evidence'>")
-        # Show up to 10 most relevant indicators
-        for indicator in pinning_indicators[:10]:
-            detail_parts.append(f"{html.escape(indicator)}<br>")
-        if len(pinning_indicators) > 10:
-            detail_parts.append(f"<div class='text-muted'><em>... and {len(pinning_indicators) - 10} more bypass messages</em></div>")
-        detail_parts.append("</div>")
+    # MASTG reference
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0019/' target='_blank'>MASTG-TEST-0019: Testing Custom Certificate Stores and Certificate Pinning</a></div>"
+    detail_parts.append(mastg_ref)
 
-    if not hits and not pinning_indicators:
-        return False, "No pinning methods observed dynamically."
+    # Add collapsible Frida output section (like Dynamic SharedPreferences)
+    if logs:
+        detail_parts.append("<br>")
+        detail_parts.append(
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+            "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+        )
+        detail_parts.append("\n".join(logs[-600:]))  # cap output to last 600 lines
+        detail_parts.append("\n</pre></details>")
+
+    if not pinned_hosts and not non_pinned_hosts and not pinning_methods:
+        return 'INFO', "No network activity or pinning methods observed during test."
 
     detail = "".join(detail_parts)
 
-    # PASS if we found evidence of pinning (either hooks or bypass indicators)
-    return True, detail
+    # Return INFO status (not Pass/Fail) like Dynamic SharedPreferences
+    return 'INFO', detail
 
 def check_frida_file_reads(base, wait_secs=7):
     """
@@ -8164,47 +8350,153 @@ def check_frida_external_storage(base, wait_secs=10):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     jscode = r"""
-    setImmediate(function(){
-      if (Java.available) {
-        Java.perform(function(){
-          var File = Java.use("java.io.File");
-          var FileOutputStream = Java.use("java.io.FileOutputStream");
+    setImmediate(function install(){
+      if (!Java.available) return setTimeout(install, 100);
+      Java.perform(function(){
+        send({type: "ready", msg: "External storage hooks installing..."});
+
+        // Helper to check if path is external storage
+        function isExternalPath(path) {
+          if (!path) return false;
+          return (path.indexOf("/sdcard") === 0 ||
+                  path.indexOf("/storage/emulated") === 0 ||
+                  path.indexOf("/mnt/sdcard") === 0 ||
+                  path.indexOf(externalDir) === 0);
+        }
+
+        // Helper to get file extension
+        function getExtension(path) {
+          var lastDot = path.lastIndexOf(".");
+          return (lastDot > 0) ? path.substring(lastDot) : "";
+        }
+
+        // Get external storage paths
+        var externalDir = "/storage/emulated/0";
+        try {
           var Environment = Java.use("android.os.Environment");
+          externalDir = Environment.getExternalStorageDirectory().getAbsolutePath();
+        } catch(e) {}
 
-          // Get external storage paths
-          var externalDir = Environment.getExternalStorageDirectory().getAbsolutePath();
-
-          // Hook File constructor
+        // 1. Hook File constructor
+        try {
+          var File = Java.use("java.io.File");
           File.$init.overload("java.lang.String").implementation = function(path) {
-            if (path.indexOf(externalDir) === 0 || path.indexOf("/sdcard") === 0) {
-              send({
-                type: "external_file",
-                path: path,
-                action: "access"
-              });
+            if (isExternalPath(path)) {
+              send({type: "external_file", path: path, action: "access"});
             }
             return this.$init(path);
           };
+        } catch(e) {}
 
-          // Hook FileOutputStream
+        // 2. Hook FileOutputStream (write operations)
+        try {
+          var FileOutputStream = Java.use("java.io.FileOutputStream");
           FileOutputStream.$init.overload("java.io.File").implementation = function(file) {
-            var path = file.getAbsolutePath();
-            if (path.indexOf(externalDir) === 0 || path.indexOf("/sdcard") === 0) {
-              var ext = path.substring(path.lastIndexOf("."));
-              send({
-                type: "external_write",
-                path: path,
-                extension: ext
-              });
-            }
+            try {
+              var path = file.getAbsolutePath();
+              if (isExternalPath(path)) {
+                send({type: "external_write", path: path, extension: getExtension(path)});
+              }
+            } catch(e) {}
             return this.$init(file);
           };
 
-          send({type: "ready", msg: "External storage hooks installed"});
-        });
-      } else {
-        setTimeout(arguments.callee, 100);
-      }
+          FileOutputStream.$init.overload("java.lang.String").implementation = function(path) {
+            if (isExternalPath(path)) {
+              send({type: "external_write", path: path, extension: getExtension(path)});
+            }
+            return this.$init(path);
+          };
+        } catch(e) {}
+
+        // 3. Hook FileInputStream (read operations)
+        try {
+          var FileInputStream = Java.use("java.io.FileInputStream");
+          FileInputStream.$init.overload("java.io.File").implementation = function(file) {
+            try {
+              var path = file.getAbsolutePath();
+              if (isExternalPath(path)) {
+                send({type: "external_read", path: path, extension: getExtension(path)});
+              }
+            } catch(e) {}
+            return this.$init(file);
+          };
+
+          FileInputStream.$init.overload("java.lang.String").implementation = function(path) {
+            if (isExternalPath(path)) {
+              send({type: "external_read", path: path, extension: getExtension(path)});
+            }
+            return this.$init(path);
+          };
+        } catch(e) {}
+
+        // 4. Hook FileWriter (write operations)
+        try {
+          var FileWriter = Java.use("java.io.FileWriter");
+          FileWriter.$init.overload("java.io.File").implementation = function(file) {
+            try {
+              var path = file.getAbsolutePath();
+              if (isExternalPath(path)) {
+                send({type: "external_write", path: path, extension: getExtension(path)});
+              }
+            } catch(e) {}
+            return this.$init(file);
+          };
+
+          FileWriter.$init.overload("java.lang.String").implementation = function(path) {
+            if (isExternalPath(path)) {
+              send({type: "external_write", path: path, extension: getExtension(path)});
+            }
+            return this.$init(path);
+          };
+        } catch(e) {}
+
+        // 5. Hook FileReader (read operations)
+        try {
+          var FileReader = Java.use("java.io.FileReader");
+          FileReader.$init.overload("java.io.File").implementation = function(file) {
+            try {
+              var path = file.getAbsolutePath();
+              if (isExternalPath(path)) {
+                send({type: "external_read", path: path, extension: getExtension(path)});
+              }
+            } catch(e) {}
+            return this.$init(file);
+          };
+
+          FileReader.$init.overload("java.lang.String").implementation = function(path) {
+            if (isExternalPath(path)) {
+              send({type: "external_read", path: path, extension: getExtension(path)});
+            }
+            return this.$init(path);
+          };
+        } catch(e) {}
+
+        // 6. Hook RandomAccessFile (read/write operations)
+        try {
+          var RandomAccessFile = Java.use("java.io.RandomAccessFile");
+          RandomAccessFile.$init.overload("java.io.File", "java.lang.String").implementation = function(file, mode) {
+            try {
+              var path = file.getAbsolutePath();
+              if (isExternalPath(path)) {
+                var op = (mode.indexOf("w") >= 0) ? "external_write" : "external_read";
+                send({type: op, path: path, extension: getExtension(path)});
+              }
+            } catch(e) {}
+            return this.$init(file, mode);
+          };
+
+          RandomAccessFile.$init.overload("java.lang.String", "java.lang.String").implementation = function(path, mode) {
+            if (isExternalPath(path)) {
+              var op = (mode.indexOf("w") >= 0) ? "external_write" : "external_read";
+              send({type: op, path: path, extension: getExtension(path)});
+            }
+            return this.$init(path, mode);
+          };
+        } catch(e) {}
+
+        send({type: "ready", msg: "External storage hooks installed successfully"});
+      });
     });
     """
 
@@ -8224,11 +8516,17 @@ def check_frida_external_storage(base, wait_secs=10):
         "Use features that might save files (photos, downloads, exports)",
         "Watch for external storage access below"
     ]
-    logs = interactive_frida_monitor(proc, "EXTERNAL STORAGE", instructions)
+    all_output = interactive_frida_monitor(proc, "EXTERNAL STORAGE", instructions)
 
     # Parse collected logs
-    findings = []
-    for line in logs:
+    write_operations = []  # Files written to external storage
+    read_operations = []   # Files read from external storage
+    access_operations = []  # Files accessed on external storage
+    logs = []  # Store all output for collapsible section
+
+    for line in all_output:
+        logs.append(line)  # Collect all output for later display
+
         if 'message:' in line:
             try:
                 part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
@@ -8239,11 +8537,25 @@ def check_frida_external_storage(base, wait_secs=10):
                         path = payload.get('path', '')
                         ext = payload.get('extension', '')
                         # Flag sensitive extensions
-                        sensitive_exts = ['.db', '.sqlite', '.sql', '.key', '.pem', '.p12', '.jks']
-                        marker = "" if ext in sensitive_exts else ""
-                        findings.append(f"{marker} Write: {path}")
+                        sensitive_exts = ['.db', '.sqlite', '.sql', '.key', '.pem', '.p12', '.jks', '.keystore']
+                        is_sensitive = ext.lower() in sensitive_exts
+                        write_operations.append({
+                            'path': path,
+                            'ext': ext,
+                            'sensitive': is_sensitive
+                        })
+                    elif payload.get('type') == 'external_read':
+                        path = payload.get('path', '')
+                        ext = payload.get('extension', '')
+                        sensitive_exts = ['.db', '.sqlite', '.sql', '.key', '.pem', '.p12', '.jks', '.keystore']
+                        is_sensitive = ext.lower() in sensitive_exts
+                        read_operations.append({
+                            'path': path,
+                            'ext': ext,
+                            'sensitive': is_sensitive
+                        })
                     elif payload.get('type') == 'external_file':
-                        findings.append(f"📂 Access: {payload.get('path', '')}")
+                        access_operations.append(payload.get('path', ''))
             except:
                 pass
 
@@ -8252,17 +8564,87 @@ def check_frida_external_storage(base, wait_secs=10):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
-    if not findings:
-        return 'PASS', "<strong>No external storage usage observed during runtime</strong>"
+    # Build clean report
+    if not write_operations and not read_operations and not access_operations:
+        mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0002/' target='_blank'>MASTG-TEST-0002: Testing External Storage for Sensitive Data</a></div>"
+        return 'INFO', f"<strong>No external storage usage observed during runtime</strong>{mastg_ref}"
 
-    detail = [f"<div><strong>External storage operations detected:</strong></div>"]
-    detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:30]])
-    if len(findings) > 30:
-        detail.append(f"<div>...and {len(findings) - 30} more</div>")
+    detail = []
 
-    has_sensitive = any('' in f for f in findings)
-    status = 'FAIL' if has_sensitive else 'WARN'
-    return status, "<br>\n".join(detail)
+    # Write operations section
+    if write_operations:
+        detail.append("<div><strong>Files Written to External Storage:</strong></div>")
+
+        # Separate sensitive and regular files
+        sensitive_files = [w for w in write_operations if w['sensitive']]
+        regular_files = [w for w in write_operations if not w['sensitive']]
+
+        if sensitive_files:
+            detail.append("<div style='margin-left:15px; color:#dc3545'><strong>Sensitive Files:</strong></div>")
+            for write in sensitive_files[:20]:
+                detail.append(f"<div style='margin-left:30px'><code>{html.escape(write['path'])}</code> <em>(ext: {html.escape(write['ext'])})</em></div>")
+            if len(sensitive_files) > 20:
+                detail.append(f"<div style='margin-left:30px'><em>...and {len(sensitive_files) - 20} more sensitive files</em></div>")
+
+        if regular_files:
+            detail.append("<div style='margin-left:15px'><strong>Regular Files:</strong></div>")
+            for write in regular_files[:20]:
+                detail.append(f"<div style='margin-left:30px'><code>{html.escape(write['path'])}</code> <em>(ext: {html.escape(write['ext'])})</em></div>")
+            if len(regular_files) > 20:
+                detail.append(f"<div style='margin-left:30px'><em>...and {len(regular_files) - 20} more files</em></div>")
+
+        detail.append("<br>")
+
+    # Read operations section
+    if read_operations:
+        detail.append("<div><strong>Files Read from External Storage:</strong></div>")
+
+        # Separate sensitive and regular files
+        sensitive_reads = [r for r in read_operations if r['sensitive']]
+        regular_reads = [r for r in read_operations if not r['sensitive']]
+
+        if sensitive_reads:
+            detail.append("<div style='margin-left:15px; color:#dc3545'><strong>Sensitive Files:</strong></div>")
+            for read in sensitive_reads[:20]:
+                detail.append(f"<div style='margin-left:30px'><code>{html.escape(read['path'])}</code> <em>(ext: {html.escape(read['ext'])})</em></div>")
+            if len(sensitive_reads) > 20:
+                detail.append(f"<div style='margin-left:30px'><em>...and {len(sensitive_reads) - 20} more sensitive files</em></div>")
+
+        if regular_reads:
+            detail.append("<div style='margin-left:15px'><strong>Regular Files:</strong></div>")
+            for read in regular_reads[:20]:
+                detail.append(f"<div style='margin-left:30px'><code>{html.escape(read['path'])}</code> <em>(ext: {html.escape(read['ext'])})</em></div>")
+            if len(regular_reads) > 20:
+                detail.append(f"<div style='margin-left:30px'><em>...and {len(regular_reads) - 20} more files</em></div>")
+
+        detail.append("<br>")
+
+    # Access operations section
+    if access_operations:
+        detail.append("<div><strong>External Storage Paths Accessed:</strong></div>")
+        # Show unique paths only
+        unique_paths = list(set(access_operations))
+        for path in sorted(unique_paths)[:30]:
+            detail.append(f"<div style='margin-left:15px'><code>{html.escape(path)}</code></div>")
+        if len(unique_paths) > 30:
+            detail.append(f"<div style='margin-left:15px'><em>...and {len(unique_paths) - 30} more paths</em></div>")
+        detail.append("<br>")
+
+    # MASTG reference
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0002/' target='_blank'>MASTG-TEST-0002: Testing External Storage for Sensitive Data</a></div>"
+    detail.append(mastg_ref)
+
+    # Add collapsible Frida output section (like Dynamic SharedPreferences)
+    if logs:
+        detail.append("<br>")
+        detail.append(
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+            "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+        )
+        detail.append("\n".join(logs[-600:]))  # cap output to last 600 lines
+        detail.append("\n</pre></details>")
+
+    return 'INFO', "<br>\n".join(detail)
 
 
 def check_frida_crypto_keys(base, wait_secs=10):
