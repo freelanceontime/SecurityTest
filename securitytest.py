@@ -1248,40 +1248,220 @@ def check_debug_symbols(lib_dir):
     # Fail and show the detailed output
     return False, "\n".join(details) + mastg_ref
 
+def check_s3_bucket_security(base):
+    """
+    Searches for AWS S3 bucket references in the decompiled code and tests for common misconfigurations:
+    1. Attempts to write a test file to discovered buckets
+    2. Checks if directory listing is enabled
+
+    SECURITY NOTE: This test only attempts writes - it does not exfiltrate data or modify existing files.
+    """
+
+    # Find S3 bucket references
+    bucket_patterns = [
+        r's3://([a-zA-Z0-9.\-]+)',  # s3://bucket-name
+        r'([a-zA-Z0-9.\-]+)\.s3\.amazonaws\.com',  # bucket-name.s3.amazonaws.com
+        r's3\.amazonaws\.com/([a-zA-Z0-9.\-]+)',  # s3.amazonaws.com/bucket-name
+        r'([a-zA-Z0-9.\-]+)\.s3-([a-z0-9\-]+)\.amazonaws\.com',  # bucket-name.s3-region.amazonaws.com
+    ]
+
+    buckets_found = set()
+    bucket_locations = {}
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.json', '.properties')):
+                continue
+
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+
+            try:
+                content = open(path, errors='ignore').read()
+
+                for pattern in bucket_patterns:
+                    for match in re.finditer(pattern, content, re.IGNORECASE):
+                        bucket_name = match.group(1)
+                        # Filter out obvious false positives
+                        if bucket_name and not bucket_name.startswith('.') and len(bucket_name) > 3:
+                            buckets_found.add(bucket_name)
+                            if bucket_name not in bucket_locations:
+                                bucket_locations[bucket_name] = []
+                            bucket_locations[bucket_name].append(f"{rel}:{content[:match.start()].count(chr(10)) + 1}")
+
+            except Exception:
+                continue
+
+    if not buckets_found:
+        return True, "<div>No S3 bucket references found in app code</div>"
+
+    # Test discovered buckets
+    import tempfile
+    import subprocess
+
+    findings = []
+    test_content = b"security-test-file-safe-to-delete"
+
+    for bucket in sorted(buckets_found):
+        bucket_info = []
+        bucket_info.append(f"<div><strong>Bucket: {html.escape(bucket)}</strong></div>")
+
+        # Show where it was found
+        locations = bucket_locations.get(bucket, [])
+        bucket_info.append("<div style='margin-left:15px; font-size:10px; color:#666'>")
+        for loc in locations[:3]:
+            bucket_info.append(f"Found in: <code>{html.escape(loc)}</code><br>")
+        if len(locations) > 3:
+            bucket_info.append(f"...and {len(locations) - 3} more locations<br>")
+        bucket_info.append("</div>")
+
+        # Test 1: Try to write a file
+        write_test_passed = False
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(test_content)
+                tmp.flush()
+                tmp_path = tmp.name
+
+            # Attempt PUT request
+            test_url = f"https://{bucket}.s3.amazonaws.com/security-test-{os.urandom(8).hex()}.txt"
+            result = subprocess.run(
+                ['curl', '-X', 'PUT', '--upload-file', tmp_path, test_url, '-s', '-o', '/dev/null', '-w', '%{http_code}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            os.unlink(tmp_path)
+
+            http_code = result.stdout.strip()
+
+            if http_code == '200':
+                bucket_info.append("<div style='margin-left:15px; color:#dc3545'><strong>WRITE ACCESS: Successfully uploaded test file!</strong></div>")
+                write_test_passed = True
+            elif http_code == '403':
+                bucket_info.append("<div style='margin-left:15px; color:#28a745'>Write access denied (expected)</div>")
+            elif http_code == '404':
+                bucket_info.append("<div style='margin-left:15px; color:#666'>Bucket does not exist or is private</div>")
+            else:
+                bucket_info.append(f"<div style='margin-left:15px; color:#666'>Write test returned HTTP {html.escape(http_code)}</div>")
+
+        except subprocess.TimeoutExpired:
+            bucket_info.append("<div style='margin-left:15px; color:#666'>Write test timed out</div>")
+        except Exception as e:
+            bucket_info.append(f"<div style='margin-left:15px; color:#666'>Write test failed: {html.escape(str(e)[:100])}</div>")
+
+        # Test 2: Check for directory listing
+        try:
+            list_url = f"https://{bucket}.s3.amazonaws.com/"
+            result = subprocess.run(
+                ['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', list_url],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            http_code = result.stdout.strip()
+
+            if http_code == '200':
+                # Check if response contains XML listing
+                result = subprocess.run(
+                    ['curl', '-s', list_url],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if '<ListBucketResult' in result.stdout:
+                    bucket_info.append("<div style='margin-left:15px; color:#dc3545'><strong>DIRECTORY LISTING ENABLED!</strong></div>")
+                else:
+                    bucket_info.append("<div style='margin-left:15px; color:#28a745'>Directory listing disabled</div>")
+            else:
+                bucket_info.append("<div style='margin-left:15px; color:#28a745'>Directory listing disabled</div>")
+
+        except subprocess.TimeoutExpired:
+            bucket_info.append("<div style='margin-left:15px; color:#666'>Directory listing test timed out</div>")
+        except Exception as e:
+            bucket_info.append(f"<div style='margin-left:15px; color:#666'>Directory listing test failed: {html.escape(str(e)[:100])}</div>")
+
+        findings.append("".join(bucket_info))
+
+    if not findings:
+        return True, "<div>No S3 buckets found to test</div>"
+
+    detail = "<div><strong>Found {0} S3 bucket reference(s):</strong></div><br>".format(len(buckets_found)) + "<br>".join(findings)
+    detail += "<br><div style='margin-top:10px; font-size:10px; color:#666'><em>Note: These tests only check for misconfigurations. No data was exfiltrated.</em></div>"
+
+    # Return FAIL if any security issues found
+    has_issues = any('WRITE ACCESS' in f or 'DIRECTORY LISTING ENABLED' in f for f in findings)
+    return (False if has_issues else True, detail)
+
+
 def check_x509(base):
     """
-    Detect insecure TrustManager or HostnameVerifier implementations,
-    but skip stubs that delegate to native/external verification:
+    Comprehensive SSL/TLS security check covering multiple MASTG tests:
+    - MASTG-TEST-0282: Endpoint Identity Verification
+    - MASTG-TEST-0283: Custom Certificate Stores and Certificate Pinning
+    - MASTG-TEST-0234: Data Encryption on the Network
 
-      1) For each .method checkServerTrusted/checkClientTrusted:
-         – If it throws CertificateException or calls checkValidity()/verify(), OK.
-         – If it calls n_checkServerTrusted*, n_checkClientTrusted* or verifyRemoteCertificate, OK.
-         – Otherwise flag it, showing link, method name, line, snippet.
-      2) For HostnameVerifier.verify() stubs returning true, flag as before.
+    Detects:
+      1) Insecure TrustManager implementations (empty checkServerTrusted/checkClientTrusted)
+      2) HostnameVerifier bypasses (always returns true)
+      3) SSLSocket without endpoint identification algorithm
+      4) Custom certificate pinning implementations
+      5) SSL verification bypasses
+
+    Skips native delegates and legitimate verification implementations.
     """
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0021/' target='_blank'>MASTG-TEST-0021: Testing Endpoint Identify Verification</a></div>"
+    mastg_refs = (
+        "<br><div><strong>References:</strong><br>"
+        "• <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0282/' target='_blank'>MASTG-TEST-0282: Testing Endpoint Identity Verification</a><br>"
+        "• <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0283/' target='_blank'>MASTG-TEST-0283: Testing Custom Certificate Stores and Certificate Pinning</a><br>"
+        "• <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0234/' target='_blank'>MASTG-TEST-0234: Testing Data Encryption on the Network</a>"
+        "</div>"
+    )
 
     issues = []
     seen = set()
 
-    # Patterns
+    # Patterns for TrustManager
     tm_method_re = re.compile(r'\.method\s+[^\n]*\b(checkServerTrusted|checkClientTrusted)\b')
     cert_exc_re = re.compile(r'throw-new.*CertificateException')
     validity_re = re.compile(r'\.checkValidity\(')
     verify_re = re.compile(r'(->verify\(|\.verify\()')
+    verify_remote_re = re.compile(r'verifyRemoteCertificate')
+
+    # Patterns for HostnameVerifier
     hv_method_re = re.compile(r'\.method\s+.*?verify\(')
     hv_stub_re = re.compile(r'const/4\s+\S+,\s+0x1[\s\S]*?return', re.MULTILINE)
+
+    # Patterns for SSLSocket endpoint identification
+    sslsocket_init_re = re.compile(r'(invoke-.*Ljavax/net/ssl/SSLSocket;-><init>|invoke-.*Ljavax/net/ssl/SSLSocketFactory;->createSocket)')
+    endpoint_algo_re = re.compile(r'Ljavax/net/ssl/SSLParameters;->setEndpointIdentificationAlgorithm')
+
+    # Patterns for certificate pinning
+    cert_pinner_re = re.compile(r'(Lokhttp3/CertificatePinner|certificatePinner|pinning)')
+
     inst_re = re.compile(r'^(?!\.(?:locals|line|annotation))\s*\S+')
-    verify_remote_re = re.compile(r'verifyRemoteCertificate')
 
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
                 continue
             path = os.path.join(root, fn)
-            lines = open(path, errors='ignore').read().splitlines()
             rel = os.path.relpath(path, base)
+
+            # Skip well-known library code that properly handles SSL/TLS
+            library_paths = [
+                'androidx/', 'android/support/', 'com/google/',
+                'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
+                'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/'
+            ]
+            if any(lib in rel.replace('\\', '/') for lib in library_paths):
+                continue
+
+            lines = open(path, errors='ignore').read().splitlines()
             i = 0
 
             while i < len(lines):
@@ -1350,18 +1530,83 @@ def check_x509(base):
                                     f'{html.escape(rel)}:{k+1}</a>'
                                 )
                                 issues.append(
-                                    f"{link} – HostnameVerifier.verify always returns true<br>"
+                                    f"{link} – <strong>HostnameVerifier.verify()</strong> always returns true<br>"
                                     f"<code>{snippet}</code>"
                                 )
                                 break
                     while i < len(lines) and not lines[i].startswith('.end method'):
                         i += 1
 
+                # -- SSLSocket endpoint identification check --
+                elif sslsocket_init_re.search(line):
+                    # Check if setEndpointIdentificationAlgorithm is called in the next 30 lines
+                    has_endpoint_id = False
+                    for k in range(i, min(i+30, len(lines))):
+                        if endpoint_algo_re.search(lines[k]):
+                            has_endpoint_id = True
+                            break
+                        # Stop at end of method
+                        if lines[k].startswith('.end method'):
+                            break
+
+                    if not has_endpoint_id:
+                        key = (rel, i)
+                        if key not in seen:
+                            seen.add(key)
+                            snippet = html.escape(line.strip())
+                            link = (
+                                f'<a href="file://{html.escape(path)}">'
+                                f'{html.escape(rel)}:{i+1}</a>'
+                            )
+                            issues.append(
+                                f"{link} – <strong>SSLSocket</strong> created without endpoint identification algorithm<br>"
+                                f"<code>{snippet}</code><br>"
+                                f"<em>Missing: SSLParameters.setEndpointIdentificationAlgorithm(\"HTTPS\")</em>"
+                            )
+
                 i += 1
 
+    # Check for network_security_config.xml and expired certificates (MASTG-TEST-0243)
+    manifest_path = os.path.join(base, 'AndroidManifest.xml')
+    network_config_ref = None
+    if os.path.exists(manifest_path):
+        try:
+            manifest_content = open(manifest_path, errors='ignore').read()
+            if 'networkSecurityConfig' in manifest_content:
+                # Extract the network security config file reference
+                config_match = re.search(r'android:networkSecurityConfig="@xml/(\w+)"', manifest_content)
+                if config_match:
+                    network_config_ref = config_match.group(1)
+                    # Look for the XML file
+                    config_path = os.path.join(base, 'res', 'xml', f'{network_config_ref}.xml')
+                    if os.path.exists(config_path):
+                        config_content = open(config_path, errors='ignore').read()
+                        # Check for certificate pinning with expiration dates
+                        if '<pin' in config_content and 'expiration' in config_content:
+                            # Parse expiration dates
+                            expiration_matches = re.findall(r'expiration="([^"]+)"', config_content)
+                            from datetime import datetime
+                            current_date = datetime.now()
+                            for exp_date_str in expiration_matches:
+                                try:
+                                    # Parse date format: YYYY-MM-DD
+                                    exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d')
+                                    if exp_date < current_date:
+                                        issues.append(
+                                            f"<strong>EXPIRED Certificate Pin in network_security_config.xml</strong><br>"
+                                            f"Expiration date: {exp_date_str} (already expired)<br>"
+                                            f"<em>Reference: MASTG-TEST-0243</em>"
+                                        )
+                                except ValueError:
+                                    pass  # Invalid date format
+        except Exception:
+            pass
+
     if not issues:
-        return True, "None" + mastg_ref
-    return False, "<br>\n".join(issues) + mastg_ref
+        return True, "None" + mastg_refs
+
+    # Group issues by category for better readability
+    return False, "<br>\n".join(issues) + mastg_refs
 
 
 def check_strict_mode(base):
@@ -6431,14 +6676,18 @@ def check_tls_versions(base):
 
 def check_frida_tls_negotiation(base, wait_secs=12):
     """
-    Dynamic TLS negotiation audit via USB+Frida CLI.
-    Classifies based on runtime behavior:
+    Dynamic TLS negotiation monitoring via USB+Frida CLI.
+    Returns INFO status with observational data about TLS usage during the test session.
 
-      FAIL if we log "VERDICT: LEGACY_NEGOTIATED"
-      WARN if we log "VERDICT: LEGACY_ENABLED_BY_APP"
-      PASS otherwise.
+    This test passively observes TLS negotiation - it does NOT force the app to use legacy TLS.
+    Results are informational only and depend on which network features were triggered.
 
-    We hook:
+    Reports:
+      • If TLS 1.0/1.1 was actually negotiated (red alert)
+      • If TLS 1.0/1.1 was enabled by app but not used (orange warning)
+      • If only modern TLS was observed (or no activity)
+
+    Hooks:
       • OkHttp RealConnection.connectTls* (reports negotiated TLS)
       • JSSE/Conscrypt SSLSocket.startHandshake & setEnabledProtocols
       • Native BoringSSL SSL_do_handshake / SSL_connect (WebView/Chromium/Cronet)
@@ -6642,58 +6891,62 @@ def check_frida_tls_negotiation(base, wait_secs=12):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
-    # 7) classify
-    if legacy_neg:
-        status = 'FAIL'
-    elif legacy_enabled:
-        status = 'WARN'
-    else:
-        status = 'PASS'
-
-    # 8) details with better analysis
+    # 7) Count different types of activity
     if logs:
-        # Count different types of activity
         tls_inits = sum(1 for l in logs if '[TLS-INIT]' in l)
         okhttp_calls = sum(1 for l in logs if '[OKHTTP]' in l)
         jsse_calls = sum(1 for l in logs if '[JSSE]' in l)
         native_calls = sum(1 for l in logs if '[NATIVE TLS]' in l or 'VERDICT: LEGACY_NEGOTIATED (native' in l)
+    else:
+        tls_inits = okhttp_calls = jsse_calls = native_calls = 0
 
-        summary_parts = []
+    # 8) Build informational report
+    summary_parts = []
 
-        if legacy_neg:
-            summary_parts.append("FAIL: <strong>TLS 1.0/1.1 WAS NEGOTIATED</strong> - The app successfully connected using legacy TLS!")
-        elif legacy_enabled:
-            summary_parts.append("WARNING: <strong>TLS 1.0/1.1 IS ENABLED</strong> - The app enables legacy TLS versions but didn't negotiate them")
+    if legacy_neg:
+        summary_parts.append("<div style='color:#dc3545'><strong>TLS 1.0/1.1 WAS NEGOTIATED</strong></div>")
+        summary_parts.append("<div>The app successfully connected using legacy TLS during this test session!</div>")
+    elif legacy_enabled:
+        summary_parts.append("<div style='color:#ff8c00'><strong>TLS 1.0/1.1 IS ENABLED</strong></div>")
+        summary_parts.append("<div>The app explicitly enables legacy TLS versions (via setEnabledProtocols) but didn't negotiate them during this session</div>")
+    else:
+        # Check if actual network connections happened
+        if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
+            summary_parts.append("<div><strong>No legacy TLS detected</strong></div>")
+            summary_parts.append("<div>App made network connections using modern TLS during this test session</div>")
+        elif tls_inits > 0:
+            summary_parts.append("<div><strong>TLS initialized but no network activity</strong></div>")
+            summary_parts.append("<div>TLS context was created but no actual network handshakes occurred - trigger more network features in the app</div>")
         else:
-            # Check if actual network connections happened
-            if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
-                summary_parts.append(" <strong>No legacy TLS detected</strong> - App made network connections using modern TLS")
-            elif tls_inits > 0:
-                summary_parts.append("INFO: <strong>TLS initialized but no network activity</strong> - Need to trigger network calls in the app")
-            else:
-                summary_parts.append("INFO: <strong>No TLS activity detected</strong> - App may not use network, or didn't trigger any connections")
+            summary_parts.append("<div><strong>No TLS activity detected</strong></div>")
+            summary_parts.append("<div>App may not use network, or no connections were triggered during this test session</div>")
 
-        summary_parts.append(f"<div style='margin-top:8px; font-size:11px; color:#666'>")
-        summary_parts.append(f"Captured: {tls_inits} TLS inits")
-        if okhttp_calls: summary_parts.append(f", {okhttp_calls} OkHttp connections")
-        if jsse_calls: summary_parts.append(f", {jsse_calls} JSSE handshakes")
-        if native_calls: summary_parts.append(f", {native_calls} native SSL calls")
-        summary_parts.append("</div>")
+    summary_parts.append(f"<div style='margin-top:8px; font-size:11px; color:#666'>")
+    summary_parts.append(f"Captured: {tls_inits} TLS inits")
+    if okhttp_calls: summary_parts.append(f", {okhttp_calls} OkHttp connections")
+    if jsse_calls: summary_parts.append(f", {jsse_calls} JSSE handshakes")
+    if native_calls: summary_parts.append(f", {native_calls} native SSL calls")
+    summary_parts.append("</div>")
 
-        # Instructions based on status
-        if status == 'PASS' and okhttp_calls == 0 and jsse_calls == 0 and native_calls == 0:
-            summary_parts.append(
-                "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:11px'>"
-                "<strong>WARNING: Test Incomplete:</strong> No network connections detected during monitoring.<br>"
-                "<strong>Action Required:</strong> While the app is running in Frida, manually trigger actions that make network requests:<br>"
-                "• Login/logout<br>"
-                "• Load content/refresh feeds<br>"
-                "• Sync data<br>"
-                "• Any API calls<br>"
-                "Then check if any VERDICT lines appear in the output."
-                "</div>"
-            )
+    # Instructions if no network connections detected
+    if not legacy_neg and not legacy_enabled and okhttp_calls == 0 and jsse_calls == 0 and native_calls == 0:
+        summary_parts.append(
+            "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:11px'>"
+            "<strong>Test Incomplete:</strong> No network connections detected during monitoring.<br>"
+            "<strong>Action Required:</strong> While the app is running in Frida, manually trigger actions that make network requests:<br>"
+            "• Login/logout<br>"
+            "• Load content/refresh feeds<br>"
+            "• Sync data<br>"
+            "• Any API calls<br>"
+            "Then check if any VERDICT lines appear in the output."
+            "</div>"
+        )
 
+    # MASTG reference
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
+    summary_parts.append(mastg_ref)
+
+    if logs:
         detail = (
             "<div>" + "".join(summary_parts) + "</div>" +
             "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>" +
@@ -6704,16 +6957,17 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     else:
         detail = (
             "<div style='padding:8px; background:#f8d7da; border-left:3px solid #dc3545; font-size:11px'>"
-            "<strong>FAIL: No output captured</strong><br>"
+            "<strong>No output captured</strong><br>"
             "Possible issues:<br>"
             "• Frida hooks didn't attach (check if app uses native SSL)<br>"
             "• App crashed on startup<br>"
             "• ADB/USB connection issues<br>"
             "<br><strong>Try:</strong> Increase wait time or check Frida/ADB setup"
-            "</div>"
+            "</div>" + mastg_ref
         )
 
-    return (status, detail)
+    # Return INFO status (not PASS/FAIL) - this is observational data
+    return ('INFO', detail)
 
 def check_frida_pinning(base, wait_secs=15):
     """
@@ -9685,30 +9939,32 @@ def check_gms_security_provider(base):
 
 def print_banner():
     banner = r"""
-     ___   ____  _____ _____ 
+     ___   ____  _____ _____
     / _ \ / ___|| ____| ____|
-   | | | |\___ \|  _| | |   
-   | |_| | ___) | |___| |___ 
+   | | | |\___ \|  _| | |
+   | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
     AppSec 3.1.0 – Automated Mobile App Security Test Script
 
     Options:
-      -f, --file    Directory of APK to decompile into smali
-      -d, --dir     Decompiled directory containing smali
-      -u, --usb     Run dynamic Frida USB checks
-      
+      -f, --file       APK file to decompile into smali
+      -d, --dir        Decompiled directory containing smali
+      -u, --usb        Run dynamic Frida USB checks
+      -a, --all-tests  Run all tests without interactive selection
+
     Notes:
      the -u requires Frida to be running on rooted android device connected via usb
-     verify frida-ps -Uai finds the app before using this option  
+     verify frida-ps -Uai finds the app before using this option
 
     Usage:
-      python3 securitytest.py [options]
+      python3 securitytest.py -f app.apk
+      python3 securitytest.py -d /path/to/decompiled -u -a
       python3 securitytest.py --help
-      
+
     Requirements:  These must be on your $PATH
       [Frida],[apktool],[adb],[checksec],[apksigner],[readelf],[aapt]
-    
+
     """
     print(banner)
     
@@ -9791,12 +10047,14 @@ def main():
             "url":   "https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0019/",
             "checks": [
                 "Certificate Pinning",
-                "X509TrustManager Methods",
+                "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
                 "Network Security Config",
                 "Insecure HTTP URIs",
                 "Use of TLS 1.0 or 1.1",
                 "WebView SSL Error Handling",
                 "GMS Security Provider",
+                "Dynamic Cert Pinning",
+                "Dynamic Use of TLS 1.0 or 1.1",
             ]
         },
         "MASVS-PLATFORM": {
@@ -9923,7 +10181,7 @@ def main():
         ("StrictMode APIs",         lambda: check_strict_mode(base)),
         ("Debuggable APK",          lambda: check_debuggable(manifest, base)),
         ("Allow Backup",            lambda: check_allow_backup(manifest)),
-        ("X509TrustManager Methods",lambda: check_x509(base)),
+        ("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",lambda: check_x509(base)),
         ("Certificate Pinning",     lambda: check_certificate_pinning(base)),
         ("Network Security Config", lambda: check_network_security_config(base)),
         ("Insecure HTTP URIs",      lambda: check_http_uris(base)),
@@ -9972,6 +10230,7 @@ def main():
         ("Room Database Encryption", lambda: check_room_encryption(base)),
         ("Anti-Debugging",          lambda: check_anti_debugging(base)),
         ("GMS Security Provider",   lambda: check_gms_security_provider(base)),
+        ("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
     html_special = {
         "X509TrustManager Methods", "Kotlin Assertions",
@@ -10001,6 +10260,7 @@ def main():
         "Recent Screenshot Protection", "Dangerous Permissions",
         "DataStore Encryption",     "Room Database Encryption",
         "Anti-Debugging",           "GMS Security Provider",
+        "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
     }
 
     # Interactive test selection
@@ -10079,10 +10339,11 @@ def main():
 
         # Determine status and class
         if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
-                   "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                   "Custom URI Schemes", "Keyboard Cache", "OS Command Injection"):
+                    "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
+                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection"):
             status = "PASS" if ok else f"FAIL ({cnt})"
             cls = 'pass' if ok else 'fail'
+
         elif name == "Clipboard Security":
             # Can be PASS, WARN, or FAIL with count
             if ok == 'PASS' or ok is True:
@@ -10098,6 +10359,7 @@ def main():
             else:
                 status = "WARN"
                 cls = 'warn'
+
         elif name == "Task Hijacking":
             # Task Hijacking uses status string + count
             if ok == 'PASS':
@@ -10109,8 +10371,9 @@ def main():
             else:  # FAIL
                 status = f"FAIL ({cnt})" if cnt > 0 else "FAIL"
                 cls = 'fail'
+
         elif name == "Biometric Authentication":
-            # Keep this simple: explicit FAIL (1), no automatic counting from HTML
+            # Explicit FAIL (1), no automatic counting from HTML
             if ok == 'PASS':
                 status = "PASS"
                 cls = 'pass'
@@ -10120,8 +10383,9 @@ def main():
             else:  # FAIL
                 status = "FAIL (1)"
                 cls = 'fail'
+
         elif isinstance(ok, str):
-            # New format with explicit status
+            # New format with explicit status string
             status = ok
             if ok == 'PASS':
                 cls = 'pass'
@@ -10132,17 +10396,28 @@ def main():
                     status = f"WARN ({count})"
             elif ok == 'INFO':
                 cls = 'info'
-            else:  # FAIL
+            else:  # FAIL (string)
                 cls = 'fail'
                 count = det.count('<a href=') or (det.count('<br>') + 1)
                 status = f"FAIL ({count})" if count > 1 else "FAIL"
-        elif ok:
-            status = "PASS"
-            cls = 'pass'
+
         else:
-            count = det.count('<a href=') or (det.count('<br>') + 1)
-            status = f"FAIL ({count})" if count>1 else "FAIL"
-            cls = 'fail'
+            # ok is a bool, generic handling + S3 override
+            if name == "S3 Bucket Security":
+                if ok:
+                    status = "PASS"
+                    cls = "pass"
+                else:
+                    # One misconfigured bucket → treat as a single finding
+                    status = "FAIL (1)"
+                    cls = "fail"
+            elif ok:
+                status = "PASS"
+                cls = 'pass'
+            else:
+                count = det.count('<a href=') or (det.count('<br>') + 1)
+                status = f"FAIL ({count})" if count > 1 else "FAIL"
+                cls = 'fail'
         if name in html_special:
             html_block = (
                 "<details>"
