@@ -1705,16 +1705,16 @@ def check_strict_mode(base):
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0263/' target='_blank'>MASTG-TEST-0263: Logging of StrictMode Violations</a></div>"
 
-    # StrictMode API patterns
+    # StrictMode API patterns (SMALI patterns for decompiled APK)
     strictmode_apis = {
-        'setThreadPolicy': r'StrictMode;->setThreadPolicy',
-        'setVmPolicy': r'StrictMode;->setVmPolicy',
-        'enableDefaults': r'StrictMode;->enableDefaults',
-        'ThreadPolicy.Builder': r'StrictMode\$ThreadPolicy\$Builder',
-        'VmPolicy.Builder': r'StrictMode\$VmPolicy\$Builder',
-        'detectAll': r'->detectAll\(',
-        'penaltyLog': r'->penaltyLog\(',
-        'penaltyDeath': r'->penaltyDeath\(',
+        'setThreadPolicy': r'Landroid/os/StrictMode;->setThreadPolicy',
+        'setVmPolicy': r'Landroid/os/StrictMode;->setVmPolicy',
+        'enableDefaults': r'Landroid/os/StrictMode;->enableDefaults',
+        'ThreadPolicy.Builder': r'Landroid/os/StrictMode\$ThreadPolicy\$Builder',
+        'VmPolicy.Builder': r'Landroid/os/StrictMode\$VmPolicy\$Builder',
+        'detectAll': r'StrictMode\$.*Builder;->detectAll',
+        'penaltyLog': r'StrictMode\$.*Builder;->penaltyLog',
+        'penaltyDeath': r'StrictMode\$.*Builder;->penaltyDeath',
     }
 
     findings = []
@@ -2767,7 +2767,11 @@ def check_deep_link_misconfiguration(manifest):
             paths = []
             paths_raw = []
 
-            for d in data_tags:
+            # Track which data tags have host restrictions
+            data_tags_with_hosts = 0
+            data_tags_without_hosts = []
+
+            for idx, d in enumerate(data_tags):
                 scheme = d.get(ns('scheme'))
                 host = d.get(ns('host'))
                 path = (d.get(ns('pathPrefix')) or
@@ -2780,31 +2784,41 @@ def check_deep_link_misconfiguration(manifest):
                     hosts_raw.append(host)
                     resolved_host = resolve_string(host, manifest)
                     hosts.append(resolved_host)
+                    data_tags_with_hosts += 1
+                else:
+                    # This data tag has NO host - potential vulnerability
+                    data_tags_without_hosts.append(idx)
+
                 if path:
                     paths_raw.append(path)
                     resolved_path = resolve_string(path, manifest)
                     paths.append(resolved_path)
 
-            # CRITICAL CHECK: If ANY <data> tag has a host, the entire intent-filter
-            # is restricted to that host. The vulnerability only exists when NO host is specified.
-            if hosts:
-                # Host restriction exists - NOT vulnerable
-                # This is a common pattern and is SECURE
+            # CRITICAL CHECK: Each <data> tag creates a separate URI pattern in Android.
+            # If ANY <data> tag lacks a host attribute, it accepts traffic from ANY domain.
+            # ALL <data> tags must have host restrictions for the intent filter to be secure.
+            if not data_tags_without_hosts:
+                # All data tags have host restrictions - SECURE
                 continue
 
-            # No host restriction found - this IS vulnerable
-            # Multiple <data> tags without host = accepts ANY domain
+            # VULNERABILITY DETECTED: At least one <data> tag has no host restriction
             auto_verify = intent_filter.get(ns('autoVerify'), 'false')
 
             issue_msg = (
                 f"<strong>{activity_name}</strong><br>"
-                f"<strong>WARNING: Vulnerability:</strong> Intent filter with multiple &lt;data&gt; tags "
-                f"({len(data_tags)} found) but <strong>NO host restriction</strong>.<br>"
+                f"<strong>CRITICAL: Cartesian Product Vulnerability:</strong> Intent filter has "
+                f"{len(data_tags)} &lt;data&gt; tags, but <strong>{len(data_tags_without_hosts)} "
+                f"lack host restrictions</strong>.<br>"
             )
 
             if schemes:
-                issue_msg += f"<strong>Schemes:</strong> {', '.join(set(schemes))}<br>"
-            issue_msg += f"<strong>Hosts:</strong> <span style='color:#d32f2f;'>NONE (accepts any domain)</span><br>"
+                issue_msg += f"<strong>Schemes found:</strong> {', '.join(set(schemes))}<br>"
+
+            if hosts:
+                issue_msg += f"<strong>Hosts found:</strong> {', '.join(set(hosts))} (in {data_tags_with_hosts}/{len(data_tags)} tags)<br>"
+                issue_msg += f"<strong>Vulnerable tags:</strong> <span style='color:#d32f2f;'>{len(data_tags_without_hosts)} &lt;data&gt; tags without host → accept ANY domain</span><br>"
+            else:
+                issue_msg += f"<strong>Hosts:</strong> <span style='color:#d32f2f;'>NONE (accepts any domain)</span><br>"
             if paths:
                 issue_msg += f"<strong>Paths:</strong> {', '.join(paths[:3])}"
                 if len(paths) > 3:
@@ -2812,19 +2826,22 @@ def check_deep_link_misconfiguration(manifest):
                 issue_msg += "<br>"
 
             example_path = paths[0] if paths else '/malicious'
+            example_scheme = schemes[0] if schemes else 'https'
             issue_msg += (
-                f"<br><strong>Impact:</strong> App accepts URLs from <strong>arbitrary domains</strong>. "
-                f"An attacker can use <code>https://evil.com{example_path}</code> to trigger this activity.<br>"
+                f"<br><strong>Impact:</strong> Each &lt;data&gt; tag without a host creates a separate URI pattern. "
+                f"<strong>{len(data_tags_without_hosts)} tag(s) accept arbitrary domains</strong>. "
+                f"An attacker can use <code>{example_scheme}://evil.com{example_path}</code> to trigger this activity.<br>"
                 f"<strong>AutoVerify:</strong> {auto_verify}<br>"
-                f"<br><strong>Fix:</strong> Add host restriction to each &lt;data&gt; tag:<br>"
-                f"<code>&lt;data android:scheme=\"https\" "
+                f"<br><strong>Fix:</strong> Combine all attributes in a SINGLE &lt;data&gt; tag (prevents Cartesian product):<br>"
+                f"<code>&lt;data android:scheme=\"{example_scheme}\" "
                 f"android:host=\"your-domain.com\" "
                 f"android:pathPrefix=\"{paths[0] if paths else '/path'}\" /&gt;</code><br>"
+                f"OR add host to EVERY &lt;data&gt; tag if you need multiple patterns.<br>"
                 f"<br><strong>Test command (verify vulnerability):</strong><br>"
                 f"<pre>adb shell am start -a android.intent.action.VIEW "
                 f"-c android.intent.category.BROWSABLE "
-                f"-d 'https://attacker.com{example_path}'</pre>"
-                f"<em>If Active10 app opens, vulnerability is confirmed.</em><br>"
+                f"-d '{example_scheme}://attacker.com{example_path}'</pre>"
+                f"<em>If the app opens, vulnerability is confirmed.</em><br>"
                 f"<br><strong>OWASP Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028</a>"
             )
 
@@ -3438,22 +3455,22 @@ def check_safe_browsing(manifest, base):
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0031/' target='_blank'>MASTG-TEST-0031: Testing JavaScript Execution in WebViews</a></div>"
 
-    # --- detect any WebView usage (smali/Java/RN) ---
+    # --- detect any WebView usage (SMALI patterns for decompiled APK) ---
     webview_patterns = [
-        r'android\.webkit\.WebView\b',
-        r'androidx\.webkit\.WebView\b',
-        r'androidx\/webkit\/WebViewCompat',          # smali path
-        r'com\/reactnativecommunity\/webview',       # RN smali path
-        r'\bRNCWebView\b',
-        r'MauiWebViewClient',
+        r'Landroid/webkit/WebView;',                  # Standard Android WebView
+        r'Landroidx/webkit/WebViewCompat;',           # AndroidX WebView compat
+        r'Landroid/webkit/WebSettings;',              # WebView settings
+        r'com/reactnativecommunity/webview',          # RN smali path
+        r'RNCWebView',                                # React Native WebView
+        r'MauiWebViewClient',                         # MAUI framework
     ]
 
-    # Detect React Native usage
+    # Detect React Native usage (SMALI patterns)
     rn_patterns = [
-        r'com\/facebook\/react\/ReactActivity',
-        r'com\/facebook\/react\/ReactApplication',
-        r'com\/reactnativecommunity\/webview',
-        r'\bRNCWebView\b',
+        r'com/facebook/react/ReactActivity',
+        r'com/facebook/react/ReactApplication',
+        r'com/reactnativecommunity/webview',
+        r'RNCWebView',
     ]
     rn_hits = []
     for pat in rn_patterns:
@@ -4740,33 +4757,44 @@ def check_package_context(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    patterns = [
-        # Direct flag constants combined (CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY = 3)
-        r'createPackageContext\([^,]+,\s*3\)',
-        r'createPackageContext\([^,]+,\s*0x3\)',
-        # Flag constants by name
-        r'createPackageContext\([^)]*CONTEXT_INCLUDE_CODE[^)]*CONTEXT_IGNORE_SECURITY[^)]*\)',
-        r'createPackageContext\([^)]*CONTEXT_IGNORE_SECURITY[^)]*CONTEXT_INCLUDE_CODE[^)]*\)',
-        # Smali patterns - const/4 or const instructions loading flags
-        # Look for createPackageContext with const 3 or 0x3
-        r'const(?:/4)?\s+\w+,\s*0x3\s*\n[^\n]*createPackageContext',
-        r'const(?:/4)?\s+\w+,\s*3\s*\n[^\n]*createPackageContext',
-    ]
+    # SMALI pattern for createPackageContext call
+    create_context_pattern = r'Landroid/content/Context;->createPackageContext'
+    candidate_files = grep_code(base, create_context_pattern)
 
-    hits = set()
-    for pat in patterns:
-        for rel in grep_code(base, pat):
-            # Filter out library code
-            if not is_library_path(rel):
-                hits.add(rel)
+    # Filter out library code
+    candidate_files = [f for f in candidate_files if not is_library_path(f)]
+
+    if not candidate_files:
+        return ('PASS', "No createPackageContext usage detected" + mastg_ref)
+
+    # Check each file for insecure flag combination (value 3 = CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY)
+    hits = []
+    for rel in candidate_files:
+        path = os.path.join(base, rel)
+        try:
+            lines = open(path, errors='ignore').read().splitlines()
+            for i, line in enumerate(lines):
+                if 'createPackageContext' in line:
+                    # Check previous 5 lines for const/4 or const/16 with value 3 or 0x3
+                    context_start = max(0, i - 5)
+                    context = '\n'.join(lines[context_start:i+1])
+                    # Look for const/4 vX, 0x3 or const/4 vX, 3
+                    if re.search(r'const/4\s+v\d+,\s*(?:0x3|3)\b', context):
+                        hits.append((rel, i+1))
+                        break
+        except:
+            pass
 
     if not hits:
-        return ('PASS', "No insecure createPackageContext usage detected" + mastg_ref)
+        return ('PASS', f"createPackageContext usage found in {len(candidate_files)} file(s), but no insecure flag combinations detected" + mastg_ref)
 
+    # Build report with line numbers
     lines = []
-    for rel in sorted(hits):
-        full = os.path.join(base, rel)
-        lines.append(f'<a href="file://{full}">{rel}</a>')
+    lines.append("<div><strong>Insecure createPackageContext usage detected:</strong></div>")
+    lines.append("<div style='margin:5px 0; color:#dc2626;'>Using CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY allows loading code without security checks</div>")
+    for rel, line_num in sorted(hits):
+        full = os.path.abspath(os.path.join(base, rel))
+        lines.append(f'<a href="file://{full}:{line_num}">{html.escape(rel)}:{line_num}</a>')
 
     return ('FAIL', "<br>\n".join(lines) + mastg_ref)
 
@@ -5670,17 +5698,18 @@ def check_hardcoded_keys(base):
 </div>
 ''')
 
-    # Start table
+    # Start table with scrollable container
     lines.append(f'''
-<table id="{table_id}" style="width:100%; border-collapse:collapse; margin:10px 0; font-size:13px; background:white;">
+<div style="overflow-x:auto; margin:10px 0; border:1px solid #dee2e6; border-radius:4px;">
+<table id="{table_id}" style="width:100%; min-width:900px; border-collapse:collapse; font-size:13px; background:white;">
     <thead>
         <tr style="background:#343a40; color:white; text-align:left;">
-            <th style="padding:10px; width:40px; border:1px solid #dee2e6;">#</th>
-            <th style="padding:10px; width:15%; border:1px solid #dee2e6;">Location</th>
-            <th style="padding:10px; width:10%; border:1px solid #dee2e6;">Confidence</th>
-            <th style="padding:10px; width:30%; border:1px solid #dee2e6;">Content</th>
-            <th style="padding:10px; width:25%; border:1px solid #dee2e6;">Reason</th>
-            <th style="padding:10px; width:10%; text-align:center; border:1px solid #dee2e6;">Code</th>
+            <th style="padding:10px; width:40px; border:1px solid #dee2e6; white-space:nowrap;">#</th>
+            <th style="padding:10px; min-width:200px; border:1px solid #dee2e6;">Location</th>
+            <th style="padding:10px; min-width:100px; border:1px solid #dee2e6;">Confidence</th>
+            <th style="padding:10px; min-width:250px; border:1px solid #dee2e6;">Content</th>
+            <th style="padding:10px; min-width:200px; border:1px solid #dee2e6;">Reason</th>
+            <th style="padding:10px; min-width:100px; text-align:center; border:1px solid #dee2e6;">Code</th>
         </tr>
     </thead>
     <tbody>
@@ -5739,25 +5768,26 @@ def check_hardcoded_keys(base):
             <td style="padding:8px; border:1px solid #dee2e6; word-break:break-all;">
                 <code style="background:#e9ecef; padding:2px 4px; border-radius:3px; font-size:11px; color:#000; font-family:Consolas,Monaco,monospace; font-weight:500;">{html.escape(finding['value_preview'])}</code>
             </td>
-            <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
+            <td style="padding:8px; border:1px solid #dee2e6; font-size:12px; word-wrap:break-word; overflow-wrap:break-word;">
                 {html.escape(finding['reason'])}
             </td>
-            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">
+            <td style="padding:8px; border:1px solid #dee2e6; text-align:center; white-space:nowrap;">
                 <button onclick="toggleCode_{table_id}('{code_id}')"
                         style="padding:4px 10px; border:1px solid #007bff; background:#007bff; color:white; border-radius:3px; cursor:pointer; font-size:11px;">
                     View
                 </button>
-                <div id="{code_id}" style="display:none; margin-top:8px; text-align:left;">
+                <div id="{code_id}" style="display:none; margin-top:8px; text-align:left; max-width:400px; overflow-x:auto;">
                     {code_html}
                 </div>
             </td>
         </tr>
 ''')
 
-    # Close table
+    # Close table and scrollable container
     lines.append('''
     </tbody>
 </table>
+</div>
 ''')
 
     # Add JavaScript for filtering and search
@@ -6310,12 +6340,12 @@ def check_clipboard_security(base):
     MASVS: MASVS-STORAGE-2 (Sensitive Data Disclosure)
     MASTG: MASTG-TEST-0001
     """
-    # Clipboard API patterns to detect
+    # Clipboard API patterns to detect (SMALI patterns for decompiled APK)
     clipboard_api_patterns = {
-        'setPrimaryClip': r'setPrimaryClip\(',
-        'getPrimaryClip': r'getPrimaryClip\(',
-        'ClipboardManager_init': r'Landroid/content/ClipboardManager;-><init>',
-        'getSystemService_CLIPBOARD': r'getSystemService.*clipboard',
+        'setPrimaryClip': r'Landroid/content/ClipboardManager;->setPrimaryClip',
+        'getPrimaryClip': r'Landroid/content/ClipboardManager;->getPrimaryClip',
+        'ClipboardManager_getSystemService': r'getSystemService.*Landroid/content/ClipboardManager;',
+        'ClipData': r'Landroid/content/ClipData;->newPlainText',
     }
 
     # Sensitive data indicators (what should NEVER be copied to clipboard)
@@ -6735,7 +6765,8 @@ def check_insecure_randomness(base):
     lib_paths = (
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
-        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/google/common/', '/com/google/crypto/tink/',  # Google Tink cryptographic library
+        '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
@@ -6795,7 +6826,7 @@ def check_insecure_randomness(base):
                         )
 
                         # Add severity indicator
-                        severity = "CRITICAL" if is_predictable_seed else "HIGH"
+                        severity = " * " if is_predictable_seed else "HIGH"
                         severity_color = "#dc3545" if is_predictable_seed else "#fd7e14"
 
                         issues.append(
@@ -6819,7 +6850,7 @@ def check_insecure_randomness(base):
     issues = issues_critical + issues_high
 
     result = []
-    result.append(f"<div style='margin:5px 0'><strong>Total insecure random usage found:</strong> {len(issues)}</div>")
+    result.append(f"<div style='margin:5px 0'><strong>Insecure random usage found:</strong> {len(issues)}</div>")
     result.extend(issues)
     result.append(mastg_ref)
 
@@ -9707,7 +9738,7 @@ def check_frida_clipboard(base, wait_secs=10):
         summary_parts.append(
             f"<div style='padding:6px; margin:4px 0; background:#f9f9f9; border-left:3px solid {'#dc3545' if item['sensitive'] else '#ccc'};'>"
             f"{marker} <strong>{item['length']} chars</strong> {sensitivity_label}<br>"
-            f"<code style='background:#fff; padding:2px 4px; border:1px solid #ddd;'>{html.escape(item['preview'])}</code>"
+            f"<code style='background:#e9ecef; padding:4px 6px; border:1px solid #adb5bd; color:#000; font-family:Consolas,Monaco,monospace; font-weight:500; border-radius:3px;'>{html.escape(item['preview'])}</code>"
             f"</div>"
         )
 
@@ -9891,6 +9922,15 @@ def check_storage_analysis(base, package_name):
                 if '.db' in file_entry:
                     # Extract the database filename from the ls output
                     db_filename = file_entry.split()[-1] if file_entry.split() else None
+
+                    # Skip SQLite temporary/auxiliary files
+                    if db_filename and any(db_filename.endswith(ext) for ext in ['.db-journal', '.db-shm', '.db-wal']):
+                        continue
+
+                    # Only check actual .db files
+                    if not db_filename or not db_filename.endswith('.db'):
+                        continue
+
                     db_full_path = f"{dir_path}/{db_filename}" if db_filename else None
 
                     # Check encryption status
@@ -9963,16 +10003,18 @@ def check_pending_intent_flags(base):
 
     Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/
     """
+    # SMALI patterns for decompiled APK
     pending_intent_patterns = [
-        r'PendingIntent\.getActivity',
-        r'PendingIntent\.getBroadcast',
-        r'PendingIntent\.getService',
-        r'PendingIntent\.getForegroundService',
+        r'Landroid/app/PendingIntent;->getActivity',
+        r'Landroid/app/PendingIntent;->getBroadcast',
+        r'Landroid/app/PendingIntent;->getService',
+        r'Landroid/app/PendingIntent;->getForegroundService',
     ]
 
-    flag_immutable = r'PendingIntent\.FLAG_IMMUTABLE'
-    flag_mutable = r'PendingIntent\.FLAG_MUTABLE'
-    flag_update = r'PendingIntent\.FLAG_UPDATE_CURRENT'
+    # Flag patterns - these are static final int constants (const/high16 or const)
+    flag_immutable = r'0x4000000|67108864'  # FLAG_IMMUTABLE = 0x04000000 (67108864)
+    flag_mutable = r'0x8000000|134217728'   # FLAG_MUTABLE = 0x08000000 (134217728)
+    flag_update = r'0x8000000[08]|134217728'  # FLAG_UPDATE_CURRENT = 0x08000000 (134217728)
 
     vulnerable_files = []
     mutable_files = []
@@ -10289,12 +10331,12 @@ def check_datastore_encryption(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    # DataStore API usage patterns (in smali)
+    # DataStore API usage patterns (SMALI patterns for decompiled APK)
     datastore_patterns = [
         r'Landroidx/datastore/core/DataStore;',
         r'Landroidx/datastore/preferences/core/Preferences;',
-        r'createDataStore',
-        r'preferencesDataStore',
+        r'Landroidx/datastore/core/DataStoreFactory;->create',
+        r'Landroidx/datastore/preferences/PreferenceDataStoreFactory;',
     ]
 
     # Encryption patterns
@@ -10392,19 +10434,20 @@ def check_room_encryption(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    # Room API usage patterns (in smali)
+    # Room API usage patterns (SMALI patterns for decompiled APK)
     room_patterns = [
-        r'Landroidx/room/Database;',
         r'Landroidx/room/RoomDatabase;',
         r'Landroidx/room/Room;->databaseBuilder',
-        r'@Database\(',  # Annotation
+        r'\.annotation.*Landroidx/room/Database;',  # SMALI annotation syntax
+        r'Landroidx/room/Dao;',
     ]
 
-    # SQLCipher encryption patterns
+    # SQLCipher encryption patterns (SMALI patterns)
     encryption_patterns = [
         r'Lnet/sqlcipher/',
-        r'SQLCipherUtils',
-        r'SupportFactory',
+        r'Lnet/sqlcipher/database/SQLiteDatabase;',
+        r'Landroidx/sqlite/db/SupportSQLiteOpenHelper\$Factory;',
+        r'openOrCreateDatabase.*sqlcipher',
     ]
 
     room_files = set()
