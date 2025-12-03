@@ -8154,24 +8154,119 @@ def check_frida_task_hijack(base, manifest,
             proc.terminate()
             raise RuntimeError("Timed out waiting for hooks installation")
 
-    # ── 6) interactive monitoring with user prompt ────────────────
-    instructions = [
-        f"App '{pkg}' is running with task hijack monitoring",
-        f"The system will automatically test {len(bad)} exported activities",
-        "Navigate between apps and activities to test task hijacking",
-        "Watch for activity lifecycle events below"
-    ]
+    # ── 6) Launch activities and collect logs simultaneously ──────
+    print(f"\n[*] Launching {len(bad)} exported activities and monitoring...")
+    print("="*70)
 
-    # Launch activities before monitoring
-    print(f"\n[*] Launching {len(bad)} exported activities...")
-    for comp in bad:
+    logs = []
+
+    # Launch each activity and collect logs in real-time
+    for i, comp in enumerate(bad, 1):
+        print(f"[*] Launching activity {i}/{len(bad)}: {comp.split('.')[-1]}")
+
+        # Launch activity
         subprocess.run(
             ['adb','shell','am','start','-W','-n', f"{pkg}/{comp}"],
-            stdout=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
-        time.sleep(per_launch_pause)
 
-    logs = interactive_frida_monitor(proc, "TASK HIJACKING", instructions)
+        # Collect Frida output for a short period after launch
+        start_time = time.time()
+        while time.time() - start_time < per_launch_pause:
+            try:
+                # Non-blocking read with select (Unix) or polling (Windows)
+                import platform
+                is_windows = platform.system() == 'Windows'
+
+                if is_windows:
+                    # Windows: Use threading with timeout
+                    import threading
+                    import queue
+
+                    def read_line(q):
+                        try:
+                            line = proc.stdout.readline()
+                            if line:
+                                q.put(line)
+                        except:
+                            pass
+
+                    q = queue.Queue()
+                    t = threading.Thread(target=read_line, args=(q,))
+                    t.daemon = True
+                    t.start()
+                    t.join(timeout=0.1)
+
+                    try:
+                        line = q.get_nowait()
+                        print(line.rstrip())
+                        logs.append(line.rstrip())
+                    except queue.Empty:
+                        pass
+                else:
+                    # Unix: Use select
+                    import select
+                    import fcntl
+
+                    fd = proc.stdout.fileno()
+                    r, _, _ = select.select([fd], [], [], 0.1)
+                    if r:
+                        line = proc.stdout.readline()
+                        if line:
+                            print(line.rstrip())
+                            logs.append(line.rstrip())
+
+            except:
+                time.sleep(0.1)
+
+    print("\n[*] All activities launched. Collecting final logs...")
+
+    # Wait for any remaining logs
+    final_wait_start = time.time()
+    while time.time() - final_wait_start < final_wait:
+        try:
+            import platform
+            is_windows = platform.system() == 'Windows'
+
+            if is_windows:
+                import threading
+                import queue
+
+                def read_line(q):
+                    try:
+                        line = proc.stdout.readline()
+                        if line:
+                            q.put(line)
+                    except:
+                        pass
+
+                q = queue.Queue()
+                t = threading.Thread(target=read_line, args=(q,))
+                t.daemon = True
+                t.start()
+                t.join(timeout=0.1)
+
+                try:
+                    line = q.get_nowait()
+                    print(line.rstrip())
+                    logs.append(line.rstrip())
+                except queue.Empty:
+                    pass
+            else:
+                import select
+
+                fd = proc.stdout.fileno()
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if r:
+                    line = proc.stdout.readline()
+                    if line:
+                        print(line.rstrip())
+                        logs.append(line.rstrip())
+        except:
+            time.sleep(0.1)
+
+    print("="*70)
 
     # ── 7) parse collected logs for lifecycle events ───────────────
     seen = {}
@@ -10469,7 +10564,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 3.1.0 – Automated Mobile App Security Test Script
+    AppSec 3.7.2 – Automated Mobile App Security Test Script
 
     Options:
       -f, --file       APK file to decompile into smali
@@ -10482,7 +10577,7 @@ def print_banner():
      verify frida-ps -Uai finds the app before using this option
 
     Usage:
-      python3 securitytest.py -f app.apk
+      python3 securitytest.py -f app.apk -u -a
       python3 securitytest.py -d /path/to/decompiled -u -a
       python3 securitytest.py --help
 
