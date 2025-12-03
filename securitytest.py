@@ -2234,10 +2234,14 @@ def check_file_provider(res_dir):
 
             txt = open(full, errors='ignore').read()
 
-            # 1) external-path path="."
+            # 1) external-path path="." or path="/"
             if re.search(r'<\s*external-path[^>]*path="\."[^>]*/?>', txt):
                 issues.append(
                     f"{link} – insecure <external-path path='.'>"
+                )
+            if re.search(r'<\s*external-path[^>]*path="/"[^>]*/?>', txt):
+                issues.append(
+                    f"{link} – insecure <external-path path='/'>"
                 )
 
             # 2) grant-uri-permission / path-permission
@@ -6428,28 +6432,30 @@ def check_insecure_fingerprint_api(base):
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/' target='_blank'>MASTG-TEST-0018: Testing Biometric Authentication</a></div>"
 
-    # Library paths to exclude (not your app code)
+    # Library paths to exclude (only well-maintained framework libraries)
+    # NOTE: For FingerprintManager detection, we want to catch deprecated API usage
+    # even in third-party libraries since it affects the app's security posture
     lib_paths = (
-        '/androidx/', '/android/support/',
-        '/okhttp3/', '/retrofit2/', '/com/squareup/',
-        '/com/google/', '/com/facebook/', '/kotlin/', '/kotlinx/',
-        '/org/chromium/', '/com/reactnativecommunity/',
-        '/org/conscrypt/', '/lib/', '/jetified-'
+        '/androidx/biometric/', '/androidx/core/',  # Modern biometric libraries (safe)
+        '/android/support/',
+        '/org/conscrypt/', '/lib/arm', '/lib/x86',  # Native libraries
     )
 
     def is_library_path(path):
-        """Check if path is library code, not app code"""
+        """Check if path is framework library code (androidx, android support)"""
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
     # Detection patterns for FingerprintManager (deprecated API only)
     fingerprint_manager_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;')
 
-    # CRITICAL: authenticate(CancellationSignal, ...) = null CryptoObject
-    null_crypto_fingerprint = re.compile(
+    # Any authenticate() call pattern
+    authenticate_call_pattern = re.compile(
         r'invoke-virtual.*Landroid/hardware/fingerprint/FingerprintManager;->authenticate'
-        r'\(Landroid/os/CancellationSignal;'
     )
+
+    # Null parameter pattern (const/4 vX, 0x0 before authenticate call)
+    null_pattern = re.compile(r'const/4\s+v\d+,\s*0x0')
 
     # Secure: CryptoObject used
     crypto_object_pattern = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;')
@@ -6498,16 +6504,27 @@ def check_insecure_fingerprint_api(base):
                     break
 
             # Check for null CryptoObject vulnerability (CRITICAL)
+            # Look for authenticate() calls and check if null is passed (look back 10 lines for const/4 vX, 0x0)
             for i, line in enumerate(lines, 1):
-                if null_crypto_fingerprint.search(line):
-                    snippet = html.escape(line.strip()[:120])
-                    link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
-                    null_crypto_files.append((link, snippet))
-                    break
+                if authenticate_call_pattern.search(line):
+                    # Check previous lines (up to 10 lines back) for null assignment
+                    context_start = max(0, i - 10)
+                    context = lines[context_start:i]
+                    has_null = any(null_pattern.search(ctx_line) for ctx_line in context)
+
+                    # If we find null in context OR no CryptoObject construction, flag it
+                    # Check if CryptoObject is constructed in this file
+                    file_has_crypto_obj = rel_path in crypto_files
+
+                    if has_null or not file_has_crypto_obj:
+                        snippet = html.escape(line.strip()[:120])
+                        link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
+                        null_crypto_files.append((link, snippet))
+                        break
 
     # No FingerprintManager API usage detected
     if not fingerprint_files:
-        return 'PASS', "<div>No FingerprintManager API usage detected in app code</div>" + mastg_ref
+        return 'PASS', "<div>No FingerprintManager API usage detected (deprecated API not found)</div>" + mastg_ref
 
     # CRITICAL: null CryptoObject detected - allows Frida bypass
     if null_crypto_files:
@@ -9852,6 +9869,137 @@ def check_room_encryption(base):
     return 'WARN', "<br>\n".join(lines)
 
 
+def check_database_encryption(base):
+    """
+    MASTG-TEST-0001: Testing Local Storage for Sensitive Data (Database Files)
+
+    Check for .db database file usage in APP CODE and verify SQLCipher encryption.
+    Detects references to .db files and checks if encryption is implemented.
+    Filters out androidx library files.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/
+    """
+    # Library paths to exclude
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        """Check if path is library code"""
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
+    # Database file patterns (looking for .db file references)
+    db_patterns = [
+        r'\.db["\']',  # String literals ending with .db
+        r'openOrCreateDatabase',
+        r'SQLiteDatabase;->openDatabase',
+        r'SQLiteOpenHelper',
+        r'getWritableDatabase',
+        r'getReadableDatabase',
+    ]
+
+    # SQLCipher encryption patterns
+    encryption_patterns = [
+        r'Lnet/sqlcipher/',
+        r'SQLCipherUtils',
+        r'SupportFactory',
+        r'getWritableDatabase.*Ljava/lang/String;',  # SQLCipher takes password param
+    ]
+
+    db_files = set()
+    encrypted_files = set()
+    db_file_references = {}  # Track what .db files are referenced
+
+    # Scan for database usage in APP CODE only
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith('.smali'):
+                continue
+
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+
+            # SKIP library files
+            if is_library_path(rel):
+                continue
+
+            try:
+                with open(full, errors='ignore') as f:
+                    content = f.read()
+                    lines = content.split('\n')
+
+                # Check for database usage
+                has_db = False
+                for pat in db_patterns:
+                    if re.search(pat, content):
+                        db_files.add(rel)
+                        has_db = True
+                        # Extract .db file names if present
+                        db_name_matches = re.findall(r'["\']([^"\']+\.db)["\']', content)
+                        if db_name_matches:
+                            if rel not in db_file_references:
+                                db_file_references[rel] = []
+                            db_file_references[rel].extend(db_name_matches)
+                        break
+
+                # Check for encryption
+                if has_db:
+                    for pat in encryption_patterns:
+                        if re.search(pat, content):
+                            encrypted_files.add(rel)
+                            break
+
+            except Exception:
+                pass
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+
+    if not db_files:
+        return 'PASS', f"<div>No database (.db) file usage detected in app code</div>{mastg_ref}"
+
+    if encrypted_files:
+        lines = [
+            f"<div>Database encryption detected in {len(encrypted_files)} file(s)</div>",
+            "<div>App code uses SQLCipher or encrypted database implementation.</div>",
+            "<br><div><strong>Files with encryption:</strong></div>"
+        ]
+        for rel in sorted(encrypted_files)[:10]:
+            full = os.path.abspath(os.path.join(base, rel))
+            db_refs = db_file_references.get(rel, [])
+            db_info = f" ({', '.join(set(db_refs))})" if db_refs else ""
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>{html.escape(db_info)}')
+        if len(encrypted_files) > 10:
+            lines.append(f"<div>... and {len(encrypted_files) - 10} more files</div>")
+        lines.append(mastg_ref)
+        return 'PASS', "<br>\n".join(lines)
+
+    # Found databases without encryption
+    lines = [
+        f"<div><strong>WARNING: {len(db_files)} file(s) in app code use databases without encryption</strong></div>",
+        "<div>Database files (.db) are stored in plaintext by default.</div>",
+        "<div>Recommendation: Use SQLCipher to encrypt database files containing sensitive data.</div>",
+        "<br><div><strong>App code files with database usage:</strong></div>"
+    ]
+
+    for rel in sorted(db_files)[:20]:
+        full = os.path.abspath(os.path.join(base, rel))
+        db_refs = db_file_references.get(rel, [])
+        db_info = f" (References: {', '.join(set(db_refs))})" if db_refs else ""
+        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>{html.escape(db_info)}')
+
+    if len(db_files) > 20:
+        lines.append(f"<div>... and {len(db_files) - 20} more files</div>")
+
+    lines.append(mastg_ref)
+    return 'WARN', "<br>\n".join(lines)
+
+
 def check_anti_debugging(base):
     """
     MASTG-TEST-0046: Testing Anti-Debugging Detection
@@ -10228,6 +10376,7 @@ def main():
         ("Dangerous Permissions",   lambda: check_dangerous_permissions(manifest)),
         ("DataStore Encryption",    lambda: check_datastore_encryption(base)),
         ("Room Database Encryption", lambda: check_room_encryption(base)),
+        ("Database File Encryption", lambda: check_database_encryption(base)),
         ("Anti-Debugging",          lambda: check_anti_debugging(base)),
         ("GMS Security Provider",   lambda: check_gms_security_provider(base)),
         ("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
@@ -10259,7 +10408,8 @@ def main():
         "PendingIntent Flags",      "WebView SSL Error Handling",
         "Recent Screenshot Protection", "Dangerous Permissions",
         "DataStore Encryption",     "Room Database Encryption",
-        "Anti-Debugging",           "GMS Security Provider",
+        "Database File Encryption", "Anti-Debugging",
+        "GMS Security Provider",
         "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
     }
 
