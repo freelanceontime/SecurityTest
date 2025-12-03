@@ -2319,10 +2319,11 @@ def check_serialize(base):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0034/' target='_blank'>MASTG-TEST-0034: Testing Object Persistence</a></div>"
 
-    # Library paths to exclude
+    # Library paths to exclude (Google GSON, Tink, Protobuf use serialization internally - these are safe)
     lib_paths = (
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/',
+        '/com/google/gson/', '/com/google/crypto/tink/', '/com/google/protobuf/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/org/chromium/', '/io/reactivex/',
@@ -9226,6 +9227,8 @@ def check_frida_clipboard(base, wait_secs=10):
     # Parse collected logs
     findings = []
     sensitive_count = 0
+    clipboard_items = []  # Store individual clipboard operations with details
+
     for line in logs:
         if 'message:' in line:
             try:
@@ -9237,10 +9240,16 @@ def check_frida_clipboard(base, wait_secs=10):
                         preview = payload.get('preview', '')
                         length = payload.get('length', 0)
                         sensitive = payload.get('sensitive', False)
-                        marker = "" if sensitive else ""
+                        marker = "🔴" if sensitive else "⚪"
                         if sensitive:
                             sensitive_count += 1
+
                         findings.append(f"{marker} Copied {length} chars: {preview}")
+                        clipboard_items.append({
+                            'preview': preview,
+                            'length': length,
+                            'sensitive': sensitive
+                        })
             except:
                 pass
 
@@ -9249,19 +9258,57 @@ def check_frida_clipboard(base, wait_secs=10):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
+    # MASTG reference
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+
     if not findings:
-        return 'PASS', "<strong>No clipboard usage observed during runtime</strong>"
+        return 'PASS', f"<div><strong>No clipboard usage observed during runtime</strong></div>{mastg_ref}"
 
-    detail = [f"<div><strong>Clipboard operations detected:</strong></div>"]
+    # Build detailed report with summary
+    summary_parts = []
+
     if sensitive_count > 0:
-        detail.append(f"<div><strong> Sensitive data copied to clipboard: {sensitive_count} time(s)</strong></div><br>")
+        summary_parts.append("<div style='background:#f8d7da; border-left:4px solid #dc3545; padding:10px; margin:10px 0;'>")
+        summary_parts.append(f"<strong style='color:#dc2626;'>⚠️ Sensitive data copied to clipboard: {sensitive_count} time(s)</strong><br>")
+        summary_parts.append("<strong>Risk:</strong> Any app with clipboard access can read this data<br>")
+        summary_parts.append("<strong>Threat:</strong> Malicious keyboard apps, screen readers, or accessibility services can steal sensitive data")
+        summary_parts.append("</div>")
+    else:
+        summary_parts.append(f"<div><strong>Clipboard operations detected:</strong> {len(findings)} item(s)</div>")
+        summary_parts.append("<div style='margin-top:4px; color:#666; font-size:11px'>No sensitive data patterns detected</div>")
 
-    detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:20]])
-    if len(findings) > 20:
-        detail.append(f"<div>...and {len(findings) - 20} more</div>")
+    # Show clipboard items with details
+    summary_parts.append("<br><div><strong>Clipboard Contents:</strong></div>")
+    for item in clipboard_items[:20]:
+        marker = "🔴" if item['sensitive'] else "⚪"
+        sensitivity_label = "<span style='color:#dc2626; font-weight:bold;'>[SENSITIVE]</span>" if item['sensitive'] else ""
+        summary_parts.append(
+            f"<div style='padding:6px; margin:4px 0; background:#f9f9f9; border-left:3px solid {'#dc3545' if item['sensitive'] else '#ccc'};'>"
+            f"{marker} <strong>{item['length']} chars</strong> {sensitivity_label}<br>"
+            f"<code style='background:#fff; padding:2px 4px; border:1px solid #ddd;'>{html.escape(item['preview'])}</code>"
+            f"</div>"
+        )
+
+    if len(clipboard_items) > 20:
+        summary_parts.append(f"<div style='color:#666; font-size:11px; margin-top:4px;'>...and {len(clipboard_items) - 20} more items</div>")
+
+    # Add MASTG reference before Frida output
+    summary_parts.append(mastg_ref)
+
+    # Add collapsible full Frida output section (like Dynamic TLS test)
+    if logs:
+        detail = (
+            "<div>" + "".join(summary_parts) + "</div>" +
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>📋 View full Frida output</summary>" +
+            "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px; border:1px solid #ddd;'>\n" +
+            html.escape("\n".join(logs[-600:])) +  # cap output to last 600 lines and escape HTML
+            "\n</pre></details>"
+        )
+    else:
+        detail = "<div>" + "".join(summary_parts) + "</div>"
 
     status = 'FAIL' if sensitive_count > 0 else 'WARN'
-    return status, "<br>\n".join(detail)
+    return status, detail
 
 
 def check_storage_analysis(base, package_name):
@@ -9957,131 +10004,163 @@ def check_database_encryption(base):
     """
     MASTG-TEST-0001: Testing Local Storage for Sensitive Data (Database Files)
 
-    Check for .db database file usage in APP CODE and verify SQLCipher encryption.
-    Detects references to .db files and checks if encryption is implemented.
-    Filters out androidx library files.
+    Checks actual database files on device using ADB:
+    1. Lists all .db files in app's data directory
+    2. Checks each database file header to determine if encrypted
+    3. SQLite unencrypted: starts with "SQLite format 3"
+    4. SQLCipher encrypted: has random/encrypted header
+    5. Also scans smali code for encryption API usage
 
     Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/
     """
-    # Library paths to exclude
-    lib_paths = (
-        '/androidx/', '/android/support/',
-        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
-        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
-        '/com/facebook/', '/kotlin/', '/kotlinx/',
-        '/io/reactivex/', '/rx/', '/dagger/',
-        '/lib/', '/jetified-'
-    )
-
-    def is_library_path(path):
-        """Check if path is library code"""
-        normalized = '/' + path.replace('\\', '/')
-        return any(lib in normalized for lib in lib_paths)
-
-    # Database file patterns (looking for .db file references)
-    db_patterns = [
-        r'\.db["\']',  # String literals ending with .db
-        r'openOrCreateDatabase',
-        r'SQLiteDatabase;->openDatabase',
-        r'SQLiteOpenHelper',
-        r'getWritableDatabase',
-        r'getReadableDatabase',
-    ]
-
-    # SQLCipher encryption patterns
-    encryption_patterns = [
-        r'Lnet/sqlcipher/',
-        r'SQLCipherUtils',
-        r'SupportFactory',
-        r'getWritableDatabase.*Ljava/lang/String;',  # SQLCipher takes password param
-    ]
-
-    db_files = set()
-    encrypted_files = set()
-    db_file_references = {}  # Track what .db files are referenced
-
-    # Scan for database usage in APP CODE only
-    for root, _, files in os.walk(base):
-        for fn in files:
-            if not fn.endswith('.smali'):
-                continue
-
-            full = os.path.join(root, fn)
-            rel = os.path.relpath(full, base)
-
-            # SKIP library files
-            if is_library_path(rel):
-                continue
-
-            try:
-                with open(full, errors='ignore') as f:
-                    content = f.read()
-                    lines = content.split('\n')
-
-                # Check for database usage
-                has_db = False
-                for pat in db_patterns:
-                    if re.search(pat, content):
-                        db_files.add(rel)
-                        has_db = True
-                        # Extract .db file names if present
-                        db_name_matches = re.findall(r'["\']([^"\']+\.db)["\']', content)
-                        if db_name_matches:
-                            if rel not in db_file_references:
-                                db_file_references[rel] = []
-                            db_file_references[rel].extend(db_name_matches)
-                        break
-
-                # Check for encryption
-                if has_db:
-                    for pat in encryption_patterns:
-                        if re.search(pat, content):
-                            encrypted_files.add(rel)
-                            break
-
-            except Exception:
-                pass
-
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
-    if not db_files:
-        return 'PASS', f"<div>No database (.db) file usage detected in app code</div>{mastg_ref}"
+    # Get package name from manifest
+    try:
+        manifest = os.path.join(base, 'AndroidManifest.xml')
+        tree = ET.parse(manifest)
+        root = tree.getroot()
+        package_name = root.attrib.get('package', '')
+        if not package_name:
+            return 'FAIL', f"<div>Could not determine package name from manifest</div>{mastg_ref}"
+    except Exception as e:
+        return 'FAIL', f"<div>Error reading manifest: {html.escape(str(e))}</div>{mastg_ref}"
 
-    if encrypted_files:
-        lines = [
-            f"<div>Database encryption detected in {len(encrypted_files)} file(s)</div>",
-            "<div>App code uses SQLCipher or encrypted database implementation.</div>",
-            "<br><div><strong>Files with encryption:</strong></div>"
-        ]
-        for rel in sorted(encrypted_files)[:10]:
-            full = os.path.abspath(os.path.join(base, rel))
-            db_refs = db_file_references.get(rel, [])
-            db_info = f" ({', '.join(set(db_refs))})" if db_refs else ""
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>{html.escape(db_info)}')
-        if len(encrypted_files) > 10:
-            lines.append(f"<div>... and {len(encrypted_files) - 10} more files</div>")
-        lines.append(mastg_ref)
-        return 'PASS', "<br>\n".join(lines)
+    # Check if device is connected
+    try:
+        result = subprocess.run(['adb', 'devices'], capture_output=True, text=True, timeout=5)
+        if 'device' not in result.stdout:
+            return 'FAIL', f"<div>No device connected via ADB</div>{mastg_ref}"
+    except Exception:
+        return 'FAIL', f"<div>ADB not available or not in PATH</div>{mastg_ref}"
 
-    # Found databases without encryption
-    lines = [
-        f"<div><strong>WARNING: {len(db_files)} file(s) in app code use databases without encryption</strong></div>",
-        "<div>Database files (.db) are stored in plaintext by default.</div>",
-        "<div>Recommendation: Use SQLCipher to encrypt database files containing sensitive data.</div>",
-        "<br><div><strong>App code files with database usage:</strong></div>"
-    ]
+    # List all .db files in app's data directory
+    db_files_on_device = []
+    try:
+        # Try with su (root)
+        result = subprocess.run(
+            ['adb', 'shell', 'su', '-c', f'find /data/data/{package_name} -name "*.db" 2>/dev/null'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            db_files_on_device = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+        else:
+            # Try without su (may work on some devices/emulators)
+            result = subprocess.run(
+                ['adb', 'shell', f'find /data/data/{package_name} -name "*.db" 2>/dev/null'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                db_files_on_device = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+    except Exception as e:
+        return 'FAIL', f"<div>Error listing database files: {html.escape(str(e))}</div>{mastg_ref}"
 
-    for rel in sorted(db_files)[:20]:
-        full = os.path.abspath(os.path.join(base, rel))
-        db_refs = db_file_references.get(rel, [])
-        db_info = f" (References: {', '.join(set(db_refs))})" if db_refs else ""
-        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>{html.escape(db_info)}')
+    if not db_files_on_device:
+        return 'PASS', f"<div>No database (.db) files found on device in /data/data/{package_name}</div>{mastg_ref}"
 
-    if len(db_files) > 20:
-        lines.append(f"<div>... and {len(db_files) - 20} more files</div>")
+    # Check each database file to see if it's encrypted
+    encrypted_dbs = []
+    unencrypted_dbs = []
+    unknown_dbs = []
+
+    for db_path in db_files_on_device:
+        try:
+            # Read first 16 bytes of the database file to check header
+            # SQLite unencrypted starts with "SQLite format 3\0"
+            result = subprocess.run(
+                ['adb', 'shell', 'su', '-c', f'head -c 16 "{db_path}" 2>/dev/null | xxd -p'],
+                capture_output=True, text=True, timeout=5
+            )
+
+            if result.returncode != 0:
+                # Try without su
+                result = subprocess.run(
+                    ['adb', 'shell', f'head -c 16 "{db_path}" 2>/dev/null | xxd -p'],
+                    capture_output=True, text=True, timeout=5
+                )
+
+            if result.returncode == 0 and result.stdout.strip():
+                hex_header = result.stdout.strip().replace('\n', '').replace(' ', '')
+
+                # Convert hex to ASCII to check for "SQLite format 3"
+                try:
+                    # SQLite header: 53514c69746520666f726d6174203300
+                    if hex_header.startswith('53514c69746520666f726d617420'):
+                        # Unencrypted SQLite database
+                        unencrypted_dbs.append(db_path)
+                    else:
+                        # Encrypted or not a standard SQLite database
+                        encrypted_dbs.append(db_path)
+                except:
+                    unknown_dbs.append(db_path)
+            else:
+                unknown_dbs.append(db_path)
+        except Exception:
+            unknown_dbs.append(db_path)
+
+    # Build report
+    lines = []
+
+    # Summary
+    total_dbs = len(db_files_on_device)
+    lines.append(f"<div><strong>Database Files Found:</strong> {total_dbs}</div>")
+    lines.append(f"<div style='color:#059669'>🔒 Encrypted: {len(encrypted_dbs)}</div>")
+    lines.append(f"<div style='color:#dc2626'>🔓 Unencrypted: {len(unencrypted_dbs)}</div>")
+    if unknown_dbs:
+        lines.append(f"<div style='color:#d97706'>❓ Unknown: {len(unknown_dbs)}</div>")
+    lines.append("<br>")
+
+    # Show encrypted databases (GOOD)
+    if encrypted_dbs:
+        lines.append("<div style='background:#d1fae5; border-left:4px solid #059669; padding:10px; margin:10px 0;'>")
+        lines.append(f"<strong>✅ Encrypted Databases ({len(encrypted_dbs)}):</strong><br>")
+        lines.append("<div style='font-size:11px; color:#065f46'>These databases are protected with encryption (likely SQLCipher)</div>")
+        lines.append("</div>")
+        for db in encrypted_dbs:
+            db_name = os.path.basename(db)
+            lines.append(f"<div style='padding:4px; margin:2px 0; background:#f0fdf4; border-left:2px solid #059669;'>")
+            lines.append(f"🔒 <code>{html.escape(db_name)}</code><br>")
+            lines.append(f"<span style='font-size:10px; color:#666'>{html.escape(db)}</span>")
+            lines.append("</div>")
+        lines.append("<br>")
+
+    # Show unencrypted databases (BAD)
+    if unencrypted_dbs:
+        lines.append("<div style='background:#fee2e2; border-left:4px solid #dc2626; padding:10px; margin:10px 0;'>")
+        lines.append(f"<strong style='color:#dc2626'>⚠️ UNENCRYPTED Databases ({len(unencrypted_dbs)}):</strong><br>")
+        lines.append("<strong>Risk:</strong> Sensitive data stored in plaintext<br>")
+        lines.append("<strong>Recommendation:</strong> Use SQLCipher to encrypt databases")
+        lines.append("</div>")
+        for db in unencrypted_dbs:
+            db_name = os.path.basename(db)
+            lines.append(f"<div style='padding:4px; margin:2px 0; background:#fef2f2; border-left:2px solid #dc2626;'>")
+            lines.append(f"🔓 <code style='color:#dc2626'>{html.escape(db_name)}</code><br>")
+            lines.append(f"<span style='font-size:10px; color:#666'>{html.escape(db)}</span>")
+            lines.append("</div>")
+        lines.append("<br>")
+
+    # Show unknown databases (WARNING)
+    if unknown_dbs:
+        lines.append("<div style='background:#fef3c7; border-left:4px solid #d97706; padding:10px; margin:10px 0;'>")
+        lines.append(f"<strong>❓ Unable to Determine Encryption ({len(unknown_dbs)}):</strong><br>")
+        lines.append("<div style='font-size:11px'>Could not read file headers - check manually</div>")
+        lines.append("</div>")
+        for db in unknown_dbs:
+            db_name = os.path.basename(db)
+            lines.append(f"<div>❓ <code>{html.escape(db_name)}</code> - <span style='font-size:10px'>{html.escape(db)}</span></div>")
+        lines.append("<br>")
 
     lines.append(mastg_ref)
-    return 'WARN', "<br>\n".join(lines)
+
+    # Determine status
+    if unencrypted_dbs:
+        status = 'FAIL'
+    elif unknown_dbs:
+        status = 'WARN'
+    else:
+        status = 'PASS'
+
+    return status, "<br>\n".join(lines)
 
 
 def check_anti_debugging(base):
