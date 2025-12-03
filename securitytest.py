@@ -2467,7 +2467,7 @@ def check_serialize(base):
                         snippet = html.escape(line.strip())
 
                         hits.append(
-                            f"{link} – <strong style='color:#dc2626;'>CRITICAL: Insecure ObjectInputStream deserialization</strong><br>"
+                            f"{link} – <strong style='color:#dc2626;'>Insecure ObjectInputStream deserialization</strong><br>"
                             f"<code>{snippet}</code><br>"
                             f"<em>Risk: Remote Code Execution via malicious serialized objects</em>"
                         )
@@ -5714,11 +5714,11 @@ def check_hardcoded_keys(base):
             # Build code context HTML
             code_html = ""
             if finding.get('context'):
-                code_html = '<pre style="margin:0; padding:8px; background:#f8f9fa; border-radius:4px; font-size:11px; overflow-x:auto;">'
+                code_html = '<pre style="margin:0; padding:8px; background:#f8f9fa; border-radius:4px; font-size:11px; overflow-x:auto; color:#212529; font-family:Consolas,Monaco,monospace;">'
                 for ctx_line in finding['context']:
                     escaped = html.escape(ctx_line)
                     if ctx_line.startswith('>>> '):
-                        code_html += f'<span style="background:#fff3cd; display:block;">{escaped}</span>'
+                        code_html += f'<span style="background:#fff3cd; display:block; color:#000; font-weight:600;">{escaped}</span>'
                     else:
                         code_html += f'{escaped}\n'
                 code_html += '</pre>'
@@ -5737,7 +5737,7 @@ def check_hardcoded_keys(base):
                 <div style="font-size:11px; color:#6c757d; margin-top:3px;">{finding['confidence']:.0%}</div>
             </td>
             <td style="padding:8px; border:1px solid #dee2e6; word-break:break-all;">
-                <code style="background:#f8f9fa; padding:2px 4px; border-radius:3px; font-size:11px;">{html.escape(finding['value_preview'])}</code>
+                <code style="background:#e9ecef; padding:2px 4px; border-radius:3px; font-size:11px; color:#000; font-family:Consolas,Monaco,monospace; font-weight:500;">{html.escape(finding['value_preview'])}</code>
             </td>
             <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
                 {html.escape(finding['reason'])}
@@ -5848,37 +5848,60 @@ function collapseAllCode_{table_id}() {{
 def check_key_sizes(base):
     """
     Check for insufficient cryptographic key sizes.
+    Uses SMALI patterns for decompiled APK analysis.
     """
     issues = []
 
-    # RSA key size patterns
-    rsa_pattern = r'KeyPairGenerator\.getInstance\s*\(\s*["\']RSA["\']\s*\)'
+    # SMALI patterns for RSA key generation
+    # Matches: Ljava/security/KeyPairGenerator;->getInstance
+    rsa_pattern = r'Ljava/security/KeyPairGenerator;->getInstance'
     rsa_files = grep_code(base, rsa_pattern)
 
     for rel in rsa_files:
         full = os.path.join(base, rel)
         try:
             content = open(full, errors='ignore').read()
-            # Look for initialize calls with key sizes
-            size_matches = re.findall(r'initialize\s*\(\s*(\d+)', content)
-            for size in size_matches:
-                if int(size) < 2048:
-                    issues.append((rel, f"RSA key size {size} < 2048 bits"))
+            lines = content.splitlines()
+
+            # In SMALI, initialize() looks like:
+            # invoke-virtual {vX, vY}, Ljava/security/KeyPairGenerator;->initialize(I)V
+            # The key size is loaded with const/16 or const instructions before the invoke
+            for i, line in enumerate(lines):
+                if '->initialize' in line and 'KeyPairGenerator' in line:
+                    # Look for const/16 or const in previous 3 lines (key size parameter)
+                    for j in range(max(0, i-3), i):
+                        size_match = re.search(r'const(?:/16)?\s+v\d+,\s*(?:0x)?(\d+)', lines[j])
+                        if size_match:
+                            size = int(size_match.group(1), 16 if '0x' in lines[j] else 10)
+                            if 256 <= size < 2048:  # Reasonable range for RSA key size
+                                issues.append((rel, f"RSA key size {size} < 2048 bits", i+1))
+                                break
         except:
             pass
 
-    # AES key size patterns
-    aes_pattern = r'KeyGenerator\.getInstance\s*\(\s*["\']AES["\']\s*\)'
+    # SMALI patterns for AES key generation
+    # Matches: Ljavax/crypto/KeyGenerator;->getInstance
+    aes_pattern = r'Ljavax/crypto/KeyGenerator;->getInstance'
     aes_files = grep_code(base, aes_pattern)
 
     for rel in aes_files:
         full = os.path.join(base, rel)
         try:
             content = open(full, errors='ignore').read()
-            size_matches = re.findall(r'init\s*\(\s*(\d+)', content)
-            for size in size_matches:
-                if int(size) < 128:
-                    issues.append((rel, f"AES key size {size} < 128 bits"))
+            lines = content.splitlines()
+
+            # In SMALI, init() looks like:
+            # invoke-virtual {vX, vY}, Ljavax/crypto/KeyGenerator;->init(I)V
+            for i, line in enumerate(lines):
+                if '->init' in line and 'KeyGenerator' in line:
+                    # Look for const/16 or const in previous 3 lines (key size parameter)
+                    for j in range(max(0, i-3), i):
+                        size_match = re.search(r'const(?:/16)?\s+v\d+,\s*(?:0x)?(\d+)', lines[j])
+                        if size_match:
+                            size = int(size_match.group(1), 16 if '0x' in lines[j] else 10)
+                            if size < 128 and size > 0:  # Valid AES key sizes: 128, 192, 256
+                                issues.append((rel, f"AES key size {size} < 128 bits", i+1))
+                                break
         except:
             pass
 
@@ -5890,9 +5913,9 @@ def check_key_sizes(base):
         return True, f"No key generation detected{mastg_ref}"
 
     lines = []
-    for rel, msg in issues[:50]:
+    for rel, msg, line_num in issues[:50]:
         full = os.path.abspath(os.path.join(base, rel))
-        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>: {html.escape(msg)}')
+        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}:{line_num}</a>: {html.escape(msg)}')
 
     if len(issues) > 50:
         lines.append(f"...and {len(issues) - 50} more")
@@ -6701,7 +6724,8 @@ def check_signature_schemes(apk_path):
 def check_insecure_randomness(base):
     """
     FAIL if any code uses predictable randomness:
-      • new Random(...)
+      • java.util.Random (especially with predictable seed like currentTimeMillis)
+      • kotlin.random.Random (especially with predictable seed)
       • Math.random()
       • ThreadLocalRandom (insecure for crypto)
     Reports clickable file:// links with line numbers and code snippets.
@@ -6725,16 +6749,18 @@ def check_insecure_randomness(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
+    # SMALI patterns for decompiled code
     patterns = {
-        "new Random":           re.compile(r'new\s+Random\s*\('),
-        "Math.random":          re.compile(r'\bMath\.random\s*\('),
-        "ThreadLocalRandom":    re.compile(r'ThreadLocalRandom'),
+        "java.util.Random":         re.compile(r'new-instance.*Ljava/util/Random;'),
+        "kotlin.random.Random":     re.compile(r'Lkotlin/random/RandomKt;->Random\('),
+        "Math.random()":            re.compile(r'Ljava/lang/Math;->random\(\)'),
+        "ThreadLocalRandom":        re.compile(r'ThreadLocalRandom'),
     }
 
     issues = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith(('.smali', '.java')):
+            if not fn.endswith('.smali'):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
@@ -6744,19 +6770,39 @@ def check_insecure_randomness(base):
                 continue
 
             try:
-                lines = open(path, errors='ignore').read().splitlines()
+                content = open(path, errors='ignore').read()
+                lines = content.splitlines()
             except:
                 continue
 
             for i, line in enumerate(lines, 1):
                 for label, pat in patterns.items():
                     if pat.search(line):
+                        # Check if seeded with currentTimeMillis (CRITICAL vulnerability)
+                        is_predictable_seed = False
+                        context_start = max(0, i - 5)
+                        context_end = min(len(lines), i + 5)
+                        context = '\n'.join(lines[context_start:context_end])
+
+                        if 'currentTimeMillis' in context:
+                            is_predictable_seed = True
+                            label = f"{label} with currentTimeMillis seed (CRITICAL)"
+
                         snippet = html.escape(line.strip())
                         link = (
                             f'<a href="file://{html.escape(path)}">'
                             f'{html.escape(rel)}:{i}</a>'
                         )
-                        issues.append(f"{link} – <code>{label} → {snippet}</code>")
+
+                        # Add severity indicator
+                        severity = "CRITICAL" if is_predictable_seed else "HIGH"
+                        severity_color = "#dc3545" if is_predictable_seed else "#fd7e14"
+
+                        issues.append(
+                            f"{link} – "
+                            f'<span style="display:inline-block; padding:2px 6px; background:{severity_color}; color:white; border-radius:3px; font-size:10px; font-weight:600; margin-right:5px;">{severity}</span>'
+                            f"<code>{label} → {snippet}</code>"
+                        )
                         break
                 else:
                     continue
@@ -6767,8 +6813,17 @@ def check_insecure_randomness(base):
     if not issues:
         return True, f"None{mastg_ref}"
 
-    issues.append(mastg_ref)
-    return False, "<br>\n".join(issues)
+    # Sort issues: CRITICAL first, then HIGH
+    issues_critical = [i for i in issues if 'CRITICAL' in i]
+    issues_high = [i for i in issues if 'HIGH' in i]
+    issues = issues_critical + issues_high
+
+    result = []
+    result.append(f"<div style='margin:5px 0'><strong>Total insecure random usage found:</strong> {len(issues)}</div>")
+    result.extend(issues)
+    result.append(mastg_ref)
+
+    return False, "<br>\n".join(result)
     
 def check_insecure_fingerprint_api(base):
     """
@@ -6894,13 +6949,6 @@ def check_insecure_fingerprint_api(base):
     if null_crypto_files:
         lines = [
             "<div><strong style='color:#dc2626;'>FingerprintManager.authenticate() with NULL CryptoObject</strong></div>",
-            "<div style='margin-top:8px;'><strong>Security Impact:</strong> Authentication can be bypassed using Frida on rooted devices.</div>",
-            "<div style='margin-top:8px;'><strong>Attack Vector:</strong></div>",
-            "<ul style='margin-left:20px;'>",
-            "<li>Attacker hooks onAuthenticationSucceeded() callback with Frida</li>",
-            "<li>Triggers callback without valid biometric authentication</li>",
-            "<li>Completely bypasses fingerprint security</li>",
-            "</ul>",
             f"<div style='margin-top:8px;'><strong>Vulnerable Code ({len(null_crypto_files)} file(s)):</strong></div>"
         ]
         for link, snippet in null_crypto_files[:15]:
