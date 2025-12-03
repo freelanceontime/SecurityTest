@@ -18,6 +18,13 @@ import hashlib
 import urllib.request
 import urllib.error
 from datetime import datetime
+import platform
+
+# Platform-specific imports
+if platform.system() == 'Windows':
+    import msvcrt
+else:
+    import fcntl
 from html import escape, unescape
 
 # Version tracking for auto-update
@@ -193,6 +200,7 @@ def interactive_frida_monitor(proc, test_name, instructions):
     """
     Interactive Frida log collection with user prompt.
     Replaces hardcoded timeouts with "Press ENTER when done" workflow.
+    Works on both Windows and Unix systems.
 
     Args:
         proc: Frida subprocess
@@ -214,36 +222,90 @@ def interactive_frida_monitor(proc, test_name, instructions):
     print("="*70 + "\n")
 
     logs = []
-    fd = proc.stdout.fileno()
+    is_windows = platform.system() == 'Windows'
 
-    # Make stdout non-blocking for real-time output
-    import fcntl
-    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    # Import threading/queue for Windows
+    if is_windows:
+        import threading
+        import queue
+
+    # Platform-specific setup
+    if not is_windows:
+        # Unix: Make stdout non-blocking
+        fd = proc.stdout.fileno()
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
     # Real-time log collection with user prompt
     try:
         while True:
-            # Check for user input (Enter key)
-            user_ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if user_ready:
-                input()  # User pressed Enter
+            # Check for user input (platform-specific)
+            user_pressed_enter = False
+            if is_windows:
+                # Windows: Use msvcrt.kbhit() to check for keyboard input
+                if msvcrt.kbhit():
+                    key = msvcrt.getwche()
+                    if key == '\r' or key == '\n':
+                        user_pressed_enter = True
+            else:
+                # Unix: Use select on stdin
+                user_ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if user_ready:
+                    input()  # User pressed Enter
+                    user_pressed_enter = True
+
+            if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
                 break
 
-            # Collect Frida output
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if r:
-                try:
-                    line = proc.stdout.readline()
-                    if not line:
-                        continue
-                    # Print RAW to console for real-time feedback
-                    print(line.rstrip())
-                    # Store BOTH raw and escaped versions
-                    logs.append(line.rstrip())
-                except:
-                    pass
+            # Collect Frida output (platform-specific)
+            line = None
+            if is_windows:
+                # Windows: Poll stdout without blocking
+                # Check if process has data available
+                if proc.poll() is None:  # Process is still running
+                    try:
+                        # Try to read with short timeout using threading
+                        def read_line(q):
+                            try:
+                                l = proc.stdout.readline()
+                                if l:
+                                    q.put(l)
+                            except:
+                                pass
+
+                        q = queue.Queue()
+                        t = threading.Thread(target=read_line, args=(q,))
+                        t.daemon = True
+                        t.start()
+                        t.join(timeout=0.1)
+
+                        try:
+                            line = q.get_nowait()
+                        except queue.Empty:
+                            pass
+                    except:
+                        pass
+            else:
+                # Unix: Use select on file descriptor
+                fd = proc.stdout.fileno()
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if r:
+                    try:
+                        line = proc.stdout.readline()
+                    except:
+                        pass
+
+            if line:
+                # Print RAW to console for real-time feedback
+                print(line.rstrip())
+                # Store log line
+                logs.append(line.rstrip())
+
+            # Small delay to prevent CPU spinning (only on Windows, Unix already has timeout in select)
+            if is_windows:
+                time.sleep(0.05)
+
     except KeyboardInterrupt:
         print("\n[!] Test interrupted by user")
         pass
@@ -5025,16 +5087,16 @@ def check_sharedprefs_encryption(base):
         return 'PASS', f"<div>No SharedPreferences usage detected in app code</div><div>Scanned {scanned_files} app code files</div>{mastg_ref}"
 
     if unencrypted_count == 0:
-        return 'PASS', f"<div>✓ All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>{mastg_ref}"
+        return 'PASS', f"<div>All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>{mastg_ref}"
 
     # Build detailed report with collapsible sections
     lines = []
     lines.append(f"<div><strong>Scanned:</strong> {scanned_files} app code files (libraries excluded)</div>")
 
     if encrypted_count > 0:
-        lines.append(f"<div><strong>✓ Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
+        lines.append(f"<div><strong>Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
 
-    lines.append(f"<div><strong>⚠ WARNING: Unencrypted usage found in app code:</strong> {unencrypted_count} instance(s)</div><br>")
+    lines.append(f"<div><strong>WARNING: Unencrypted usage found in app code:</strong> {unencrypted_count} instance(s)</div><br>")
 
     # Group by file for better organization
     files_with_unencrypted = {}
@@ -5047,7 +5109,7 @@ def check_sharedprefs_encryption(base):
     # Collapsible section for unencrypted findings
     lines.append('<details open>')
     lines.append('<summary class="warning">')
-    lines.append(f'⚠ Unencrypted SharedPreferences in App Code ({len(files_with_unencrypted)} files) - Click to expand/collapse')
+    lines.append(f'WARNING: Unencrypted SharedPreferences in App Code ({len(files_with_unencrypted)} files) - Click to expand/collapse')
     lines.append('</summary>')
     lines.append('<div>')
 
@@ -5576,71 +5638,204 @@ def check_hardcoded_keys(base):
     if total_findings == 0:
         return True, f"<div>No hardcoded keys detected</div><div>Scanned {scanned_files} app files</div>{mastg_ref}"
 
-    lines = []
-    lines.append(f"<div style='margin:2px 0'><strong>Scanned:</strong> {scanned_files} app files • <strong>Total:</strong> {total_findings} findings</div>")
+    # Generate unique ID for this table instance
+    import random
+    table_id = f"hardcoded_keys_table_{random.randint(1000, 9999)}"
 
-    # Show findings by confidence level with collapsible sections
+    lines = []
+    lines.append(f"<div style='margin:10px 0'><strong>Scanned:</strong> {scanned_files} app files • <strong>Total:</strong> {total_findings} findings</div>")
+
+    # Add filter and search controls
+    lines.append(f'''
+<div style="margin:15px 0; padding:12px; background:#f8f9fa; border-radius:4px;">
+    <div style="display:flex; gap:15px; align-items:center; flex-wrap:wrap;">
+        <div style="display:flex; gap:8px; align-items:center;">
+            <label style="font-weight:600; margin-right:5px;">Filter by Confidence:</label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_critical" checked onchange="filterTable_{table_id}()"> <span style="color:#dc3545; font-weight:600;">Critical</span></label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_high" checked onchange="filterTable_{table_id}()"> <span style="color:#fd7e14; font-weight:600;">High</span></label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_medium" checked onchange="filterTable_{table_id}()"> <span style="color:#ffc107; font-weight:600;">Medium</span></label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_low" checked onchange="filterTable_{table_id}()"> <span style="color:#6c757d; font-weight:600;">Low</span></label>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-grow:1;">
+            <label style="font-weight:600;">Search:</label>
+            <input type="text" id="{table_id}_search" placeholder="Search location, content, or reason..."
+                   style="flex-grow:1; max-width:400px; padding:6px 10px; border:1px solid #ced4da; border-radius:4px;"
+                   onkeyup="filterTable_{table_id}()">
+        </div>
+        <div>
+            <button onclick="expandAllCode_{table_id}()" style="padding:6px 12px; border:1px solid #007bff; background:#007bff; color:white; border-radius:4px; cursor:pointer; margin-right:5px;">Expand All</button>
+            <button onclick="collapseAllCode_{table_id}()" style="padding:6px 12px; border:1px solid #6c757d; background:#6c757d; color:white; border-radius:4px; cursor:pointer;">Collapse All</button>
+        </div>
+    </div>
+</div>
+''')
+
+    # Start table
+    lines.append(f'''
+<table id="{table_id}" style="width:100%; border-collapse:collapse; margin:10px 0; font-size:13px; background:white;">
+    <thead>
+        <tr style="background:#343a40; color:white; text-align:left;">
+            <th style="padding:10px; width:40px; border:1px solid #dee2e6;">#</th>
+            <th style="padding:10px; width:15%; border:1px solid #dee2e6;">Location</th>
+            <th style="padding:10px; width:10%; border:1px solid #dee2e6;">Confidence</th>
+            <th style="padding:10px; width:30%; border:1px solid #dee2e6;">Content</th>
+            <th style="padding:10px; width:25%; border:1px solid #dee2e6;">Reason</th>
+            <th style="padding:10px; width:10%; text-align:center; border:1px solid #dee2e6;">Code</th>
+        </tr>
+    </thead>
+    <tbody>
+''')
+
+    # Add all findings to table
+    row_num = 0
     for category in ['Critical', 'High', 'Medium', 'Low']:
         findings = findings_by_confidence[category]
         if not findings:
             continue
 
-        emoji = {'Critical': '', 'High': '', 'Medium': '', 'Low': ''}[category]
+        # Color coding by category
+        color_map = {
+            'Critical': '#dc3545',
+            'High': '#fd7e14',
+            'Medium': '#ffc107',
+            'Low': '#6c757d'
+        }
+        badge_color = color_map[category]
 
-        # Create collapsible section - Critical and High are expanded by default
-        is_open = 'open' if category in ['Critical', 'High'] else ''
-        lines.append(f'<details {is_open}>')
-        lines.append(f'<summary>')
-        lines.append(f'<span class="bullet"></span><span class="check-name">{emoji} {category} ({len(findings)})</span>')
-        lines.append('</summary>')
-
-        # Show ALL findings (no truncation) - compact format
-        for i, finding in enumerate(findings, 1):
-            full = os.path.abspath(os.path.join(base, finding['file']))
-
-            # Color coding by category
-            border_colors = {'Critical':'#dc3545','High':'#fd7e14','Medium':'#ffc107','Low':'#6c757d'}
-            border_color = border_colors.get(category, '#6c757d')
-
-            # Compact file path (show only filename for brevity)
+        for finding in findings:
+            row_num += 1
+            full_path = os.path.abspath(os.path.join(base, finding['file']))
             filename = os.path.basename(finding['file'])
-            lines.append(
-                f'<div class="finding-detail" style="border-left-color:{border_color}">'
-                f'<strong>#{i}</strong> '
-                f'<a href="file://{html.escape(full)}">{html.escape(filename)}:{finding["line"]}</a> '
-                f'<span class="text-muted">({finding["confidence"]:.0%})</span> '
-            )
 
-            if finding['key_name']:
-                lines.append(f'<em class="text-muted">{html.escape(finding["key_name"])}</em> ')
+            # Create unique row ID
+            row_id = f"{table_id}_row_{row_num}"
+            code_id = f"{table_id}_code_{row_num}"
 
-            # Value and reason on same line, more compact
-            lines.append(
-                f'<br><code>{html.escape(finding["value_preview"])}</code> '
-                f'<span class="text-muted">• {html.escape(finding["reason"])}</span>'
-            )
-
-            # Add compact code context
+            # Build code context HTML
+            code_html = ""
             if finding.get('context'):
-                ctx_id = f"ctx_{category}_{i}"
-                lines.append(f'<br><details class="code-details"><summary class="code-toggle">Show code</summary>')
-                lines.append('<pre class="code-snippet">')
-                context_lines = finding['context']
-                for ctx_line in context_lines:
+                code_html = '<pre style="margin:0; padding:8px; background:#f8f9fa; border-radius:4px; font-size:11px; overflow-x:auto;">'
+                for ctx_line in finding['context']:
                     escaped = html.escape(ctx_line)
                     if ctx_line.startswith('>>> '):
-                        lines.append(f'<span class="highlight">{escaped}</span>')
+                        code_html += f'<span style="background:#fff3cd; display:block;">{escaped}</span>'
                     else:
-                        lines.append(escaped)
-                lines.append('</pre></details>')
+                        code_html += f'{escaped}\n'
+                code_html += '</pre>'
 
-            lines.append('</div>')
+            # Build table row
+            lines.append(f'''
+        <tr id="{row_id}" data-category="{category.lower()}" style="border:1px solid #dee2e6;">
+            <td style="padding:8px; border:1px solid #dee2e6; text-align:center; font-weight:600;">{row_num}</td>
+            <td style="padding:8px; border:1px solid #dee2e6; word-break:break-word;">
+                <a href="file://{html.escape(full_path)}" style="color:#007bff; text-decoration:none;" title="{html.escape(finding['file'])}">{html.escape(filename)}</a>
+                <div style="font-size:11px; color:#6c757d;">Line {finding['line']}</div>
+                {f'<div style="font-size:11px; color:#6c757d; font-style:italic;">{html.escape(finding["key_name"])}</div>' if finding['key_name'] else ''}
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6;">
+                <span style="display:inline-block; padding:4px 8px; border-radius:3px; background:{badge_color}; color:white; font-weight:600; font-size:11px;">{category}</span>
+                <div style="font-size:11px; color:#6c757d; margin-top:3px;">{finding['confidence']:.0%}</div>
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6; word-break:break-all;">
+                <code style="background:#f8f9fa; padding:2px 4px; border-radius:3px; font-size:11px;">{html.escape(finding['value_preview'])}</code>
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
+                {html.escape(finding['reason'])}
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">
+                <button onclick="toggleCode_{table_id}('{code_id}')"
+                        style="padding:4px 10px; border:1px solid #007bff; background:#007bff; color:white; border-radius:3px; cursor:pointer; font-size:11px;">
+                    View
+                </button>
+                <div id="{code_id}" style="display:none; margin-top:8px; text-align:left;">
+                    {code_html}
+                </div>
+            </td>
+        </tr>
+''')
 
-        lines.append('</details>')  # Close details
+    # Close table
+    lines.append('''
+    </tbody>
+</table>
+''')
+
+    # Add JavaScript for filtering and search
+    lines.append(f'''
+<script>
+function filterTable_{table_id}() {{
+    const searchInput = document.getElementById('{table_id}_search').value.toLowerCase();
+    const showCritical = document.getElementById('{table_id}_filter_critical').checked;
+    const showHigh = document.getElementById('{table_id}_filter_high').checked;
+    const showMedium = document.getElementById('{table_id}_filter_medium').checked;
+    const showLow = document.getElementById('{table_id}_filter_low').checked;
+
+    const table = document.getElementById('{table_id}');
+    const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+
+    let visibleCount = 0;
+    for (let row of rows) {{
+        const category = row.getAttribute('data-category');
+        const text = row.textContent.toLowerCase();
+
+        // Check category filter
+        let categoryMatch = false;
+        if (category === 'critical' && showCritical) categoryMatch = true;
+        if (category === 'high' && showHigh) categoryMatch = true;
+        if (category === 'medium' && showMedium) categoryMatch = true;
+        if (category === 'low' && showLow) categoryMatch = true;
+
+        // Check search filter
+        const searchMatch = searchInput === '' || text.includes(searchInput);
+
+        // Show/hide row
+        if (categoryMatch && searchMatch) {{
+            row.style.display = '';
+            visibleCount++;
+        }} else {{
+            row.style.display = 'none';
+        }}
+    }}
+}}
+
+function toggleCode_{table_id}(codeId) {{
+    const codeDiv = document.getElementById(codeId);
+    if (codeDiv.style.display === 'none') {{
+        codeDiv.style.display = 'block';
+    }} else {{
+        codeDiv.style.display = 'none';
+    }}
+}}
+
+function expandAllCode_{table_id}() {{
+    const table = document.getElementById('{table_id}');
+    const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+    for (let row of rows) {{
+        if (row.style.display !== 'none') {{
+            const codeDiv = row.querySelector('[id^="{table_id}_code_"]');
+            if (codeDiv) {{
+                codeDiv.style.display = 'block';
+            }}
+        }}
+    }}
+}}
+
+function collapseAllCode_{table_id}() {{
+    const table = document.getElementById('{table_id}');
+    const rows = table.getElementsByTagName('tbody')[0].getElementsByTagName('tr');
+    for (let row of rows) {{
+        const codeDiv = row.querySelector('[id^="{table_id}_code_"]');
+        if (codeDiv) {{
+            codeDiv.style.display = 'none';
+        }}
+    }}
+}}
+</script>
+''')
 
     lines.append(
-        f"<div><em> Tip: Focus on Critical and High confidence findings first. "
-        f"Entropy analysis and pattern matching used to reduce false positives.</em></div>"
+        f"<div style='margin-top:10px;'><em>Tip: Focus on Critical and High confidence findings first. "
+        f"Use filters and search to narrow down results. Entropy analysis and pattern matching used to reduce false positives.</em></div>"
     )
 
     lines.append(mastg_ref)
@@ -5648,7 +5843,7 @@ def check_hardcoded_keys(base):
     # FAIL if critical or high confidence findings
     has_critical_or_high = len(findings_by_confidence['Critical']) + len(findings_by_confidence['High']) > 0
 
-    return (not has_critical_or_high), "<br>\n".join(lines)
+    return (not has_critical_or_high), "\n".join(lines)
 
 def check_key_sizes(base):
     """
@@ -5834,17 +6029,17 @@ def check_biometric_auth(base):
     # BiometricPrompt found with secure usage (CryptoObject + KeyStore)
     if secure_crypto_files or (crypto_object_files and keystore_files):
         lines = [
-            f"<div>✓ BiometricPrompt with cryptographic binding detected</div>",
+            f"<div>BiometricPrompt with cryptographic binding detected</div>",
             f"<div>Found in {len(biometric_files)} file(s)</div>",
             "<div><strong>Secure patterns detected:</strong></div>",
             "<ul style='margin-left:20px;'>"
         ]
         if secure_crypto_files:
-            lines.append(f"<li>✓ BiometricPrompt.authenticate() with CryptoObject: {len(secure_crypto_files)} file(s)</li>")
+            lines.append(f"<li>BiometricPrompt.authenticate() with CryptoObject: {len(secure_crypto_files)} file(s)</li>")
         if crypto_object_files:
-            lines.append(f"<li>✓ CryptoObject usage: {len(crypto_object_files)} file(s)</li>")
+            lines.append(f"<li>CryptoObject usage: {len(crypto_object_files)} file(s)</li>")
         if keystore_files:
-            lines.append(f"<li>✓ KeyStore integration (setUserAuthenticationRequired): {len(keystore_files)} file(s)</li>")
+            lines.append(f"<li>KeyStore integration (setUserAuthenticationRequired): {len(keystore_files)} file(s)</li>")
         lines.append("</ul>")
 
         lines.append("<div><strong>App code files implementing biometric auth:</strong></div>")
@@ -5863,7 +6058,7 @@ def check_biometric_auth(base):
 
     # BiometricPrompt used but cannot confirm secure implementation
     lines = [
-        f"<div><strong style='color:#d97706;'>⚠ WARNING: BiometricPrompt usage detected, security unclear</strong></div>",
+        f"<div><strong style='color:#d97706;'>WARNING: BiometricPrompt usage detected, security unclear</strong></div>",
         f"<div style='margin-top:8px;'>Found BiometricPrompt in {len(biometric_files)} file(s)</div>",
         "<div style='margin-top:8px;'><strong>Status:</strong> Could not detect authenticate() calls with or without CryptoObject.</div>",
         "<div><strong>Manual Review Required:</strong></div>",
@@ -6721,16 +6916,16 @@ def check_insecure_fingerprint_api(base):
     if crypto_files or keystore_files:
         # Potentially secure - but still using deprecated API
         lines = [
-            f"<div><strong style='color:#d97706;'>⚠ WARNING: Deprecated FingerprintManager API with crypto binding detected</strong></div>",
+            f"<div><strong style='color:#d97706;'>WARNING: Deprecated FingerprintManager API with crypto binding detected</strong></div>",
             f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
             "<div style='margin-top:8px;'><strong>Status:</strong></div>",
             "<ul style='margin-left:20px;'>"
         ]
 
         if crypto_files:
-            lines.append(f"<li>✓ CryptoObject usage detected in {len(crypto_files)} file(s)</li>")
+            lines.append(f"<li>CryptoObject usage detected in {len(crypto_files)} file(s)</li>")
         if keystore_files:
-            lines.append(f"<li>✓ KeyStore integration detected in {len(keystore_files)} file(s)</li>")
+            lines.append(f"<li>KeyStore integration detected in {len(keystore_files)} file(s)</li>")
 
         lines.append("</ul>")
         lines.append("<div style='margin-top:8px;'><strong>Issue:</strong> FingerprintManager is deprecated since Android 9.0 (API 28)</div>")
@@ -8081,7 +8276,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
               MutablePreferences.set.overload("androidx.datastore.preferences.core.Preferences$Key", "java.lang.Object").implementation = function(key, value) {
                 var keyName = key.getName ? key.getName() : String(key);
                 var valueStr = String(value);
-                console.log("✏️  DataStore.set: " + keyName + " = " + valueStr.substring(0, 50));
+                console.log("[*] DataStore.set: " + keyName + " = " + valueStr.substring(0, 50));
 
                 // Check for sensitive data
                 var sensitive = false;
@@ -8105,7 +8300,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
                 return this.set(key, value);
               };
-              console.log("✅ DataStore hooks installed");
+              console.log("[+] DataStore hooks installed");
             } catch(e) {
               console.log("DataStore hook error: " + e);
             }
@@ -8378,7 +8573,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
               var isHex = /^[0-9a-fA-F]+$/.test(valueStr) && valueStr.length >= 32;
               var isJWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(valueStr);
 
-              console.log("✏️  putString: " + key + " = " + valueStr.substring(0, 30) + (valueStr.length > 30 ? "..." : ""));
+              console.log("[*] putString: " + key + " = " + valueStr.substring(0, 30) + (valueStr.length > 30 ? "..." : ""));
               send({
                 type: "prefs_write",
                 method: "putString",
@@ -8399,7 +8594,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook putInt
           try {
             Editor.putInt.overload("java.lang.String", "int").implementation = function(key, value) {
-              console.log("✏️  putInt: " + key + " = " + value);
+              console.log("[*] putInt: " + key + " = " + value);
               send({
                 type: "prefs_write",
                 method: "putInt",
@@ -8420,7 +8615,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook putBoolean
           try {
             Editor.putBoolean.overload("java.lang.String", "boolean").implementation = function(key, value) {
-              console.log("✏️  putBoolean: " + key + " = " + value);
+              console.log("[*] putBoolean: " + key + " = " + value);
               send({
                 type: "prefs_write",
                 method: "putBoolean",
@@ -8441,7 +8636,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook putLong
           try {
             Editor.putLong.overload("java.lang.String", "long").implementation = function(key, value) {
-              console.log("✏️  putLong: " + key + " = " + value);
+              console.log("[*] putLong: " + key + " = " + value);
               send({
                 type: "prefs_write",
                 method: "putLong",
@@ -8462,7 +8657,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook putFloat
           try {
             Editor.putFloat.overload("java.lang.String", "float").implementation = function(key, value) {
-              console.log("✏️  putFloat: " + key + " = " + value);
+              console.log("[*] putFloat: " + key + " = " + value);
               send({
                 type: "prefs_write",
                 method: "putFloat",
@@ -8483,7 +8678,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook putStringSet
           try {
             Editor.putStringSet.overload("java.lang.String", "java.util.Set").implementation = function(key, values) {
-              console.log("✏️  putStringSet: " + key + " = " + values);
+              console.log("[*] putStringSet: " + key + " = " + values);
               send({
                 type: "prefs_write",
                 method: "putStringSet",
@@ -8544,7 +8739,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             };
           } catch(e) {}
 
-          console.log("✅ SharedPreferences/DataStore hooks installed successfully");
+          console.log("[+] SharedPreferences/DataStore hooks installed successfully");
           send({type: "ready", msg: "SharedPreferences hooks installed"});
         });
       } else {
@@ -9447,6 +9642,30 @@ def check_storage_analysis(base, package_name):
 
         return files
 
+    def check_db_encryption(db_path):
+        """
+        Check if a database file is encrypted by reading its header.
+        SQLite databases start with "SQLite format 3" in plain text.
+        Encrypted databases (SQLCipher) have encrypted headers.
+        Returns: True if encrypted, False if not encrypted, None if can't determine
+        """
+        try:
+            result = subprocess.run(
+                ['adb', 'shell', 'su', '-c', f'head -c 16 {db_path}'],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                header = result.stdout
+                # SQLite magic string: "SQLite format 3"
+                if b'SQLite format 3' in header:
+                    return False  # Not encrypted
+                else:
+                    return True  # Encrypted (no recognizable header)
+            return None
+        except:
+            return None
+
     detail = []
     detail.append("<div class='storage-section'><strong>Storage Analysis Report</strong></div>")
 
@@ -9496,6 +9715,7 @@ def check_storage_analysis(base, package_name):
     # Generate report
     findings = []
     security_issues = []
+    secure_dbs = []  # Track encrypted databases
 
     # Section 1: New directories (show all, no limits)
     if new_dirs:
@@ -9504,13 +9724,13 @@ def check_storage_analysis(base, package_name):
         for dir_path in sorted(new_dirs):
             files_in_dir = new_files.get(dir_path, [])
             file_count = f" <span class='text-muted'>({len(files_in_dir)} files)</span>" if files_in_dir else ""
-            findings.append(f"<div>📂 {html.escape(dir_path)}{file_count}</div>")
+            findings.append(f"<div>{html.escape(dir_path)}{file_count}</div>")
         findings.append("</div>")
 
     # Section 2: New files in existing directories (show all, better formatting)
     if modified_files:
         total_new_files = sum(len(files) for files in modified_files.values())
-        findings.append(f"<div class='storage-section'><strong>📄 New Files: {total_new_files}</strong></div>")
+        findings.append(f"<div class='storage-section'><strong>New Files: {total_new_files}</strong></div>")
         findings.append("<div class='storage-item'>")
 
         for dir_path, files in sorted(modified_files.items()):
@@ -9526,8 +9746,22 @@ def check_storage_analysis(base, package_name):
                         security_issues.append(f"WARNING: Shared preferences file with potentially insecure permissions: {file_entry}")
 
                 if '.db' in file_entry:
+                    # Extract the database filename from the ls output
+                    db_filename = file_entry.split()[-1] if file_entry.split() else None
+                    db_full_path = f"{dir_path}/{db_filename}" if db_filename else None
+
+                    # Check encryption status
+                    is_encrypted = check_db_encryption(db_full_path) if db_full_path else None
+
                     if '-rw-rw-' in file_entry or '-rw-rw-rw-' in file_entry:
-                        security_issues.append(f" Database file with world-readable permissions: {file_entry}")
+                        # World-readable database - security issue
+                        if is_encrypted:
+                            security_issues.append(f" Database file with world-readable permissions (encrypted): {file_entry}")
+                        else:
+                            security_issues.append(f" Database file with world-readable permissions: {file_entry}")
+                    elif is_encrypted:
+                        # Secure encrypted database
+                        secure_dbs.append(f"{file_entry}")
 
                 if any(ext in file_entry for ext in ['.key', '.pem', '.jks', '.p12']):
                     security_issues.append(f" Cryptographic key file detected: {file_entry}")
@@ -9536,20 +9770,30 @@ def check_storage_analysis(base, package_name):
 
         findings.append("</div>")
 
-    # Section 3: Security issues (show all, with better formatting)
+    # Section 3: Secure encrypted databases (show all)
+    if secure_dbs:
+        findings.append(f"<div class='storage-section'><strong>Secure Encrypted Databases: {len(secure_dbs)}</strong></div>")
+        findings.append("<div class='storage-secure-box' style='background:#d4edda; border-left:4px solid #28a745; padding:10px; margin:10px 0;'>")
+        for db in secure_dbs:
+            findings.append(f"<div>{html.escape(db)}</div>")
+        findings.append("</div>")
+
+    # Section 4: Security issues (show all, with better formatting)
     if security_issues:
-        findings.append(f"<div class='storage-section'><strong>🔒 Security Issues: {len(security_issues)}</strong></div>")
+        findings.append(f"<div class='storage-section'><strong>Security Issues: {len(security_issues)}</strong></div>")
         findings.append("<div class='storage-issue-box'>")
         for issue in security_issues:
             findings.append(f"<div>{html.escape(issue)}</div>")
         findings.append("</div>")
 
     # Summary section
-    findings.append("<div class='storage-section'><strong>📊 Summary:</strong></div>")
+    findings.append("<div class='storage-section'><strong>Summary:</strong></div>")
     findings.append("<div class='storage-item'>")
     findings.append(f"<div>• New directories: <strong>{len(new_dirs)}</strong></div>")
     total_files = sum(len(files) for files in modified_files.values())
     findings.append(f"<div>• New files: <strong>{total_files}</strong></div>")
+    if secure_dbs:
+        findings.append(f"<div>• Secure encrypted databases: <strong class='text-success'>{len(secure_dbs)}</strong></div>")
     issue_color = 'text-danger' if security_issues else 'text-success'
     findings.append(f"<div>• Security issues: <strong class='{issue_color}'>{len(security_issues)}</strong></div>")
     findings.append("</div>")
@@ -9662,7 +9906,7 @@ def check_pending_intent_flags(base):
             issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
 
     if immutable_files and status == 'PASS':
-        issues.append(f"<div>✓ FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
+        issues.append(f"<div>FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
 
     if not issues:
         return 'PASS', f"All PendingIntents properly secured with FLAG_IMMUTABLE{mastg_ref}"
@@ -9763,7 +10007,7 @@ def check_recent_screenshot_disabled(base):
 
     if protected_files:
         lines = [
-            f"<div>✓ Recent screenshot protection detected in {len(protected_files)} file(s)</div>",
+            f"<div>Recent screenshot protection detected in {len(protected_files)} file(s)</div>",
             "<div>setRecentsScreenshotEnabled(false) prevents sensitive data in task switcher.</div>"
         ]
         for rel in sorted(protected_files)[:10]:
@@ -9842,7 +10086,7 @@ def check_dangerous_permissions(manifest):
 
     if critical_found:
         status = 'WARN'
-        lines.append(f"<div><strong>⚠ {len(critical_found)} CRITICAL permission(s) requested:</strong></div>")
+        lines.append(f"<div><strong>WARNING: {len(critical_found)} CRITICAL permission(s) requested:</strong></div>")
         lines.append("<ul style='margin-left:20px;'>")
         for perm, desc in critical_found:
             lines.append(
@@ -9958,7 +10202,7 @@ def check_datastore_encryption(base):
 
     if encrypted_files:
         lines = [
-            f"<div>✓ DataStore encryption detected in {len(encrypted_files)} file(s)</div>",
+            f"<div>DataStore encryption detected in {len(encrypted_files)} file(s)</div>",
             "<div>App code uses EncryptedFile or Tink with DataStore.</div>"
         ]
         for rel in sorted(encrypted_files)[:5]:
@@ -10061,7 +10305,7 @@ def check_room_encryption(base):
 
     if encrypted_files:
         lines = [
-            f"<div>✓ Room database encryption detected in {len(encrypted_files)} file(s)</div>",
+            f"<div>Room database encryption detected in {len(encrypted_files)} file(s)</div>",
             "<div>App code uses SQLCipher with Room.</div>"
         ]
         for rel in sorted(encrypted_files)[:5]:
@@ -10114,7 +10358,7 @@ def check_anti_debugging(base):
             f"{mastg_ref}"
         )
 
-    lines = [f"<div>✓ {len(detections)} anti-debugging mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
+    lines = [f"<div>{len(detections)} anti-debugging mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
 
     for mechanism, files in sorted(detections.items()):
         lines.append(f"<li><strong>{mechanism}</strong> in {len(files)} file(s)</li>")
@@ -10152,7 +10396,7 @@ def check_gms_security_provider(base):
 
     if provider_files:
         lines = [
-            f"<div>✓ GMS ProviderInstaller usage detected in {len(provider_files)} file(s)</div>",
+            f"<div>GMS ProviderInstaller usage detected in {len(provider_files)} file(s)</div>",
             "<div>Security provider will be updated with latest crypto patches.</div>"
         ]
         for rel in sorted(provider_files)[:5]:
