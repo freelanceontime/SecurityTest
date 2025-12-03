@@ -976,8 +976,9 @@ SENSITIVE_KEYWORDS = {
     'credentials': ['password', 'passwd', 'pwd', 'pass', 'credential', 'cred'],
     'tokens': ['token', 'jwt', 'bearer', 'auth', 'authorization', 'session', 'cookie'],
     'keys': ['apikey', 'api_key', 'api-key', 'secretkey', 'secret_key', 'secret-key',
-             'privatekey', 'private_key', 'private-key', 'publickey', 'masterkey'],
-    'secrets': ['secret', 'sec', 'encryption', 'cipher'],
+             'privatekey', 'private_key', 'private-key', 'publickey', 'masterkey',
+             'hardcoded_api', 'hardcoded_key', 'hardcoded_secret'],  # Common in vulnerable apps
+    'secrets': ['secret', 'sec', 'encryption', 'cipher', 'hardcoded'],
     'financial': ['credit', 'card', 'cvv', 'ccv', 'pan', 'payment', 'billing', 'bank', 'account'],
     'pii': ['ssn', 'social', 'tax', 'license', 'passport', 'dob', 'birthdate'],
     'cloud': ['aws', 'azure', 'gcp', 'firebase', 's3', 'bucket', 'region'],
@@ -1182,8 +1183,33 @@ def is_likely_secret(value, key_name=""):
         confidence += 0.2
         reasons.append(f"sensitive value: {', '.join(val_categories)}")
 
-    # Common secret prefixes and patterns
-    secret_prefixes = ['sk_', 'pk_', 'AKIA', 'AIza', 'ya29.', 'glpat-', 'ghp_', 'github_pat_']
+    # Common secret prefixes and patterns (CRITICAL indicators)
+    secret_prefixes = [
+        'sk_', 'pk_', 'rk_',  # Stripe
+        'AKIA',               # AWS
+        'AIza',               # Google API
+        'ya29.',              # Google OAuth
+        'glpat-', 'ghp_', 'gho_', 'github_pat_',  # GitHub/GitLab
+        'sq0atp-', 'sq0csp-', # Square
+        'xox',                # Slack
+        'SG.',                # SendGrid
+    ]
+
+    # OBVIOUS hardcoded secret patterns (training/vulnerable apps)
+    obvious_patterns = [
+        'super_secret', 'my_secret', 'test_secret',
+        'hardcoded_api', 'hardcoded_key', 'hardcoded_secret',
+        'demo_key', 'sample_key', 'example_key'
+    ]
+
+    # Check for obvious patterns FIRST (highest priority)
+    for pattern in obvious_patterns:
+        if pattern in value.lower():
+            confidence += 0.7
+            reasons.append(f"OBVIOUS hardcoded secret pattern: {pattern}")
+            break
+
+    # Check for known secret prefixes
     for prefix in secret_prefixes:
         if value.startswith(prefix):
             confidence += 0.5
@@ -5242,46 +5268,77 @@ def check_hardcoded_keys(base):
     # Enhanced patterns with more comprehensive detection
     # Format: (pattern, capture_group_for_value, capture_group_for_key_name)
     string_patterns = [
+        # Smali .field static final declarations (Kotlin/Java constants)
+        # Example: .field public static final HARDCODED_API_KEY:Ljava/lang/String; = "sk_live_..."
+        (r'\.field[^=]*(HARDCODED[^:]*|API[_-]?KEY|SECRET[^:]*|ENCRYPTION[_-]?KEY|AES[_-]?KEY|CRYPTO[_-]?KEY|MASTER[_-]?KEY|PRIVATE[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?TOKEN)[^=]*=\s*"([^"]{8,})"', 2, 1),
+
         # Smali const-string declarations (most common in decompiled code)
         (r'const-string\s+[vp]\d+,\s*"([^"]{16,})"', 1, None),
 
         # Key-value patterns with sensitive keywords (captures both key and value)
-        (r'(?i)(api[_-]?key|apikey|secret[_-]?key|private[_-]?key|access[_-]?token|client[_-]?secret)["\']?\s*[:=]\s*["\']([^"\']{8,})["\']', 2, 1),
+        # Enhanced to catch more variations: key, Key, KEY, api_key, apiKey, API_KEY, etc.
+        (r'(?i)(api[_-]?key|apikey|api_secret|secret[_-]?key|private[_-]?key|access[_-]?token|client[_-]?secret|auth[_-]?token|bearer[_-]?token|encryption[_-]?key|master[_-]?key|crypto[_-]?key|hardcoded[_-]?key|hardcoded[_-]?secret)["\']?\s*[:=]\s*["\']([^"\']{8,})["\']', 2, 1),
 
-        # XML string resources (for strings.xml files)
+        # XML string resources (for strings.xml files) - Enhanced to catch keys with specific names
+        (r'<string[^>]*name=["\']([^"\']*(?:key|secret|token|password|auth|credential|api)[^"\']*)["\'][^>]*>([^<]{8,})</string>', 2, 1),
         (r'<string[^>]*name=["\']([^"\']*)["\'][^>]*>([^<]{8,})</string>', 2, 1),  # Generic XML string
 
         # Known secret patterns (high confidence) - for both code and XML
-        (r'(AKIA[0-9A-Z]{16})', 1, None),  # AWS Access Key (unquoted for XML)
-        (r'(AIza[0-9A-Za-z\-_]{35})', 1, None),  # Google API Key (unquoted for XML)
-        (r'(ya29\.[0-9A-Za-z\-_]+)', 1, None),  # Google OAuth Access Token (unquoted for XML)
-        (r'([0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com)', 1, None),  # Google OAuth Client ID (unquoted for XML)
-        (r'(sk_live_[0-9a-zA-Z]{24,})', 1, None),  # Stripe Secret Key (unquoted for XML)
-        (r'(pk_live_[0-9a-zA-Z]{24,})', 1, None),  # Stripe Publishable Key (unquoted for XML)
-        (r'(sq0atp-[0-9A-Za-z\-_]{22})', 1, None),  # Square Access Token (unquoted for XML)
-        (r'(ghp_[0-9a-zA-Z]{36})', 1, None),  # GitHub Personal Access Token (unquoted for XML)
-        (r'(glpat-[0-9a-zA-Z\-_]{20})', 1, None),  # GitLab Personal Access Token (unquoted for XML)
+        (r'(AKIA[0-9A-Z]{16})', 1, None),  # AWS Access Key
+        (r'(AIza[0-9A-Za-z\-_]{35})', 1, None),  # Google API Key
+        (r'(ya29\.[0-9A-Za-z\-_\.]+)', 1, None),  # Google OAuth Access Token (more flexible)
+        (r'([0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com)', 1, None),  # Google OAuth Client ID
+
+        # Stripe keys - RELAXED length requirements to catch test/example keys
+        (r'(sk_live_[0-9a-zA-Z]{10,})', 1, None),  # Stripe Secret Key (reduced from 24+)
+        (r'(sk_test_[0-9a-zA-Z]{10,})', 1, None),  # Stripe Test Secret Key
+        (r'(pk_live_[0-9a-zA-Z]{10,})', 1, None),  # Stripe Publishable Key
+        (r'(rk_live_[0-9a-zA-Z]{10,})', 1, None),  # Stripe Restricted Key
+        (r'(sq0atp-[0-9A-Za-z\-_]{22})', 1, None),  # Square Access Token
+        (r'(sq0csp-[0-9A-Za-z\-_]{43})', 1, None),  # Square OAuth Secret
+        (r'(ghp_[0-9a-zA-Z]{36})', 1, None),  # GitHub Personal Access Token
+        (r'(gho_[0-9a-zA-Z]{36})', 1, None),  # GitHub OAuth Access Token
+        (r'(github_pat_[0-9a-zA-Z_]{82})', 1, None),  # GitHub Fine-grained PAT
+        (r'(glpat-[0-9a-zA-Z\-_]{20})', 1, None),  # GitLab Personal Access Token
+        (r'(xox[pboa]-[0-9]{10,13}-[0-9]{10,13}-[0-9]{10,13}-[a-z0-9]{32})', 1, None),  # Slack Token
+        (r'(sk-[a-zA-Z0-9]{48})', 1, None),  # OpenAI API Key
+        (r'(SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43})', 1, None),  # SendGrid API Key
 
         # JWT tokens
         (r'(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})', 1, None),
 
-        # Private keys
+        # Private keys (PEM format)
         (r'(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)', 1, None),
+        (r'(-----BEGIN\s+ENCRYPTED\s+PRIVATE\s+KEY-----)', 1, None),
+        (r'(-----BEGIN\s+EC\s+PRIVATE\s+KEY-----)', 1, None),
 
-        # Quoted versions for code files
+        # Quoted versions for code files (more patterns)
         (r'"(AKIA[0-9A-Z]{16})"', 1, None),
         (r'"(AIza[0-9A-Za-z\-_]{35})"', 1, None),
-        (r'"(ya29\.[0-9A-Za-z\-_]+)"', 1, None),
+        (r'"(ya29\.[0-9A-Za-z\-_\.]+)"', 1, None),  # More flexible ya29 pattern
         (r'"([0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com)"', 1, None),
+        (r'"(sk-[a-zA-Z0-9]{48})"', 1, None),  # OpenAI API Key quoted
+        (r'"(sk_live_[0-9a-zA-Z]{10,})"', 1, None),  # Stripe key quoted (relaxed)
+        (r'"(sk_test_[0-9a-zA-Z]{10,})"', 1, None),  # Stripe test key quoted
+
+        # OBVIOUS hardcoded secret patterns (catch training/example apps)
+        (r'"(super_secret[_a-zA-Z0-9]+)"', 1, None),  # super_secret_*
+        (r'"(my_secret[_a-zA-Z0-9]+)"', 1, None),     # my_secret_*
+        (r'"(test_secret[_a-zA-Z0-9]+)"', 1, None),   # test_secret_*
+        (r'"(hardcoded_[a-zA-Z0-9_]{8,})"', 1, None), # hardcoded_*
 
         # Base64-like strings (must be quoted to avoid class names)
         (r'"([A-Za-z0-9+/=]{40,})"', 1, None),
 
-        # Hex strings (must be quoted)
+        # Hex strings (must be quoted) - common for encryption keys
         (r'"([0-9a-fA-F]{32,})"', 1, None),
 
         # Generic string assignments with = operator
         (r'=\s*"([A-Za-z0-9+/=_-]{32,})"', 1, None),
+
+        # Firebase/Google service JSON keys (look for specific field names)
+        (r'"(private_key_id)"\s*:\s*"([^"]{20,})"', 2, 1),
+        (r'"(private_key)"\s*:\s*"([^"]{100,})"', 2, 1),
     ]
 
     findings_by_confidence = {
@@ -5356,6 +5413,23 @@ def check_hardcoded_keys(base):
                             # Skip common boolean strings
                             if value in ['true', 'false', 'enabled', 'disabled']:
                                 continue
+
+                            # IMPORTANT: Skip internationalization/localization strings (non-ASCII Unicode)
+                            # These are UI text in various languages (Russian, Chinese, Thai, Arabic, etc.)
+                            # Count non-ASCII characters
+                            non_ascii_count = sum(1 for c in value if ord(c) > 127)
+                            # If more than 30% of the string is non-ASCII Unicode, it's likely i18n text
+                            if non_ascii_count > 0 and (non_ascii_count / len(value)) > 0.3:
+                                # Check if it contains known secret patterns (base64, hex, known prefixes)
+                                # These should NOT be skipped even if they have some Unicode
+                                is_known_secret_pattern = (
+                                    re.match(r'^[A-Za-z0-9+/=]{40,}$', value) or  # Base64
+                                    re.match(r'^[0-9a-fA-F]{32,}$', value) or      # Hex
+                                    value.startswith(('AKIA', 'AIza', 'sk_', 'pk_', 'ghp_', 'glpat-', 'ya29.')) or
+                                    '.apps.googleusercontent.com' in value
+                                )
+                                if not is_known_secret_pattern:
+                                    continue  # Skip internationalization strings
 
                             # Skip numeric values with units
                             if re.match(r'^[0-9]+\.?[0-9]*(dip|dp|sp|px|pt|mm|in)$', value):
@@ -6521,29 +6595,39 @@ def check_insecure_fingerprint_api(base):
     # NOTE: For FingerprintManager detection, we want to catch deprecated API usage
     # even in third-party libraries since it affects the app's security posture
     lib_paths = (
-        '/androidx/biometric/', '/androidx/core/',  # Modern biometric libraries (safe)
-        '/android/support/',
+        '/androidx/biometric/',  # Modern biometric library (safe)
         '/org/conscrypt/', '/lib/arm', '/lib/x86',  # Native libraries
     )
 
     def is_library_path(path):
-        """Check if path is framework library code (androidx, android support)"""
+        """Check if path is framework library code (androidx biometric only - NOT FingerprintManagerCompat)"""
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    # Detection patterns for FingerprintManager (deprecated API only)
-    fingerprint_manager_pat = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager;')
+    # Detection patterns for FingerprintManager (deprecated API) - includes BOTH platform AND compat wrapper
+    # IMPORTANT: FingerprintManagerCompat is just a wrapper around the same insecure deprecated API
+    fingerprint_manager_pat = re.compile(
+        r'(Landroid/hardware/fingerprint/FingerprintManager;|'
+        r'Landroidx/core/hardware/fingerprint/FingerprintManagerCompat;|'
+        r'Landroid/support/v4/hardware/fingerprint/FingerprintManagerCompat;)'
+    )
 
-    # Any authenticate() call pattern
+    # Any authenticate() call pattern - matches BOTH platform and compat
     authenticate_call_pattern = re.compile(
-        r'invoke-virtual.*Landroid/hardware/fingerprint/FingerprintManager;->authenticate'
+        r'invoke-virtual.*(Landroid/hardware/fingerprint/FingerprintManager;->authenticate|'
+        r'Landroidx/core/hardware/fingerprint/FingerprintManagerCompat;->authenticate|'
+        r'Landroid/support/v4/hardware/fingerprint/FingerprintManagerCompat;->authenticate)'
     )
 
     # Null parameter pattern (const/4 vX, 0x0 before authenticate call)
     null_pattern = re.compile(r'const/4\s+v\d+,\s*0x0')
 
-    # Secure: CryptoObject used
-    crypto_object_pattern = re.compile(r'Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;')
+    # Secure: CryptoObject used - matches BOTH platform and compat
+    crypto_object_pattern = re.compile(
+        r'(Landroid/hardware/fingerprint/FingerprintManager\$CryptoObject;|'
+        r'Landroidx/core/hardware/fingerprint/FingerprintManagerCompat\$CryptoObject;|'
+        r'Landroid/support/v4/hardware/fingerprint/FingerprintManagerCompat\$CryptoObject;)'
+    )
 
     # KeyStore integration patterns (secure implementation)
     keystore_patterns = [
@@ -9240,7 +9324,7 @@ def check_frida_clipboard(base, wait_secs=10):
                         preview = payload.get('preview', '')
                         length = payload.get('length', 0)
                         sensitive = payload.get('sensitive', False)
-                        marker = "🔴" if sensitive else "⚪"
+                        marker = "[!]" if sensitive else "[ ]"
                         if sensitive:
                             sensitive_count += 1
 
@@ -9269,7 +9353,7 @@ def check_frida_clipboard(base, wait_secs=10):
 
     if sensitive_count > 0:
         summary_parts.append("<div style='background:#f8d7da; border-left:4px solid #dc3545; padding:10px; margin:10px 0;'>")
-        summary_parts.append(f"<strong style='color:#dc2626;'>⚠️ Sensitive data copied to clipboard: {sensitive_count} time(s)</strong><br>")
+        summary_parts.append(f"<strong style='color:#dc2626;'>WARNING: Sensitive data copied to clipboard: {sensitive_count} time(s)</strong><br>")
         summary_parts.append("<strong>Risk:</strong> Any app with clipboard access can read this data<br>")
         summary_parts.append("<strong>Threat:</strong> Malicious keyboard apps, screen readers, or accessibility services can steal sensitive data")
         summary_parts.append("</div>")
@@ -9280,7 +9364,7 @@ def check_frida_clipboard(base, wait_secs=10):
     # Show clipboard items with details
     summary_parts.append("<br><div><strong>Clipboard Contents:</strong></div>")
     for item in clipboard_items[:20]:
-        marker = "🔴" if item['sensitive'] else "⚪"
+        marker = "[!]" if item['sensitive'] else "[ ]"
         sensitivity_label = "<span style='color:#dc2626; font-weight:bold;'>[SENSITIVE]</span>" if item['sensitive'] else ""
         summary_parts.append(
             f"<div style='padding:6px; margin:4px 0; background:#f9f9f9; border-left:3px solid {'#dc3545' if item['sensitive'] else '#ccc'};'>"
@@ -9299,7 +9383,7 @@ def check_frida_clipboard(base, wait_secs=10):
     if logs:
         detail = (
             "<div>" + "".join(summary_parts) + "</div>" +
-            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>📋 View full Frida output</summary>" +
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>" +
             "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px; border:1px solid #ddd;'>\n" +
             html.escape("\n".join(logs[-600:])) +  # cap output to last 600 lines and escape HTML
             "\n</pre></details>"
@@ -10000,169 +10084,6 @@ def check_room_encryption(base):
     return 'WARN', "<br>\n".join(lines)
 
 
-def check_database_encryption(base):
-    """
-    MASTG-TEST-0001: Testing Local Storage for Sensitive Data (Database Files)
-
-    Checks actual database files on device using ADB:
-    1. Lists all .db files in app's data directory
-    2. Checks each database file header to determine if encrypted
-    3. SQLite unencrypted: starts with "SQLite format 3"
-    4. SQLCipher encrypted: has random/encrypted header
-    5. Also scans smali code for encryption API usage
-
-    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/
-    """
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
-
-    # Get package name from manifest
-    try:
-        manifest = os.path.join(base, 'AndroidManifest.xml')
-        tree = ET.parse(manifest)
-        root = tree.getroot()
-        package_name = root.attrib.get('package', '')
-        if not package_name:
-            return 'FAIL', f"<div>Could not determine package name from manifest</div>{mastg_ref}"
-    except Exception as e:
-        return 'FAIL', f"<div>Error reading manifest: {html.escape(str(e))}</div>{mastg_ref}"
-
-    # Check if device is connected
-    try:
-        result = subprocess.run(['adb', 'devices'], capture_output=True, text=True, timeout=5)
-        if 'device' not in result.stdout:
-            return 'FAIL', f"<div>No device connected via ADB</div>{mastg_ref}"
-    except Exception:
-        return 'FAIL', f"<div>ADB not available or not in PATH</div>{mastg_ref}"
-
-    # List all .db files in app's data directory
-    db_files_on_device = []
-    try:
-        # Try with su (root)
-        result = subprocess.run(
-            ['adb', 'shell', 'su', '-c', f'find /data/data/{package_name} -name "*.db" 2>/dev/null'],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            db_files_on_device = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-        else:
-            # Try without su (may work on some devices/emulators)
-            result = subprocess.run(
-                ['adb', 'shell', f'find /data/data/{package_name} -name "*.db" 2>/dev/null'],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                db_files_on_device = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-    except Exception as e:
-        return 'FAIL', f"<div>Error listing database files: {html.escape(str(e))}</div>{mastg_ref}"
-
-    if not db_files_on_device:
-        return 'PASS', f"<div>No database (.db) files found on device in /data/data/{package_name}</div>{mastg_ref}"
-
-    # Check each database file to see if it's encrypted
-    encrypted_dbs = []
-    unencrypted_dbs = []
-    unknown_dbs = []
-
-    for db_path in db_files_on_device:
-        try:
-            # Read first 16 bytes of the database file to check header
-            # SQLite unencrypted starts with "SQLite format 3\0"
-            result = subprocess.run(
-                ['adb', 'shell', 'su', '-c', f'head -c 16 "{db_path}" 2>/dev/null | xxd -p'],
-                capture_output=True, text=True, timeout=5
-            )
-
-            if result.returncode != 0:
-                # Try without su
-                result = subprocess.run(
-                    ['adb', 'shell', f'head -c 16 "{db_path}" 2>/dev/null | xxd -p'],
-                    capture_output=True, text=True, timeout=5
-                )
-
-            if result.returncode == 0 and result.stdout.strip():
-                hex_header = result.stdout.strip().replace('\n', '').replace(' ', '')
-
-                # Convert hex to ASCII to check for "SQLite format 3"
-                try:
-                    # SQLite header: 53514c69746520666f726d6174203300
-                    if hex_header.startswith('53514c69746520666f726d617420'):
-                        # Unencrypted SQLite database
-                        unencrypted_dbs.append(db_path)
-                    else:
-                        # Encrypted or not a standard SQLite database
-                        encrypted_dbs.append(db_path)
-                except:
-                    unknown_dbs.append(db_path)
-            else:
-                unknown_dbs.append(db_path)
-        except Exception:
-            unknown_dbs.append(db_path)
-
-    # Build report
-    lines = []
-
-    # Summary
-    total_dbs = len(db_files_on_device)
-    lines.append(f"<div><strong>Database Files Found:</strong> {total_dbs}</div>")
-    lines.append(f"<div style='color:#059669'>🔒 Encrypted: {len(encrypted_dbs)}</div>")
-    lines.append(f"<div style='color:#dc2626'>🔓 Unencrypted: {len(unencrypted_dbs)}</div>")
-    if unknown_dbs:
-        lines.append(f"<div style='color:#d97706'>❓ Unknown: {len(unknown_dbs)}</div>")
-    lines.append("<br>")
-
-    # Show encrypted databases (GOOD)
-    if encrypted_dbs:
-        lines.append("<div style='background:#d1fae5; border-left:4px solid #059669; padding:10px; margin:10px 0;'>")
-        lines.append(f"<strong>✅ Encrypted Databases ({len(encrypted_dbs)}):</strong><br>")
-        lines.append("<div style='font-size:11px; color:#065f46'>These databases are protected with encryption (likely SQLCipher)</div>")
-        lines.append("</div>")
-        for db in encrypted_dbs:
-            db_name = os.path.basename(db)
-            lines.append(f"<div style='padding:4px; margin:2px 0; background:#f0fdf4; border-left:2px solid #059669;'>")
-            lines.append(f"🔒 <code>{html.escape(db_name)}</code><br>")
-            lines.append(f"<span style='font-size:10px; color:#666'>{html.escape(db)}</span>")
-            lines.append("</div>")
-        lines.append("<br>")
-
-    # Show unencrypted databases (BAD)
-    if unencrypted_dbs:
-        lines.append("<div style='background:#fee2e2; border-left:4px solid #dc2626; padding:10px; margin:10px 0;'>")
-        lines.append(f"<strong style='color:#dc2626'>⚠️ UNENCRYPTED Databases ({len(unencrypted_dbs)}):</strong><br>")
-        lines.append("<strong>Risk:</strong> Sensitive data stored in plaintext<br>")
-        lines.append("<strong>Recommendation:</strong> Use SQLCipher to encrypt databases")
-        lines.append("</div>")
-        for db in unencrypted_dbs:
-            db_name = os.path.basename(db)
-            lines.append(f"<div style='padding:4px; margin:2px 0; background:#fef2f2; border-left:2px solid #dc2626;'>")
-            lines.append(f"🔓 <code style='color:#dc2626'>{html.escape(db_name)}</code><br>")
-            lines.append(f"<span style='font-size:10px; color:#666'>{html.escape(db)}</span>")
-            lines.append("</div>")
-        lines.append("<br>")
-
-    # Show unknown databases (WARNING)
-    if unknown_dbs:
-        lines.append("<div style='background:#fef3c7; border-left:4px solid #d97706; padding:10px; margin:10px 0;'>")
-        lines.append(f"<strong>❓ Unable to Determine Encryption ({len(unknown_dbs)}):</strong><br>")
-        lines.append("<div style='font-size:11px'>Could not read file headers - check manually</div>")
-        lines.append("</div>")
-        for db in unknown_dbs:
-            db_name = os.path.basename(db)
-            lines.append(f"<div>❓ <code>{html.escape(db_name)}</code> - <span style='font-size:10px'>{html.escape(db)}</span></div>")
-        lines.append("<br>")
-
-    lines.append(mastg_ref)
-
-    # Determine status
-    if unencrypted_dbs:
-        status = 'FAIL'
-    elif unknown_dbs:
-        status = 'WARN'
-    else:
-        status = 'PASS'
-
-    return status, "<br>\n".join(lines)
-
-
 def check_anti_debugging(base):
     """
     MASTG-TEST-0046: Testing Anti-Debugging Detection
@@ -10535,7 +10456,6 @@ def main():
         ("Dangerous Permissions",   lambda: check_dangerous_permissions(manifest)),
         ("DataStore Encryption",    lambda: check_datastore_encryption(base)),
         ("Room Database Encryption", lambda: check_room_encryption(base)),
-        ("Database File Encryption", lambda: check_database_encryption(base)),
         ("Anti-Debugging",          lambda: check_anti_debugging(base)),
         ("GMS Security Provider",   lambda: check_gms_security_provider(base)),
         ("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
@@ -10567,7 +10487,7 @@ def main():
         "PendingIntent Flags",      "WebView SSL Error Handling",
         "Recent Screenshot Protection", "Dangerous Permissions",
         "DataStore Encryption",     "Room Database Encryption",
-        "Database File Encryption", "Anti-Debugging",
+        "Anti-Debugging",
         "GMS Security Provider",
         "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
     }
