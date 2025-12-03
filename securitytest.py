@@ -2213,15 +2213,19 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
 def check_file_provider(res_dir):
     """
     FAIL on any of:
-      1) <external-path path=".">
+      1) Insecure FileProvider path elements (root-path, external-path, etc.) with path="." or path="/"
       2) Overly-broad <grant-uri-permission> or <path-permission>
-    Emits clickable file:// links with the XML filename.
+    Emits clickable file:// links with the XML filename and shows the actual insecure XML element.
     """
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
     issues = []
     xml_dir = os.path.join(res_dir, 'xml')
+
+    if not os.path.exists(xml_dir):
+        return True, "No xml directory found" + mastg_ref
+
     for root, _, files in os.walk(xml_dir):
         for f in files:
             if not f.endswith('.xml'):
@@ -2232,27 +2236,61 @@ def check_file_provider(res_dir):
             href = f'file://{html.escape(full)}'
             link = f'<a href="{href}">{html.escape(rel)}</a>'
 
-            txt = open(full, errors='ignore').read()
+            try:
+                txt = open(full, errors='ignore').read()
+                tree = ET.parse(full)
+                root_elem = tree.getroot()
 
-            # 1) external-path path="." or path="/"
-            if re.search(r'<\s*external-path[^>]*path="\."[^>]*/?>', txt):
-                issues.append(
-                    f"{link} – insecure <external-path path='.'>"
-                )
-            if re.search(r'<\s*external-path[^>]*path="/"[^>]*/?>', txt):
-                issues.append(
-                    f"{link} – insecure <external-path path='/'>"
-                )
+                # Check all FileProvider path types for insecure configurations
+                path_types = [
+                    'root-path',           # Most dangerous - exposes device root
+                    'files-path',          # App's internal storage files directory
+                    'cache-path',          # App's internal cache directory
+                    'external-path',       # External storage root
+                    'external-files-path', # External files directory
+                    'external-cache-path', # External cache directory
+                    'external-media-path'  # External media directory
+                ]
 
-            # 2) grant-uri-permission / path-permission
-            tree = ET.parse(full)
-            for tag in ('grant-uri-permission', 'path-permission'):
-                for perm in tree.findall(f'.//{tag}'):
-                    p = perm.get('path') or perm.get('pathPrefix') or perm.get('pathPattern') or ''
-                    if p in ('.', '/', '..') or p.startswith('../'):
-                        issues.append(
-                            f"{link} – <strong>{tag}</strong> insecure p=\"{html.escape(p)}\""
-                        )
+                for path_type in path_types:
+                    for elem in root_elem.findall(f'.//{path_type}'):
+                        path_attr = elem.get('path', '')
+                        name_attr = elem.get('name', '')
+
+                        # Check for insecure path values
+                        if path_attr in ('.', '/', ''):
+                            # Reconstruct the XML element to show in output
+                            attrs = []
+                            if name_attr:
+                                attrs.append(f'name="{name_attr}"')
+                            attrs.append(f'path="{path_attr}"')
+
+                            xml_element = f'&lt;{path_type} {" ".join(attrs)}/&gt;'
+
+                            # Determine severity
+                            if path_type == 'root-path':
+                                severity = '<strong style="color:#dc2626;">CRITICAL</strong>'
+                            elif path_attr in ('.', '/'):
+                                severity = '<strong style="color:#dc2626;">HIGH</strong>'
+                            else:
+                                severity = '<strong style="color:#d97706;">MEDIUM</strong>'
+
+                            issues.append(
+                                f"{link} – {severity} insecure {xml_element}"
+                            )
+
+                # Check for overly-broad grant-uri-permission / path-permission
+                for tag in ('grant-uri-permission', 'path-permission'):
+                    for perm in root_elem.findall(f'.//{tag}'):
+                        p = perm.get('path') or perm.get('pathPrefix') or perm.get('pathPattern') or ''
+                        if p in ('.', '/', '..') or p.startswith('../'):
+                            issues.append(
+                                f"{link} – <strong>&lt;{tag}&gt;</strong> insecure path=\"{html.escape(p)}\""
+                            )
+
+            except Exception as e:
+                # If XML parsing fails, continue to next file
+                continue
 
     if not issues:
         return True, "None" + mastg_ref
@@ -2260,7 +2298,10 @@ def check_file_provider(res_dir):
 
 def check_serialize(base):
     """
-    Check for unsafe use of Bundle.getSerializable(...) without proper API version handling.
+    Check for unsafe deserialization patterns:
+    1. Bundle.getSerializable(...) without proper API version handling
+    2. ObjectInputStream.readObject() usage (insecure deserialization)
+    3. Custom readObject implementations
 
     SAFE pattern (no warning):
         if (Build.VERSION.SDK_INT >= 33) {
@@ -2269,8 +2310,9 @@ def check_serialize(base):
             bundle.getSerializable("key")  // Fallback for older Android
         }
 
-    UNSAFE pattern (warning):
+    UNSAFE patterns (warning):
         bundle.getSerializable("key")  // No version check, no type safety
+        ObjectInputStream.readObject()  // Insecure deserialization
 
     Also filters out third-party library code.
     """
@@ -2297,6 +2339,11 @@ def check_serialize(base):
     new_api_pattern = re.compile(r'getSerializable\(Ljava/lang/String;Ljava/lang/Class;\)Ljava/io/Serializable;')
     version_check_pattern = re.compile(r'(VERSION\.SDK_INT|sget.*Build\$VERSION;->SDK_INT:I|const/16.*0x21)')
 
+    # ObjectInputStream patterns (CRITICAL - insecure deserialization)
+    object_input_stream_pattern = re.compile(r'Ljava/io/ObjectInputStream;')
+    read_object_pattern = re.compile(r'->readObject\(\)')
+    custom_read_object_pattern = re.compile(r'\.method private readObject\(Ljava/io/ObjectInputStream;\)')
+
     hits = []
 
     for root, _, files in os.walk(base):
@@ -2316,6 +2363,39 @@ def check_serialize(base):
                     lines = content.splitlines()
             except:
                 continue
+
+            # Check for ObjectInputStream usage (CRITICAL vulnerability)
+            has_object_input_stream = object_input_stream_pattern.search(content)
+            has_read_object = read_object_pattern.search(content)
+            has_custom_read_object = custom_read_object_pattern.search(content)
+
+            if has_object_input_stream and has_read_object:
+                # Found insecure ObjectInputStream deserialization
+                for i, line in enumerate(lines, 1):
+                    if read_object_pattern.search(line):
+                        link = f'<a href="file://{html.escape(path)}">' \
+                               f"{html.escape(rel_path)}:{i}</a>"
+                        snippet = html.escape(line.strip())
+
+                        hits.append(
+                            f"{link} – <strong style='color:#dc2626;'>CRITICAL: Insecure ObjectInputStream deserialization</strong><br>"
+                            f"<code>{snippet}</code><br>"
+                            f"<em>Risk: Remote Code Execution via malicious serialized objects</em>"
+                        )
+
+            if has_custom_read_object:
+                # Found custom readObject implementation
+                for i, line in enumerate(lines, 1):
+                    if custom_read_object_pattern.search(line):
+                        link = f'<a href="file://{html.escape(path)}">' \
+                               f"{html.escape(rel_path)}:{i}</a>"
+                        snippet = html.escape(line.strip())
+
+                        hits.append(
+                            f"{link} – <strong style='color:#d97706;'>WARNING: Custom readObject implementation</strong><br>"
+                            f"<code>{snippet}</code><br>"
+                            f"<em>Review for unsafe deserialization logic</em>"
+                        )
 
             # Check if file uses the new safe API (getSerializable with Class parameter)
             has_new_api = new_api_pattern.search(content)
@@ -2355,8 +2435,8 @@ def check_serialize(base):
         return True, "None" + mastg_ref
 
     # Add summary information
-    summary = f"<strong>Found {len(hits)} potentially unsafe deserialization call(s)</strong><br>"
-    summary += "Note: Calls with proper API version checks (SDK_INT >= 33) are filtered out.<br><br>"
+    summary = f"<strong>Found {len(hits)} insecure deserialization issue(s)</strong><br>"
+    summary += "Includes: ObjectInputStream.readObject(), Bundle.getSerializable() without type safety<br><br>"
 
     return False, summary + "<br>\n".join(hits) + mastg_ref
 
@@ -4153,7 +4233,7 @@ def check_keyboard_cache(base, manifest):
                     vulnerability_found = False
                     vulnerability_desc = []
 
-                    # ONLY flag sensitive fields OR fields clearly missing protection
+                    # Check ALL fields for keyboard caching vulnerability
                     if is_sensitive:
                         # Sensitive field - strict checking
                         if not input_type:
@@ -4162,7 +4242,7 @@ def check_keyboard_cache(base, manifest):
                             severity = "CRITICAL"
                         elif 'textNoSuggestions' not in input_type:
                             vulnerability_found = True
-                            vulnerability_desc.append("WARNING: Missing 'textNoSuggestions' flag (autocomplete enabled)")
+                            vulnerability_desc.append("WARNING: Missing 'textNoSuggestions' flag (autocomplete/cache enabled)")
                             severity = "HIGH"
 
                         # Password field without textPassword
@@ -4172,10 +4252,14 @@ def check_keyboard_cache(base, manifest):
                                 vulnerability_desc.append("FAIL: Password field without 'textPassword' flag (VISIBLE password)")
                                 severity = "CRITICAL"
                     else:
-                        # Non-sensitive field - only flag if completely missing inputType
+                        # Non-sensitive field - flag if missing inputType OR missing textNoSuggestions
                         if not input_type:
                             vulnerability_found = True
                             vulnerability_desc.append("FAIL: NO android:inputType attribute (keyboard cache ENABLED)")
+                            severity = "MEDIUM"
+                        elif 'textNoSuggestions' not in input_type:
+                            vulnerability_found = True
+                            vulnerability_desc.append("WARNING: Missing 'textNoSuggestions' flag (keyboard cache/autocomplete enabled)")
                             severity = "MEDIUM"
 
                     if vulnerability_found:
@@ -4386,7 +4470,7 @@ def check_weak_crypto(base):
     lib_paths = (
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
-        '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
+        '/com/google/common/', '/com/google/crypto/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
@@ -10160,7 +10244,6 @@ def main():
             "url":   "https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/",
             "checks": [
                 "Dynamic File Read",
-                "Insecure File Permissions",
                 "FileProvider Paths",
                 "SharedPreferences Encryption",
                 "External Storage Usage",
@@ -10177,7 +10260,6 @@ def main():
                 "APK Signature Schemes",
                 "Weak Crypto Algorithms",
                 "Hardcoded Keys",
-                "Cryptographic Key Sizes",
             ]
         },
         "MASVS-AUTH": {
@@ -10351,7 +10433,6 @@ def main():
         ("OS Command Injection",    lambda: check_os_command_injection(base)),
         ("Safe Browsing Enabled",   lambda: check_safe_browsing(manifest, base)),
         ("Weak Crypto Algorithms",  lambda: check_weak_crypto(base)),
-        ("Insecure File Permissions", lambda: check_file_permissions(base)),
         ("PII via Ble Wi-Fi Info",  lambda: check_pii_wifi_info(base)),
         ("PII via Location Info",   lambda: check_pii_location_info(base)),
         ("Insecure Randomness",     lambda: check_insecure_randomness(base)),
@@ -10361,7 +10442,6 @@ def main():
         ("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
         ("External Storage Usage",  lambda: check_external_storage(base)),
         ("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
-        ("Cryptographic Key Sizes", lambda: check_key_sizes(base)),
         ("Biometric Authentication",lambda: check_biometric_auth(base)),
         ("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
         ("WebView JavaScript Bridges", lambda: check_webview_javascript_bridge(base)),
@@ -10388,7 +10468,7 @@ def main():
         "Task Hijacking",           "Network Security Config",
         "Debuggable APK",           "Allow Backup",
         "Exported Components",      "Insecure WebView Usage",
-        "Weak Crypto Algorithms",   "Insecure File Permissions",
+        "Weak Crypto Algorithms",
         "APK Signature Schemes",    "Insecure Randomness",
         "Insecure Fingerprint API", "Use of TLS 1.0 or 1.1",
         "Certificate Pinning",      "Kotlin Metadata",
@@ -10398,7 +10478,7 @@ def main():
         "Root Detection",
         # New checks
         "SharedPreferences Encryption", "External Storage Usage",
-        "Hardcoded Keys",           "Cryptographic Key Sizes",
+        "Hardcoded Keys",
         "Biometric Authentication", "FLAG_SECURE Usage",
         "WebView JavaScript Bridges", "Clipboard Security",
         "Keyboard Cache",
