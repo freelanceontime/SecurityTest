@@ -259,7 +259,12 @@ def interactive_frida_monitor(proc, test_name, instructions):
 
             if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
-                print("[*] Draining remaining output buffer...")
+                print("[*] Sending exit command to Frida...")
+                try:
+                    proc.stdin.write('exit\n')
+                    proc.stdin.flush()
+                except:
+                    pass
                 break
 
             # Collect Frida output (platform-specific)
@@ -314,53 +319,30 @@ def interactive_frida_monitor(proc, test_name, instructions):
         print("\n[!] Test interrupted by user")
         pass
 
-    # Drain any remaining buffered output after user stops monitoring
-    # This is critical to capture all output that arrived just before stopping
-    if proc.poll() is None:  # Process still running
-        time.sleep(1)  # Give a moment for final output to buffer
-
-    # Read all remaining lines with a timeout
-    drain_start = time.time()
-    while time.time() - drain_start < 3:  # Max 3 seconds to drain
+    # Wait for Frida to exit gracefully (we sent 'exit' command)
+    # This ensures all output is flushed
+    print("[*] Waiting for Frida to exit and flush output...")
+    try:
+        proc.wait(timeout=5)  # Wait up to 5 seconds for graceful exit
+    except subprocess.TimeoutExpired:
+        print("[!] Frida didn't exit in time, forcing termination...")
+        proc.terminate()
         try:
-            if is_windows:
-                # Windows: non-blocking read with short timeout
-                q = queue.Queue()
-                def read_remaining(q):
-                    try:
-                        line = proc.stdout.readline()
-                        if line:
-                            q.put(line)
-                    except:
-                        pass
-
-                t = threading.Thread(target=read_remaining, args=(q,))
-                t.daemon = True
-                t.start()
-                t.join(timeout=0.2)
-
-                try:
-                    line = q.get_nowait()
-                    if line:
-                        print(line.rstrip())
-                        logs.append(line.rstrip())
-                        continue  # Got a line, keep trying
-                except queue.Empty:
-                    break  # No more lines available
-            else:
-                # Unix: use select
-                fd = proc.stdout.fileno()
-                r, _, _ = select.select([fd], [], [], 0.2)
-                if r:
-                    line = proc.stdout.readline()
-                    if line:
-                        print(line.rstrip())
-                        logs.append(line.rstrip())
-                        continue
-                else:
-                    break  # No more data available
+            proc.wait(timeout=2)
         except:
-            break
+            proc.kill()
+
+    # Now read ALL remaining output (Frida has exited so all output is available)
+    print("[*] Reading all remaining output...")
+    try:
+        # Read everything that's left in the pipe
+        remaining = proc.stdout.read()
+        if remaining:
+            for line in remaining.splitlines():
+                print(line)
+                logs.append(line)
+    except:
+        pass
 
     return logs
 
@@ -8288,12 +8270,8 @@ def check_frida_strict_mode(base, wait_secs=7):
             os.unlink(tmp.name)
             raise RuntimeError("Timed out waiting for hooks installation")
 
-    # 6) Send Enter to resume the spawned app
-    time.sleep(0.5)  # Brief delay to ensure Frida is ready
-    proc.stdin.write('\n')
-    proc.stdin.flush()
-
-    # 7) interactive monitoring with user prompt
+    # 6) Interactive monitoring with user prompt
+    # Note: Frida with -f automatically resumes the spawned app
     instructions = [
         f"App '{spawn_name}' is running with StrictMode monitoring",
         "Navigate through app features and settings",
@@ -8301,15 +8279,23 @@ def check_frida_strict_mode(base, wait_secs=7):
     ]
     logs = interactive_frida_monitor(proc, "STRICTMODE", instructions)
 
-    # 8) cleanup
-    proc.terminate()
+    # 7) cleanup
+    # Frida should already be terminated by interactive_frida_monitor
+    # but ensure it's dead and stop the app
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except:
+            proc.kill()
+
     subprocess.run(
         ['adb','shell','am','force-stop', spawn_name],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     os.unlink(tmp.name)
 
-    # 9) analyze and format the report
+    # 8) analyze and format the report
     if not logs:
         return 'PASS', "No StrictMode activity observed."
 
