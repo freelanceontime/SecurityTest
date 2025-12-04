@@ -8367,9 +8367,30 @@ def check_frida_strict_mode(base, wait_secs=7):
     report_lines = []
 
     if app_strictmode_calls:
-        report_lines.append("<div><strong>WARNING: StrictMode in App Code:</strong> {} call(s)</div><br>".format(len(app_strictmode_calls)))
-        report_lines.append("<details open><summary style='cursor:pointer; font-size:11px; color:#0066cc'>App StrictMode Calls - Click to expand/collapse</summary>")
-        report_lines.append("<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n" + "\n\n".join(app_strictmode_calls) + "\n</pre>")
+        report_lines.append("<div style='background:#ffe6e6; padding:8px; border-left:4px solid #dc3545; margin-bottom:10px;'><strong style='color:#721c24;'>⚠ StrictMode in App Code: {} call(s) detected</strong></div>".format(len(app_strictmode_calls)))
+        report_lines.append("<details open><summary style='cursor:pointer; font-size:12px; color:#0066cc; font-weight:bold;'>📋 App StrictMode Calls - Click to expand/collapse</summary>")
+
+        # Format each call with clear separation and highlighting
+        formatted_calls = []
+        for i, call in enumerate(app_strictmode_calls, 1):
+            call_html = f"<div style='margin-bottom:15px; padding:10px; background:#fff; border:1px solid #ddd;'>"
+            call_html += f"<div style='background:#dc3545; color:white; padding:5px; margin-bottom:5px; font-weight:bold;'>Call #{i}</div>"
+
+            # Highlight app package lines in the backtrace
+            lines = call.split('\n')
+            highlighted_lines = []
+            for line in lines:
+                if app_package and app_package in line:
+                    # Highlight the app code line
+                    highlighted_lines.append(f"<span style='background:#ffeb3b; color:#000; font-weight:bold;'>→ {html.escape(line)}</span>")
+                else:
+                    highlighted_lines.append(html.escape(line))
+
+            call_html += '<pre style="margin:0; font-size:10px; line-height:1.4;">' + '\n'.join(highlighted_lines) + '</pre>'
+            call_html += "</div>"
+            formatted_calls.append(call_html)
+
+        report_lines.append('\n'.join(formatted_calls))
         report_lines.append("</details>")
 
     if library_strictmode_calls:
@@ -8389,14 +8410,15 @@ def check_frida_strict_mode(base, wait_secs=7):
     # Per MASTG-TEST-0264/0263/0265: StrictMode in production is an information leakage risk
     # Library/framework StrictMode calls are out of the developer's control and should not cause failure
     if app_strictmode_calls:
-        severity_note = "<div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107; font-size:11px'>"
-        severity_note += "<strong>WARNING: MASTG Guidance:</strong><br>"
-        severity_note += "StrictMode detected in APP CODE at runtime in production build (MASTG-TEST-0264, MASTG-TEST-0263, MASTG-TEST-0265).<br>"
-        severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br>"
+        severity_note = "<div style='background:#fff3cd; padding:15px; border-left:5px solid #ffc107; font-size:12px; margin-bottom:15px;'>"
+        severity_note += f"<div style='font-size:16px; font-weight:bold; color:#856404; margin-bottom:10px;'>⚠️ WARNING: StrictMode in App Code ({len(app_strictmode_calls)} call{'s' if len(app_strictmode_calls) > 1 else ''})</div>"
+        severity_note += "<strong>MASTG Guidance (MASTG-TEST-0264, MASTG-TEST-0263, MASTG-TEST-0265):</strong><br>"
+        severity_note += "StrictMode detected in <strong>APP CODE</strong> at runtime in production build.<br><br>"
+        severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br><br>"
         severity_note += "<strong>Remediation:</strong><br>"
         severity_note += "• Wrap app StrictMode calls with <code>if (BuildConfig.DEBUG)</code> guards<br>"
         severity_note += "• Ensure StrictMode is completely disabled in release builds<br>"
-        severity_note += "</div><br>"
+        severity_note += "</div>"
 
         return 'FAIL', severity_note + detail
     elif library_strictmode_calls:
