@@ -28,7 +28,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "3.1.0"
+__version__ = "4.2.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 
 ## Add new test as def
@@ -2708,8 +2708,9 @@ def check_deep_link_misconfiguration(manifest):
     Detect intent filters with multiple separate <data> tags that create
     unintended URL patterns via Cartesian product.
 
-    CRITICAL: A host restriction in ANY <data> tag applies to the ENTIRE intent-filter.
-    The vulnerability only exists when NO host is specified anywhere.
+    CRITICAL: Each <data> tag creates a SEPARATE URI pattern in Android.
+    If ANY <data> tag lacks a host attribute, it accepts traffic from ANY domain.
+    ALL <data> tags must have host restrictions for the intent filter to be secure.
 
     Also resolves @string references to accurately assess the configuration.
     """
@@ -5490,6 +5491,16 @@ def check_hardcoded_keys(base):
                             if value.lower() in ['example', 'test', 'default', 'placeholder', 'undefined', 'null']:
                                 continue
                             if re.match(r'^[0-9]+$', value):  # Pure numbers
+                                continue
+
+                            # Skip Android/Material Design component library strings (by name prefix)
+                            # m3c_ = Material 3 Components, abc_ = AppCompat, mtrl_ = Material Design, exo_ = ExoPlayer
+                            if key_name and re.match(r'^(m3c_|abc_|mtrl_|exo_|mr_|cast_|design_|cardview_|recyclerview_)', key_name):
+                                continue
+
+                            # Skip strings containing Android format placeholders (UI localization strings)
+                            # %s, %d, %1$s, %2$d, etc. are used in translated UI strings
+                            if re.search(r'%[0-9]*\$?[sdxfn]', value):
                                 continue
 
                             # Skip Android resource references
@@ -10607,7 +10618,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 3.7.2 – Automated Mobile App Security Test Script
+    AppSec 4.2.2 – Automated Mobile App Security Test Script
 
     Options:
       -f, --file       APK file to decompile into smali
@@ -10625,7 +10636,7 @@ def print_banner():
       python3 securitytest.py --help
 
     Requirements:  These must be on your $PATH
-      [Frida],[apktool],[adb],[checksec],[apksigner],[readelf],[aapt]
+      [Frida],[apktool],[adb],[checksec],[apksigner],[readelf],[aapt],[curl]
 
     """
     print(banner)
