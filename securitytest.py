@@ -1,3 +1,7 @@
+# Disable Python bytecode caching to prevent stale results across multiple test runs
+import sys
+sys.dont_write_bytecode = True
+
 import argparse
 import os
 import re
@@ -7,7 +11,6 @@ import tempfile
 import frida
 import html
 import xml.etree.ElementTree as ET
-import sys
 import time
 import ast
 import select
