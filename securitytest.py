@@ -8151,129 +8151,95 @@ def check_frida_strict_mode(base, wait_secs=7):
 
     # 3) write our Frida JS to a temp file
     jscode = r"""
-    console.log("[*] Frida script starting...");
-
-    function install() {
-      if (Java.available) {
-        console.log("[*] Java is available, entering Java.perform...");
-        Java.perform(function(){
-          console.log("[+] Frida script loaded to detect StrictMode usage and penaltyLog calls.");
-
-          // Helper to get full backtrace using Thread API
-          function getFullBacktrace() {
-            var trace = [];
-            try {
-              var Thread = Java.use("java.lang.Thread");
-              var currentThread = Thread.currentThread();
-              var stackElements = currentThread.getStackTrace();
-
-              for (var i = 0; i < stackElements.length; i++) {
-                var element = stackElements[i];
-                trace.push("  " + element.toString());
-              }
-            } catch (e) {
-              // Fallback: use Exception-based approach
-              try {
-                var Exception = Java.use("java.lang.Exception");
-                var exc = Exception.$new();
-                var stackElements = exc.getStackTrace();
-                for (var i = 0; i < stackElements.length; i++) {
-                  trace.push("  " + stackElements[i].toString());
-                }
-              } catch (e2) {
-                trace.push("  [Could not get backtrace: " + e2 + "]");
-              }
+    Java.perform(function(){
+      // Helper to get full backtrace using Thread API
+      function getFullBacktrace() {
+        var trace = [];
+        try {
+          var Thread = Java.use("java.lang.Thread");
+          var currentThread = Thread.currentThread();
+          var stackElements = currentThread.getStackTrace();
+          for (var i = 0; i < stackElements.length; i++) {
+            trace.push("  " + stackElements[i].toString());
+          }
+        } catch (e) {
+          // Fallback: use Exception-based approach
+          try {
+            var Exception = Java.use("java.lang.Exception");
+            var exc = Exception.$new();
+            var stackElements = exc.getStackTrace();
+            for (var i = 0; i < stackElements.length; i++) {
+              trace.push("  " + stackElements[i].toString());
             }
-            return trace.join("\n");
+          } catch (e2) {
+            trace.push("  [Could not get backtrace: " + e2 + "]");
           }
-
-          // Hook setThreadPolicy
-          try {
-            var SM = Java.use("android.os.StrictMode");
-            SM.setThreadPolicy.overload("android.os.StrictMode$ThreadPolicy").implementation = function(p){
-              console.log("\n[*] StrictMode.setThreadPolicy() called\n");
-              console.log("Backtrace:");
-              console.log(getFullBacktrace());
-              console.log("Policy: " + p + "\n");
-              return this.setThreadPolicy(p);
-            };
-            console.log("[+] Hooked StrictMode.setThreadPolicy()");
-          } catch (e) {
-            console.log("[!] Failed to hook setThreadPolicy: " + e);
-          }
-
-          // Hook setVmPolicy
-          try {
-            SM.setVmPolicy.overload("android.os.StrictMode$VmPolicy").implementation = function(p){
-              console.log("\n[*] StrictMode.setVmPolicy() called\n");
-              console.log("Backtrace:");
-              console.log(getFullBacktrace());
-              console.log("Policy: " + p + "\n");
-              return this.setVmPolicy(p);
-            };
-            console.log("[+] Hooked StrictMode.setVmPolicy()");
-          } catch (e) {
-            console.log("[!] Failed to hook setVmPolicy: " + e);
-          }
-
-          // Hook penaltyLog()
-          try {
-            var B = Java.use("android.os.StrictMode$VmPolicy$Builder");
-            B.penaltyLog.implementation = function(){
-              console.log("\n[*] StrictMode.VmPolicy.Builder.penaltyLog() called\n");
-              console.log("Backtrace:");
-              console.log(getFullBacktrace());
-              console.log("\n");
-              return this.penaltyLog();
-            };
-            console.log("[+] Hooked StrictMode.VmPolicy.Builder.penaltyLog()");
-          } catch (e) {
-            console.log("[!] Failed to hook penaltyLog: " + e);
-          }
-
-          // Hook ThreadPolicy.Builder.penaltyLog() too
-          try {
-            var TB = Java.use("android.os.StrictMode$ThreadPolicy$Builder");
-            TB.penaltyLog.implementation = function(){
-              console.log("\n[*] StrictMode.ThreadPolicy.Builder.penaltyLog() called\n");
-              console.log("Backtrace:");
-              console.log(getFullBacktrace());
-              console.log("\n");
-              return this.penaltyLog();
-            };
-            console.log("[+] Hooked StrictMode.ThreadPolicy.Builder.penaltyLog()");
-          } catch (e) {
-            console.log("[!] Failed to hook ThreadPolicy.penaltyLog: " + e);
-          }
-
-          console.log("[+] All StrictMode hooks installed successfully");
-        });
-      } else {
-        console.log("[*] Java not available yet, retrying in 100ms...");
-        setTimeout(install, 100);
+        }
+        return trace.join("\n");
       }
-    }
 
-    setTimeout(install, 100);
+      var SM = Java.use("android.os.StrictMode");
+
+      // Hook setThreadPolicy
+      SM.setThreadPolicy.overload("android.os.StrictMode$ThreadPolicy").implementation = function(p){
+        console.log("\n[*] StrictMode.setThreadPolicy() called\nBacktrace:\n" + getFullBacktrace() + "\nPolicy: " + p + "\n");
+        return this.setThreadPolicy(p);
+      };
+
+      // Hook setVmPolicy
+      SM.setVmPolicy.overload("android.os.StrictMode$VmPolicy").implementation = function(p){
+        console.log("\n[*] StrictMode.setVmPolicy() called\nBacktrace:\n" + getFullBacktrace() + "\nPolicy: " + p + "\n");
+        return this.setVmPolicy(p);
+      };
+
+      // Hook builder penaltyLog methods
+      try {
+        var VmBuilder = Java.use("android.os.StrictMode$VmPolicy$Builder");
+        VmBuilder.penaltyLog.implementation = function(){
+          console.log("\n[*] StrictMode.VmPolicy.Builder.penaltyLog() called\nBacktrace:\n" + getFullBacktrace() + "\n");
+          return this.penaltyLog();
+        };
+      } catch (e) {}
+
+      try {
+        var ThreadBuilder = Java.use("android.os.StrictMode$ThreadPolicy$Builder");
+        ThreadBuilder.penaltyLog.implementation = function(){
+          console.log("\n[*] StrictMode.ThreadPolicy.Builder.penaltyLog() called\nBacktrace:\n" + getFullBacktrace() + "\n");
+          return this.penaltyLog();
+        };
+      } catch (e) {}
+
+      send("StrictMode hooks installed");
+    });
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
 
-    # 4) launch Frida (send %resume to resume the spawned app)
+    # 4) launch Frida CLI
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
-    try:
-        proc.stdin.write('%resume\n')  # This actually resumes the spawned app
-        proc.stdin.flush()
-    except Exception:
-        pass
 
-    # 5) interactive monitoring with user prompt
+    # 5) wait up to 5s for our "hooks installed" banner
+    start_time = time.time()
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            proc.terminate()
+            os.unlink(tmp.name)
+            raise RuntimeError("Frida died before installing hooks")
+        if "StrictMode hooks installed" in line:
+            break
+        if time.time() - start_time > 5:
+            proc.terminate()
+            os.unlink(tmp.name)
+            raise RuntimeError("Timed out waiting for hooks installation")
+
+    # 6) interactive monitoring with user prompt
     instructions = [
         f"App '{spawn_name}' is running with StrictMode monitoring",
         "Navigate through app features and settings",
@@ -8281,7 +8247,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     ]
     logs = interactive_frida_monitor(proc, "STRICTMODE", instructions)
 
-    # 6) cleanup
+    # 7) cleanup
     proc.terminate()
     subprocess.run(
         ['adb','shell','am','force-stop', spawn_name],
@@ -8289,7 +8255,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     )
     os.unlink(tmp.name)
 
-    # 7) analyze and format the report
+    # 8) analyze and format the report
     if not logs:
         return 'PASS', "No StrictMode activity observed."
 
