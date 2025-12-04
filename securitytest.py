@@ -8128,8 +8128,8 @@ def check_frida_strict_mode(base, wait_secs=7):
     Dynamic StrictMode usage check via USB+Frida CLI (inline JS):
       • Discovers installed package
       • Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      • Immediately sends Enter to unblock the pause
-      • Captures ALL stdout for wait_secs seconds
+      • Sends Enter to resume spawned app
+      • Monitors StrictMode calls with interactive user prompt
       • Terminates Frida, stops app, returns (ok, HTML-report)
     """
     # 1) find the real package name
@@ -8187,9 +8187,23 @@ def check_frida_strict_mode(base, wait_secs=7):
             return trace.join("\n");
           }
 
-          // Hook setVmPolicy
+          // Hook setThreadPolicy
           try {
             var SM = Java.use("android.os.StrictMode");
+            SM.setThreadPolicy.overload("android.os.StrictMode$ThreadPolicy").implementation = function(p){
+              console.log("\n[*] StrictMode.setThreadPolicy() called\n");
+              console.log("Backtrace:");
+              console.log(getFullBacktrace());
+              console.log("Policy: " + p + "\n");
+              return this.setThreadPolicy(p);
+            };
+            console.log("[+] Hooked StrictMode.setThreadPolicy()");
+          } catch (e) {
+            console.log("[!] Failed to hook setThreadPolicy: " + e);
+          }
+
+          // Hook setVmPolicy
+          try {
             SM.setVmPolicy.overload("android.os.StrictMode$VmPolicy").implementation = function(p){
               console.log("\n[*] StrictMode.setVmPolicy() called\n");
               console.log("Backtrace:");
@@ -8245,21 +8259,21 @@ def check_frida_strict_mode(base, wait_secs=7):
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
 
-    # 4) launch Frida, capturing stdin so we can send an Enter
+    # 4) launch Frida (send Enter to resume the spawned app)
     proc = subprocess.Popen(
-        ['frida','-l', tmp.name, '-U','-f', spawn_name],
+        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
+    try:
+        proc.stdin.write('\n')
+        proc.stdin.flush()
+    except Exception:
+        pass
 
-    # 5) Wait a moment for script to load, then unblock the pause
-    time.sleep(0.5)  # Give Frida time to inject the script
-    proc.stdin.write('\n')
-    proc.stdin.flush()
-
-    # 6) interactive monitoring with user prompt
+    # 5) interactive monitoring with user prompt
     instructions = [
         f"App '{spawn_name}' is running with StrictMode monitoring",
         "Navigate through app features and settings",
@@ -8267,7 +8281,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     ]
     logs = interactive_frida_monitor(proc, "STRICTMODE", instructions)
 
-    # 7) cleanup
+    # 6) cleanup
     proc.terminate()
     subprocess.run(
         ['adb','shell','am','force-stop', spawn_name],
@@ -8275,7 +8289,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     )
     os.unlink(tmp.name)
 
-    # 8) analyze and format the report
+    # 7) analyze and format the report
     if not logs:
         return 'PASS', "No StrictMode activity observed."
 
