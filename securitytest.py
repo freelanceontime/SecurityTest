@@ -8262,8 +8262,6 @@ def check_frida_strict_mode(base, wait_secs=7):
     # Check if StrictMode calls are from app code or libraries
     app_package = pkg_prefix if pkg_prefix else spawn_name
     library_packages = [
-        'android.os.',           # Android framework
-        'android.app.',          # Android framework
         'com.google.android.gms',
         'com.google.firebase',
         'androidx.',
@@ -8286,8 +8284,8 @@ def check_frida_strict_mode(base, wait_secs=7):
                 continue
 
             # Found a stack frame - check if it's app code
-            # Skip pure framework calls (android.os, android.app, java.*, com.android.*)
-            if any(fw in line for fw in ['android.os.', 'android.app.', 'java.lang.', 'java.util.', 'com.android.internal.']):
+            # Skip pure framework calls (android.os, android.app, java.*, com.android.*, dalvik.*)
+            if any(fw in line for fw in ['android.os.', 'android.app.', 'java.lang.', 'java.util.', 'com.android.internal.', 'dalvik.']):
                 continue
 
             # Check if this frame is from app package
