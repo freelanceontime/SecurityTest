@@ -2048,14 +2048,23 @@ def check_uri_scheme(manifest):
 
 def check_logging(base):
     """
-    Find and categorize any Log.v/d/i/w/e calls (Java & smali),
-    plus System.out.println and .printStackTrace(). 
-    Returns (ok, details_html, total_hits).
-    Only the first 100 findings are shown; total_hits is the real count.
+    Find logging statements and analyze for potentially sensitive data.
+    Uses keyword detection and entropy analysis to identify risky logs.
+    Returns (ok, details_html, total_sensitive_hits).
     """
 
+    # Sensitive keywords that indicate potentially sensitive data being logged
+    sensitive_keywords = [
+        'password', 'passwd', 'pwd', 'secret', 'token', 'api_key', 'apikey',
+        'auth', 'authorization', 'bearer', 'session', 'cookie', 'credential',
+        'private_key', 'encryption_key', 'master_key', 'salt', 'iv',
+        'ssn', 'social_security', 'credit_card', 'card_number', 'cvv', 'pin',
+        'email', 'phone', 'address', 'location', 'gps', 'latitude', 'longitude',
+        'user_id', 'username', 'account', 'balance', 'payment', 'transaction'
+    ]
+
     # Patterns per level, both Java and smali forms
-    patterns = {
+    log_patterns = {
         "VERBOSE":   [r"Log\.v\(",       r"Landroid/util/Log;->v\("],
         "DEBUG":     [r"Log\.d\(",       r"Landroid/util/Log;->d\("],
         "INFO":      [r"Log\.i\(",       r"Landroid/util/Log;->i\("],
@@ -2065,52 +2074,211 @@ def check_logging(base):
         "STACKTRACE":[r"\.printStackTrace\("]
     }
 
-    # 1) Collect hits per category
-    hits = {lvl: set() for lvl in patterns}
-    for lvl, pats in patterns.items():
-        for pat in pats:
-            for rel in grep_code(base, pat):
-                hits[lvl].add(rel)
+    # Collect stats and potentially sensitive findings
+    stats = {lvl: 0 for lvl in log_patterns}
+    sensitive_findings = []
+    scanned_files = 0
 
-    # 2) Compute totals
-    totals = {lvl: len(hits[lvl]) for lvl in patterns}
-    total_all = sum(totals.values())
-    if total_all == 0:
-        return True, "None", 0
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java')):
+                continue
 
-    # 3) Build a summary line
-    summary = ", ".join(f"{lvl}: {totals[lvl]}" for lvl in patterns)
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+            scanned_files += 1
 
-    # 4) Sample up to 100 findings
-    display = []
-    for lvl in patterns:
-        for rel in sorted(hits[lvl]):
-            display.append((rel, lvl))
-            if len(display) >= 100:
-                break
-        if len(display) >= 100:
-            break
+            try:
+                content = open(path, errors='ignore').read()
+                lines = content.splitlines()
 
-    # 5) Format detail lines
-    lines = [
-        f"<strong>{lvl}</strong> in "
-        f"<a href=\"file://{os.path.abspath(os.path.join(base, rel))}\">"
-        f"{html.escape(rel)}</a>"
-        for rel, lvl in display
-    ]
-    if total_all > len(display):
-        lines.append(f"...and {total_all - len(display)} more")
+                # Check for each log level
+                for lvl, pats in log_patterns.items():
+                    for pat in pats:
+                        for match in re.finditer(pat, content):
+                            stats[lvl] += 1
+
+                            # Extract the line and surrounding context
+                            line_num = content[:match.start()].count('\n')
+                            start_idx = max(0, line_num - 1)
+                            end_idx = min(len(lines), line_num + 3)
+                            context = lines[start_idx:end_idx]
+                            log_line = lines[line_num] if line_num < len(lines) else ""
+
+                            # Check for sensitive keywords in the context
+                            context_text = ' '.join(context).lower()
+                            found_keywords = [kw for kw in sensitive_keywords if kw in context_text]
+
+                            # Check for high-entropy strings (potential secrets/tokens)
+                            high_entropy_strings = []
+                            # Look for quoted strings in the log line
+                            string_matches = re.findall(r'"([^"]{8,})"', log_line)
+                            for s in string_matches:
+                                entropy = calculate_entropy(s)
+                                if entropy > 4.0:  # High entropy threshold
+                                    high_entropy_strings.append((s[:50], round(entropy, 2)))
+
+                            # Only add to findings if sensitive keywords or high entropy detected
+                            if found_keywords or high_entropy_strings:
+                                severity = "High" if found_keywords else "Medium"
+                                reason_parts = []
+                                if found_keywords:
+                                    reason_parts.append(f"Keywords: {', '.join(found_keywords[:3])}")
+                                if high_entropy_strings:
+                                    reason_parts.append(f"High-entropy strings: {len(high_entropy_strings)}")
+
+                                finding = {
+                                    'file': rel,
+                                    'line': line_num + 1,
+                                    'level': lvl,
+                                    'severity': severity,
+                                    'context': context,
+                                    'keywords': found_keywords,
+                                    'high_entropy': high_entropy_strings,
+                                    'reason': ' | '.join(reason_parts)
+                                }
+
+                                # Avoid duplicates
+                                dup_key = (rel, line_num)
+                                if dup_key not in [(f['file'], f['line']) for f in sensitive_findings]:
+                                    sensitive_findings.append(finding)
+
+            except Exception:
+                continue
+
+    # Build response
+    total_logs = sum(stats.values())
+    total_sensitive = len(sensitive_findings)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0003/' target='_blank'>MASTG-TEST-0003: Testing Logs for Sensitive Data</a></div>"
 
-    details = (
-        f"<div><em>Log calls summary:</em> {html.escape(summary)}</div>"
-        + "<br>\n" + "<br>\n".join(lines)
-        + mastg_ref
-    )
+    if total_logs == 0:
+        return True, f"<div>No logging statements detected</div>{mastg_ref}", 0
 
-    # 6) Always FAIL if any logs found
-    return False, details, total_all
+    # Generate summary stats
+    summary_parts = [f"{lvl}: {stats[lvl]}" for lvl in log_patterns if stats[lvl] > 0]
+    summary = ", ".join(summary_parts)
+
+    lines = []
+    lines.append(f"<div style='margin:10px 0'><strong>Total Logs:</strong> {total_logs} ({summary})</div>")
+    lines.append(f"<div style='margin:10px 0'><strong>Potentially Sensitive Logs:</strong> {total_sensitive} (filtered by keywords & entropy)</div>")
+
+    if total_sensitive == 0:
+        lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745;'><strong>✓ No sensitive data detected in logs</strong><br>All log statements appear to be non-sensitive.</div>")
+        return 'WARN', "<br>\n".join(lines) + mastg_ref, 0
+
+    # Generate table ID
+    import random
+    table_id = f"logging_table_{random.randint(1000, 9999)}"
+
+    # Add filter controls
+    lines.append(f'''
+<div style="margin:15px 0; padding:12px; background:#f8f9fa; border-radius:4px;">
+    <div style="display:flex; gap:15px; align-items:center; flex-wrap:wrap;">
+        <div style="display:flex; gap:8px; align-items:center;">
+            <label style="font-weight:600; margin-right:5px;">Filter by Severity:</label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_high" checked onchange="filterLogTable_{table_id}()"> <span style="color:#dc3545; font-weight:600;">High</span></label>
+            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_medium" checked onchange="filterLogTable_{table_id}()"> <span style="color:#ffc107; font-weight:600;">Medium</span></label>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-grow:1;">
+            <label style="font-weight:600;">Search:</label>
+            <input type="text" id="{table_id}_search" placeholder="Search file, level, or reason..."
+                   style="flex-grow:1; max-width:400px; padding:6px 10px; border:1px solid #ced4da; border-radius:4px;"
+                   onkeyup="filterLogTable_{table_id}()">
+        </div>
+    </div>
+</div>
+''')
+
+    # Start table
+    lines.append(f'''
+<div style="overflow-x:auto; margin:10px 0; border:1px solid #dee2e6; border-radius:4px;">
+<table id="{table_id}" style="width:100%; min-width:900px; border-collapse:collapse; font-size:13px; background:white;">
+    <thead>
+        <tr style="background:#343a40; color:white; text-align:left;">
+            <th style="padding:10px; width:40px; border:1px solid #dee2e6;">#</th>
+            <th style="padding:10px; min-width:200px; border:1px solid #dee2e6;">Location</th>
+            <th style="padding:10px; width:80px; border:1px solid #dee2e6;">Level</th>
+            <th style="padding:10px; width:100px; border:1px solid #dee2e6;">Severity</th>
+            <th style="padding:10px; min-width:300px; border:1px solid #dee2e6;">Reason</th>
+            <th style="padding:10px; width:100px; text-align:center; border:1px solid #dee2e6;">Code</th>
+        </tr>
+    </thead>
+    <tbody>
+''')
+
+    # Add findings to table
+    for idx, finding in enumerate(sensitive_findings, 1):
+        severity_color = '#dc3545' if finding['severity'] == 'High' else '#ffc107'
+        level_badge_color = {
+            'VERBOSE': '#6c757d', 'DEBUG': '#17a2b8', 'INFO': '#28a745',
+            'WARN': '#ffc107', 'ERROR': '#dc3545', 'PRINTLN': '#fd7e14', 'STACKTRACE': '#dc3545'
+        }.get(finding['level'], '#6c757d')
+
+        file_path = os.path.abspath(os.path.join(base, finding['file']))
+        context_html = html.escape('\n'.join(finding['context']))
+        code_id = f"{table_id}_code_{idx}"
+
+        lines.append(f'''
+        <tr class="log-row" data-severity="{finding['severity'].lower()}" data-searchtext="{html.escape(finding['file'])} {finding['level']} {html.escape(finding['reason'])}">
+            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">{idx}</td>
+            <td style="padding:8px; border:1px solid #dee2e6;">
+                <a href="file://{html.escape(file_path)}" style="color:#007bff; text-decoration:none;">
+                    {html.escape(finding['file'])}:{finding['line']}
+                </a>
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6;">
+                <span style="background:{level_badge_color}; color:white; padding:3px 8px; border-radius:3px; font-size:11px; font-weight:600;">
+                    {finding['level']}
+                </span>
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6;">
+                <span style="color:{severity_color}; font-weight:600;">{finding['severity']}</span>
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
+                {html.escape(finding['reason'])}
+            </td>
+            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">
+                <button onclick="document.getElementById('{code_id}').style.display = document.getElementById('{code_id}').style.display === 'none' ? 'block' : 'none';"
+                        style="padding:4px 10px; background:#007bff; color:white; border:none; border-radius:3px; cursor:pointer; font-size:11px;">
+                    View
+                </button>
+                <pre id="{code_id}" style="display:none; margin-top:8px; padding:8px; background:#f8f9fa; border:1px solid #dee2e6; border-radius:3px; text-align:left; font-size:11px; white-space:pre-wrap; max-width:500px;">{context_html}</pre>
+            </td>
+        </tr>
+''')
+
+    lines.append('''
+    </tbody>
+</table>
+</div>
+''')
+
+    # Add JavaScript for filtering
+    lines.append(f'''
+<script>
+function filterLogTable_{table_id}() {{
+    const searchText = document.getElementById('{table_id}_search').value.toLowerCase();
+    const showHigh = document.getElementById('{table_id}_filter_high').checked;
+    const showMedium = document.getElementById('{table_id}_filter_medium').checked;
+
+    const rows = document.querySelectorAll('#{table_id} .log-row');
+    rows.forEach(row => {{
+        const severity = row.getAttribute('data-severity');
+        const rowText = row.getAttribute('data-searchtext').toLowerCase();
+
+        const severityMatch = (severity === 'high' && showHigh) || (severity === 'medium' && showMedium);
+        const textMatch = rowText.includes(searchText);
+
+        row.style.display = (severityMatch && textMatch) ? '' : 'none';
+    }});
+}}
+</script>
+''')
+
+    lines.append(mastg_ref)
+
+    return False, "<br>\n".join(lines), total_sensitive
 
 def check_updates(base):
     """
