@@ -1994,89 +1994,50 @@ def check_uri_scheme(manifest):
 
                 # Found a custom scheme - potential OAuth/hijacking vulnerability
                 hosts = scheme_hosts.get(scheme, [])
-                host_display = hosts[0] if hosts else ''
+                host_display = hosts[0] if hosts else 'test'
 
                 is_likely_oauth = any(indicator.lower() in activity_name.lower() or
                                      any(indicator.lower() in h.lower() for h in hosts)
                                      for indicator in oauth_indicators)
 
-                severity = "CRITICAL" if is_likely_oauth else "HIGH"
-                category_type = "BROWSABLE (web-accessible)" if has_browsable else "DEFAULT (intent-accessible)"
-
-                # Generate ADB test command
-                test_uri = f"{scheme}://{host_display or 'test'}"
-                adb_cmd = f"adb shell am start -a android.intent.action.VIEW -d \"{test_uri}\" {pkg}"
-
-                # Show all hosts if multiple
-                if len(hosts) > 1:
-                    host_info = f"<code>{scheme}://</code> with {len(hosts)} host(s): {', '.join(hosts)}"
-                else:
-                    host_info = f"<code>{scheme}://{host_display or '*'}</code>"
-
-                issue = (
-                    f"<strong>{activity_name}</strong>: Custom scheme <code>{scheme}://</code><br>"
-                    f"<strong>Category:</strong> {category_type}<br>"
-                    f"<strong>Severity:</strong> {severity}<br>"
-                    f"<strong>Scheme:</strong> {host_info}<br>"
-                )
-
-                if is_likely_oauth:
-                    issue += (
-                        f"<strong>WARNING: OAuth Indicator Detected:</strong> Activity/host name suggests OAuth usage (Account Takeover Risk)<br>"
-                    )
-
-                issue += (
-                    f"<br><strong>Vulnerability:</strong> Custom URI schemes can be hijacked by malicious apps. "
-                    f"A malicious app can register <code>{scheme}://</code> and intercept intents/tokens.<br>"
-                    f"<br><strong>Attack Scenario (OAuth):</strong><br>"
-                    f"1. Malicious app registers custom scheme <code>{scheme}://</code><br>"
-                    f"2. Malicious app triggers OAuth flow to your app<br>"
-                    f"3. User authenticates with OAuth provider (Google, Facebook, etc.)<br>"
-                    f"4. OAuth token redirects to <code>{scheme}://{host_display or 'oauthredirect'}</code><br>"
-                    f"5. Malicious app receives token and takes over user's account<br>"
-                    f"<br><strong>Attack Scenario (Task Hijacking):</strong><br>"
-                    f"1. Malicious app registers same custom scheme<br>"
-                    f"2. Malicious app sends crafted intent with <code>{scheme}://</code><br>"
-                    f"3. Android may launch malicious app instead of yours<br>"
-                    f"4. User's sensitive data/session exposed to attacker<br>"
-                    f"<br><strong>Test for vulnerability:</strong><br>"
-                    f"<code>{adb_cmd}</code><br>"
-                    f"Or create test app with same custom scheme in manifest:<br>"
-                    f"<pre>&lt;data android:scheme=\"{scheme}\" /&gt;</pre>"
-                    f"Install both apps and test which receives the intent.<br>"
-                    f"<br><strong>Fix (Recommended):</strong> Use HTTPS App Links with android:autoVerify<br>"
-                    f"<pre>&lt;intent-filter android:autoVerify=\"true\"&gt;\n"
-                    f"    &lt;data android:scheme=\"https\"\n"
-                    f"          android:host=\"yourdomain.com\"\n"
-                    f"          android:path=\"/oauth/callback\" /&gt;\n"
-                    f"&lt;/intent-filter&gt;</pre>"
-                    f"<br><strong>Alternative Fix:</strong> Use claimed HTTPS redirect URIs in OAuth config (not custom schemes)<br>"
-                    f"<br><strong>References:</strong><br>"
-                    f"• OWASP MASVS: MASVS-AUTH-1, MASVS-PLATFORM-1<br>"
-                    f"• OAuth 2.0 Security Best Current Practice (RFC)<br>"
-                    f"• Real incidents: Microsoft OAuth phishing, GitHub/Travis CI breaches<br>"
-                    f"• Research: 41.21% of OAuth mobile apps vulnerable<br>"
-                    f"<br><br>"
-                )
-
-                vulnerable_schemes[dedup_key] = issue
+                # Store minimal info: scheme, host, test command, and OAuth flag
+                test_uri = f"{scheme}://{host_display}"
+                vulnerable_schemes[dedup_key] = {
+                    'scheme': scheme,
+                    'host': host_display,
+                    'test_uri': test_uri,
+                    'is_oauth': is_likely_oauth,
+                    'activity': activity_name
+                }
 
     issues = list(vulnerable_schemes.values())
 
     if not issues:
         return True, "No custom URI schemes detected" + mastg_ref, 0
 
-    result = (
-        f"<div class='warning-box'><strong>WARNING: CUSTOM URI SCHEME VULNERABILITY</strong></div>"
-        f"<div><strong>Found {len(issues)} custom scheme(s)</strong></div>"
-        f"<div>Custom schemes can be hijacked by malicious apps (OAuth token theft, task hijacking, data interception)</div><br>"
-        + "".join(issues) +
-        "<div class='info-box'><em> This check detects custom URI schemes with VIEW action (BROWSABLE or DEFAULT category). "
-        "Custom schemes are vulnerable to hijacking attacks where malicious apps register the same scheme. "
-        "Replace with HTTPS App Links with android:autoVerify for secure deep linking. "
-        "http/https scheme issues are checked separately in 'Browsable DeepLinks' test.</em></div>"
-        + mastg_ref
-    )
+    # Get unique schemes (deduplicate)
+    unique_schemes = sorted(set(info['scheme'] for info in issues))
+    oauth_count = sum(1 for info in issues if info['is_oauth'])
+
+    # Build simplified output
+    result = f"<strong>Found {len(issues)} vulnerable custom URI scheme(s)</strong><br><br>"
+
+    # Show all unique schemes
+    result += f"<strong>Schemes:</strong> {', '.join(f'<code>{s}://</code>' for s in unique_schemes)}<br>"
+
+    if oauth_count > 0:
+        result += f"<strong>⚠ OAuth Indicators:</strong> {oauth_count} scheme(s) may be used for OAuth (high risk for account takeover)<br>"
+
+    result += "<br><strong>Vulnerability:</strong> Custom URI schemes can be hijacked by malicious apps to intercept intents/tokens.<br>"
+
+    # Show test command for first scheme
+    first_issue = issues[0]
+    result += f"<br><strong>Test for vulnerability:</strong><br>"
+    result += f"<pre>adb shell am start -a android.intent.action.VIEW -d \"{first_issue['test_uri']}\" {pkg}</pre>"
+    result += f"Or create a test app with the same custom scheme and install both apps to see which receives the intent.<br>"
+
+    result += f"<br><strong>Fix:</strong> Replace custom schemes with HTTPS App Links using <code>android:autoVerify=\"true\"</code>"
+    result += mastg_ref
 
     return False, result, len(issues)
 
@@ -4639,8 +4600,7 @@ def check_weak_crypto(base):
     if not issues:
         return True, f"None{mastg_ref}"
 
-    issues.append(mastg_ref)
-    return False, "<br>\n".join(issues)
+    return False, "<br>\n".join(issues) + mastg_ref
 
     
 def check_kotlin_metadata(base):
@@ -4797,13 +4757,23 @@ def check_package_context(base):
     if not hits:
         return ('PASS', f"createPackageContext usage found in {len(candidate_files)} file(s), but no insecure flag combinations detected" + mastg_ref)
 
-    # Build report with line numbers
+    # Build report with line numbers and code snippets
     lines = []
     lines.append("<div><strong>Insecure createPackageContext usage detected:</strong></div>")
     lines.append("<div style='margin:5px 0; color:#dc2626;'>Using CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY allows loading code without security checks</div>")
     for rel, line_num in sorted(hits):
         full = os.path.abspath(os.path.join(base, rel))
         lines.append(f'<a href="file://{full}:{line_num}">{html.escape(rel)}:{line_num}</a>')
+
+        # Read and show the code snippet
+        try:
+            with open(os.path.join(base, rel), errors='ignore') as f:
+                file_lines = f.readlines()
+                if 0 <= line_num - 1 < len(file_lines):
+                    snippet = file_lines[line_num - 1].strip()
+                    lines.append(f'<pre><code>{html.escape(snippet)}</code></pre>')
+        except:
+            pass
 
     return ('FAIL', "<br>\n".join(lines) + mastg_ref)
 
@@ -5262,27 +5232,48 @@ def check_external_storage(base):
         """Check if path is library code"""
         return any(re.search(pattern, path) for pattern in exclude_patterns)
 
+    def find_matching_lines(base, pattern):
+        """Find files and their matching lines for a pattern"""
+        results = {}
+        for root, _, files in os.walk(base):
+            for f in files:
+                if f.endswith(('.smali', '.xml', '.java')):
+                    try:
+                        full_path = os.path.join(root, f)
+                        rel_path = os.path.relpath(full_path, base)
+                        if is_library_file(rel_path):
+                            continue
+
+                        with open(full_path, errors='ignore') as file:
+                            lines = file.readlines()
+                            for line_num, line in enumerate(lines, 1):
+                                if re.search(pattern, line):
+                                    if rel_path not in results:
+                                        results[rel_path] = []
+                                    results[rel_path].append((line_num, line.strip()))
+                                    break  # Only first match per file
+                    except:
+                        pass
+        return results
+
     risky_findings = {}
     safe_findings = {}
     permission_findings = {}
 
     for pattern, desc in risky_patterns.items():
-        hits = grep_code(base, pattern)
-        app_hits = {h for h in hits if not is_library_file(h)}
-        if app_hits:
-            risky_findings[desc] = app_hits
+        results = find_matching_lines(base, pattern)
+        if results:
+            risky_findings[desc] = results
 
     for pattern, desc in safe_patterns.items():
-        hits = grep_code(base, pattern)
-        app_hits = {h for h in hits if not is_library_file(h)}
-        if app_hits:
-            safe_findings[desc] = app_hits
+        results = find_matching_lines(base, pattern)
+        if results:
+            safe_findings[desc] = results
 
     for pattern, desc in permission_patterns.items():
-        hits = grep_code(base, pattern)
-        app_hits = {h for h in hits if not is_library_file(h)}
-        if app_hits:
-            permission_findings[desc] = app_hits
+        results = find_matching_lines(base, pattern)
+        if results:
+            permission_findings[desc] = results
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>MASTG-TEST-0200: Files Written to External Storage</a></div>"
 
@@ -5300,6 +5291,9 @@ def check_external_storage(base):
             for rel in sorted(hits)[:10]:
                 full = os.path.abspath(os.path.join(base, rel))
                 lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+                # Show code snippet
+                for line_num, code_line in hits[rel]:
+                    lines.append(f'<pre><code>{html.escape(code_line)}</code></pre>')
             if len(hits) > 10:
                 lines.append(f"<div>...and {len(hits) - 10} more</div>")
 
@@ -5311,6 +5305,9 @@ def check_external_storage(base):
             for rel in sorted(hits)[:5]:
                 full = os.path.abspath(os.path.join(base, rel))
                 lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+                # Show code snippet
+                for line_num, code_line in hits[rel]:
+                    lines.append(f'<pre><code>{html.escape(code_line)}</code></pre>')
             if len(hits) > 5:
                 lines.append(f"<div>...and {len(hits) - 5} more</div>")
 
@@ -5321,6 +5318,9 @@ def check_external_storage(base):
             for rel in sorted(hits)[:5]:
                 full = os.path.abspath(os.path.join(base, rel))
                 lines.append(f"<div>{desc} in <a href=\"file://{html.escape(full)}\">{html.escape(rel)}</a></div>")
+                # Show code snippet
+                for line_num, code_line in hits[rel]:
+                    lines.append(f'<pre><code>{html.escape(code_line)}</code></pre>')
             if len(hits) > 5:
                 lines.append(f"<div>...and {len(hits) - 5} more</div>")
 
@@ -10048,7 +10048,9 @@ def check_pending_intent_flags(base):
             rel = os.path.relpath(full, base)
 
             try:
-                content = open(full, errors='ignore').read()
+                lines = open(full, errors='ignore').readlines()
+                content = ''.join(lines)
+
                 has_pending_intent = any(re.search(pat, content) for pat in pending_intent_patterns)
                 if not has_pending_intent:
                     continue
@@ -10057,14 +10059,23 @@ def check_pending_intent_flags(base):
                 has_mutable = re.search(flag_mutable, content)
                 has_update_current = re.search(flag_update, content)
 
+                # Find the line with PendingIntent call for snippet
+                code_snippet = None
+                line_num = 0
+                for i, line in enumerate(lines, 1):
+                    if any(re.search(pat, line) for pat in pending_intent_patterns):
+                        code_snippet = line.strip()
+                        line_num = i
+                        break
+
                 if has_immutable:
                     immutable_files.add(rel)
                 elif has_mutable:
-                    mutable_files.append(rel)
+                    mutable_files.append((rel, line_num, code_snippet))
                 elif has_update_current:
-                    update_current_files.append(rel)
+                    update_current_files.append((rel, line_num, code_snippet))
                 else:
-                    vulnerable_files.append(rel)
+                    vulnerable_files.append((rel, line_num, code_snippet))
             except Exception:
                 pass
 
@@ -10083,18 +10094,22 @@ def check_pending_intent_flags(base):
                 f"<div><strong>CRITICAL: {len(vulnerable_files)} file(s) create PendingIntent without FLAG_IMMUTABLE</strong></div>"
             )
             issues.append("<div>This is required on Android 12+ (API 31+) and prevents intent hijacking.</div>")
-            for rel in vulnerable_files[:15]:
+            for rel, line_num, code_snippet in vulnerable_files[:15]:
                 full = os.path.abspath(os.path.join(base, rel))
                 issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+                if code_snippet:
+                    issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
 
         if mutable_files:
             issues.append(
                 f"<div><strong>CRITICAL: {len(mutable_files)} file(s) explicitly use FLAG_MUTABLE</strong></div>"
             )
             issues.append("<div>Mutable PendingIntents allow the recipient to modify the underlying Intent.</div>")
-            for rel in mutable_files[:15]:
+            for rel, line_num, code_snippet in mutable_files[:15]:
                 full = os.path.abspath(os.path.join(base, rel))
                 issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+                if code_snippet:
+                    issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
 
     if update_current_files:
         if status == 'PASS':
@@ -10105,9 +10120,11 @@ def check_pending_intent_flags(base):
         issues.append(
             "<div>On Android 12+, combine with FLAG_IMMUTABLE: <code>FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE</code></div>"
         )
-        for rel in update_current_files[:15]:
+        for rel, line_num, code_snippet in update_current_files[:15]:
             full = os.path.abspath(os.path.join(base, rel))
             issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            if code_snippet:
+                issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
 
     if immutable_files and status == 'PASS':
         issues.append(f"<div>FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
@@ -11050,7 +11067,7 @@ def main():
                 status = f"FAIL ({cnt})" if cnt > 0 else "FAIL"
                 cls = 'fail'
 
-        elif name == "Biometric Authentication":
+        elif name in ("Biometric Authentication", "Insecure Package Context"):
             # Explicit FAIL (1), no automatic counting from HTML
             if ok == 'PASS':
                 status = "PASS"
