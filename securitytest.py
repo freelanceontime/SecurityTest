@@ -2297,7 +2297,7 @@ def check_logging(base):
                         style="padding:4px 10px; background:#007bff; color:white; border:none; border-radius:3px; cursor:pointer; font-size:11px;">
                     View
                 </button>
-                <pre id="{code_id}" style="display:none; margin-top:8px; padding:8px; background:#f8f9fa; border:1px solid #dee2e6; border-radius:3px; text-align:left; font-size:11px; white-space:pre-wrap; max-width:500px;">{context_html}</pre>
+                <pre id="{code_id}" style="display:none; margin-top:8px; padding:8px; background:#f8f9fa; border:1px solid #dee2e6; border-radius:3px; text-align:left; font-size:11px; white-space:pre-wrap; max-width:500px; color:#212529;">{context_html}</pre>
             </td>
         </tr>
 ''')
@@ -8151,28 +8151,41 @@ def check_frida_strict_mode(base, wait_secs=7):
 
     # 3) write our Frida JS to a temp file
     jscode = r"""
+    console.log("[*] Frida script starting...");
+
     setImmediate(function install(){
+      console.log("[*] setImmediate called, checking Java.available...");
       if (Java.available) {
+        console.log("[*] Java is available, entering Java.perform...");
         Java.perform(function(){
           console.log("[+] Frida script loaded to detect StrictMode usage and penaltyLog calls.");
 
-          // Helper to get full backtrace
+          // Helper to get full backtrace using Thread API
           function getFullBacktrace() {
+            var trace = [];
             try {
               var Thread = Java.use("java.lang.Thread");
-              var stackTrace = Thread.currentThread().getStackTrace();
-              var trace = [];
-              for (var i = 0; i < stackTrace.length; i++) {
-                trace.push("  " + stackTrace[i].toString());
+              var currentThread = Thread.currentThread();
+              var stackElements = currentThread.getStackTrace();
+
+              for (var i = 0; i < stackElements.length; i++) {
+                var element = stackElements[i];
+                trace.push("  " + element.toString());
               }
-              return trace.join("\n");
             } catch (e) {
-              // Fallback to exception-based stack trace
-              var exc = Java.use("java.lang.Exception").$new();
-              var trace = [];
-              exc.getStackTrace().forEach(function(s){ trace.push("  " + s); });
-              return trace.join("\n");
+              // Fallback: use Exception-based approach
+              try {
+                var Exception = Java.use("java.lang.Exception");
+                var exc = Exception.$new();
+                var stackElements = exc.getStackTrace();
+                for (var i = 0; i < stackElements.length; i++) {
+                  trace.push("  " + stackElements[i].toString());
+                }
+              } catch (e2) {
+                trace.push("  [Could not get backtrace: " + e2 + "]");
+              }
             }
+            return trace.join("\n");
           }
 
           // Hook setVmPolicy
