@@ -8060,53 +8060,56 @@ def check_frida_strict_mode(base, wait_secs=7):
         else:
             library_strictmode_calls.append('\n'.join(current_call))
 
+    # MASTG reference
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0264/' target='_blank'>MASTG-TEST-0264: Memory Corruption Bugs</a></div>"
+
     # Build report
     report_lines = []
 
     if app_strictmode_calls:
         report_lines.append("<div><strong>WARNING: StrictMode in App Code:</strong> {} call(s)</div><br>".format(len(app_strictmode_calls)))
-        report_lines.append("<details open><summary style='cursor:pointer'>App StrictMode Calls - Click to expand/collapse</summary>")
-        report_lines.append("<pre style='white-space:pre-wrap; font-size:90%;'>\n" + "\n\n".join(app_strictmode_calls) + "\n</pre>")
+        report_lines.append("<details open><summary style='cursor:pointer; font-size:11px; color:#0066cc'>App StrictMode Calls - Click to expand/collapse</summary>")
+        report_lines.append("<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n" + "\n\n".join(app_strictmode_calls) + "\n</pre>")
         report_lines.append("</details>")
 
     if library_strictmode_calls:
         report_lines.append("<br><div><strong>ℹ StrictMode in Library Code:</strong> {} call(s) (Google/Firebase/Framework)</div><br>".format(len(library_strictmode_calls)))
-        report_lines.append("<details><summary style='cursor:pointer'>Library StrictMode Calls - Click to expand/collapse</summary>")
-        report_lines.append("<pre style='white-space:pre-wrap; font-size:90%;'>\n" + "\n\n".join(library_strictmode_calls) + "\n</pre>")
+        report_lines.append("<details><summary style='cursor:pointer; font-size:11px; color:#0066cc'>Library StrictMode Calls - Click to expand/collapse</summary>")
+        report_lines.append("<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n" + "\n\n".join(library_strictmode_calls) + "\n</pre>")
         report_lines.append("</details>")
 
     report_lines.append(
-        "<br><div><em> Note: StrictMode in library code (Google Play Services, Firebase) is managed by the library vendor "
+        "<br><div style='font-size:11px; color:#666'><em>Note: StrictMode in library code (Google Play Services, Firebase) is managed by the library vendor "
         "and is generally not a concern. Focus on StrictMode calls originating from your app's package.</em></div>"
     )
 
-    detail = "\n".join(report_lines)
+    detail = "\n".join(report_lines) + mastg_ref
 
     # Return FAIL ONLY if StrictMode detected in APP CODE
     # Per MASTG-TEST-0264/0263/0265: StrictMode in production is an information leakage risk
     # Library/framework StrictMode calls are out of the developer's control and should not cause failure
     if app_strictmode_calls:
-        severity_note = "<br><div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107'>"
+        severity_note = "<div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107; font-size:11px'>"
         severity_note += "<strong>WARNING: MASTG Guidance:</strong><br>"
         severity_note += "StrictMode detected in APP CODE at runtime in production build (MASTG-TEST-0264, MASTG-TEST-0263, MASTG-TEST-0265).<br>"
         severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br>"
         severity_note += "<strong>Remediation:</strong><br>"
         severity_note += "• Wrap app StrictMode calls with <code>if (BuildConfig.DEBUG)</code> guards<br>"
         severity_note += "• Ensure StrictMode is completely disabled in release builds<br>"
-        severity_note += "</div>"
+        severity_note += "</div><br>"
 
-        return 'FAIL', severity_note + "<br>" + detail
+        return 'FAIL', severity_note + detail
     elif library_strictmode_calls:
         # Library StrictMode is present but not from app - WARN instead of FAIL
-        info_note = "<br><div style='background:#e3f2fd; padding:10px; border-left:3px solid #2196F3'>"
+        info_note = "<div style='background:#e3f2fd; padding:10px; border-left:3px solid #2196F3; font-size:11px'>"
         info_note += "<strong>ℹ Information:</strong><br>"
         info_note += "StrictMode calls detected in library/framework code only (Google Play Services, Firebase, Android Framework).<br>"
         info_note += "These are managed by the library vendor and are generally not a security concern.<br>"
         info_note += "<strong>Optional:</strong> If you want to suppress these, configure ProGuard/R8:<br>"
         info_note += "<code>-assumenosideeffects class android.os.StrictMode { *; }</code><br>"
-        info_note += "</div>"
+        info_note += "</div><br>"
 
-        return 'WARN', info_note + "<br>" + detail
+        return 'WARN', info_note + detail
     else:
         return 'PASS', detail
 
