@@ -8259,7 +8259,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
 
-    # 4) launch Frida (send Enter to resume the spawned app)
+    # 4) launch Frida (send %resume to resume the spawned app)
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
         stdin=subprocess.PIPE,
@@ -8268,7 +8268,7 @@ def check_frida_strict_mode(base, wait_secs=7):
         text=True
     )
     try:
-        proc.stdin.write('\n')
+        proc.stdin.write('%resume\n')  # This actually resumes the spawned app
         proc.stdin.flush()
     except Exception:
         pass
