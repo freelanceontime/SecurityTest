@@ -2053,14 +2053,68 @@ def check_logging(base):
     Returns (ok, details_html, total_sensitive_hits).
     """
 
-    # Sensitive keywords that indicate potentially sensitive data being logged
+    # Comprehensive sensitive keywords that indicate potentially sensitive data being logged
     sensitive_keywords = [
-        'password', 'passwd', 'pwd', 'secret', 'token', 'api_key', 'apikey',
-        'auth', 'authorization', 'bearer', 'session', 'cookie', 'credential',
-        'private_key', 'encryption_key', 'master_key', 'salt', 'iv',
-        'ssn', 'social_security', 'credit_card', 'card_number', 'cvv', 'pin',
-        'email', 'phone', 'address', 'location', 'gps', 'latitude', 'longitude',
-        'user_id', 'username', 'account', 'balance', 'payment', 'transaction'
+        # Authentication & Access
+        'password', 'passwd', 'pwd', 'pass', 'passphrase', 'passcode',
+        'secret', 'token', 'auth', 'authorization', 'authenticate', 'bearer',
+        'session', 'sessionid', 'sessid', 'jsessionid', 'phpsessid',
+        'cookie', 'csrf', 'xsrf',
+        'credential', 'credentials', 'login', 'signin', 'oauth', 'jwt',
+
+        # API & Cryptographic Keys
+        'api_key', 'apikey', 'api-key', 'api key', 'client_id', 'client_secret',
+        'access_token', 'refresh_token', 'id_token',
+        'private_key', 'privatekey', 'public_key', 'encryption_key', 'decrypt',
+        'master_key', 'secret_key', 'crypto', 'cipher', 'salt', 'iv', 'nonce',
+        'signature', 'hmac', 'rsa', 'aes', 'sha', 'md5',
+
+        # Financial Information
+        'credit_card', 'creditcard', 'card_number', 'cardnumber', 'pan',
+        'cvv', 'cvc', 'cvv2', 'cid', 'expiry', 'expiration',
+        'pin', 'account_number', 'routing_number', 'iban', 'swift',
+        'balance', 'payment', 'transaction', 'amount', 'bank',
+        'debit', 'paypal', 'venmo', 'bitcoin', 'wallet',
+
+        # Personal Identifiable Information (PII)
+        'ssn', 'social_security', 'social security', 'passport', 'license',
+        'dob', 'date_of_birth', 'birthdate', 'birthday',
+        'firstname', 'lastname', 'full_name', 'fullname',
+        'email', 'e-mail', 'phone', 'mobile', 'telephone', 'cell',
+        'address', 'street', 'zipcode', 'postal', 'city',
+        'nationality', 'citizenship', 'tax_id', 'taxpayer',
+
+        # Location Data
+        'location', 'gps', 'latitude', 'longitude', 'lat', 'lng', 'lon',
+        'coordinate', 'geolocation', 'position', 'altitude',
+
+        # User Account Data
+        'user_id', 'userid', 'username', 'user', 'account', 'accountid',
+        'profile', 'device_id', 'deviceid', 'imei', 'imsi', 'serial',
+        'mac_address', 'macaddress', 'uuid', 'guid',
+
+        # Health & Medical
+        'health', 'medical', 'diagnosis', 'prescription', 'patient',
+        'blood', 'allergy', 'medication', 'symptom',
+
+        # Biometric
+        'biometric', 'fingerprint', 'faceprint', 'retina', 'iris',
+        'voiceprint', 'facial',
+
+        # Network & Infrastructure
+        'database', 'db_password', 'connection_string', 'connectionstring',
+        'host', 'server', 'endpoint', 'url', 'uri',
+        'admin', 'root', 'superuser', 'privilege',
+
+        # Sensitive Operations
+        'decrypt', 'decipher', 'unwrap', 'plaintext', 'clear_text',
+        'sensitive', 'confidential', 'private', 'internal',
+        'debug', 'test_mode', 'dev_mode', 'development',
+
+        # Common Sensitive Field Names
+        'accesstoken', 'authtoken', 'securitytoken', 'apitoken',
+        'clientsecret', 'secretkey', 'encryptionkey',
+        'accountnumber', 'cardnumber', 'socialsecurity'
     ]
 
     # Patterns per level, both Java and smali forms
@@ -8101,28 +8155,72 @@ def check_frida_strict_mode(base, wait_secs=7):
       if (Java.available) {
         Java.perform(function(){
           console.log("[+] Frida script loaded to detect StrictMode usage and penaltyLog calls.");
+
+          // Helper to get full backtrace
+          function getFullBacktrace() {
+            try {
+              var Thread = Java.use("java.lang.Thread");
+              var stackTrace = Thread.currentThread().getStackTrace();
+              var trace = [];
+              for (var i = 0; i < stackTrace.length; i++) {
+                trace.push("  " + stackTrace[i].toString());
+              }
+              return trace.join("\n");
+            } catch (e) {
+              // Fallback to exception-based stack trace
+              var exc = Java.use("java.lang.Exception").$new();
+              var trace = [];
+              exc.getStackTrace().forEach(function(s){ trace.push("  " + s); });
+              return trace.join("\n");
+            }
+          }
+
           // Hook setVmPolicy
-          var SM = Java.use("android.os.StrictMode");
-          SM.setVmPolicy.overload("android.os.StrictMode$VmPolicy").implementation = function(p){
-            console.log("\n[*] StrictMode.setVmPolicy() called\n");
-            console.log("Backtrace:");
-            Java.use("java.lang.Exception").$new().getStackTrace().forEach(function(s){
-              console.log("  " + s);
-            });
-            console.log("Policy: " + p + "\n");
-            return this.setVmPolicy(p);
-          };
+          try {
+            var SM = Java.use("android.os.StrictMode");
+            SM.setVmPolicy.overload("android.os.StrictMode$VmPolicy").implementation = function(p){
+              console.log("\n[*] StrictMode.setVmPolicy() called\n");
+              console.log("Backtrace:");
+              console.log(getFullBacktrace());
+              console.log("Policy: " + p + "\n");
+              return this.setVmPolicy(p);
+            };
+            console.log("[+] Hooked StrictMode.setVmPolicy()");
+          } catch (e) {
+            console.log("[!] Failed to hook setVmPolicy: " + e);
+          }
+
           // Hook penaltyLog()
-          var B = Java.use("android.os.StrictMode$VmPolicy$Builder");
-          B.penaltyLog.implementation = function(){
-            console.log("\n[*] StrictMode.VmPolicy.Builder.penaltyLog() called\n");
-            console.log("Backtrace:");
-            Java.use("java.lang.Exception").$new().getStackTrace().forEach(function(s){
-              console.log("  " + s);
-            });
-            console.log("\n");
-            return this.penaltyLog();
-          };
+          try {
+            var B = Java.use("android.os.StrictMode$VmPolicy$Builder");
+            B.penaltyLog.implementation = function(){
+              console.log("\n[*] StrictMode.VmPolicy.Builder.penaltyLog() called\n");
+              console.log("Backtrace:");
+              console.log(getFullBacktrace());
+              console.log("\n");
+              return this.penaltyLog();
+            };
+            console.log("[+] Hooked StrictMode.VmPolicy.Builder.penaltyLog()");
+          } catch (e) {
+            console.log("[!] Failed to hook penaltyLog: " + e);
+          }
+
+          // Hook ThreadPolicy.Builder.penaltyLog() too
+          try {
+            var TB = Java.use("android.os.StrictMode$ThreadPolicy$Builder");
+            TB.penaltyLog.implementation = function(){
+              console.log("\n[*] StrictMode.ThreadPolicy.Builder.penaltyLog() called\n");
+              console.log("Backtrace:");
+              console.log(getFullBacktrace());
+              console.log("\n");
+              return this.penaltyLog();
+            };
+            console.log("[+] Hooked StrictMode.ThreadPolicy.Builder.penaltyLog()");
+          } catch (e) {
+            console.log("[!] Failed to hook ThreadPolicy.penaltyLog: " + e);
+          }
+
+          console.log("[+] All StrictMode hooks installed successfully");
         });
       } else {
         setTimeout(install, 100);
