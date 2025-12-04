@@ -8153,8 +8153,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     jscode = r"""
     console.log("[*] Frida script starting...");
 
-    setImmediate(function install(){
-      console.log("[*] setImmediate called, checking Java.available...");
+    function install() {
       if (Java.available) {
         console.log("[*] Java is available, entering Java.perform...");
         Java.perform(function(){
@@ -8236,9 +8235,12 @@ def check_frida_strict_mode(base, wait_secs=7):
           console.log("[+] All StrictMode hooks installed successfully");
         });
       } else {
+        console.log("[*] Java not available yet, retrying in 100ms...");
         setTimeout(install, 100);
       }
-    });
+    }
+
+    setTimeout(install, 100);
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
@@ -8252,7 +8254,8 @@ def check_frida_strict_mode(base, wait_secs=7):
         text=True
     )
 
-    # 5) immediately unblock the “Press Enter to continue” pause
+    # 5) Wait a moment for script to load, then unblock the pause
+    time.sleep(0.5)  # Give Frida time to inject the script
     proc.stdin.write('\n')
     proc.stdin.flush()
 
