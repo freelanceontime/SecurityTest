@@ -2644,8 +2644,7 @@ def check_browsable_deeplinks(manifest):
                 issues.append(
                     f'<strong>{name}</strong>: <code>{example_scheme}://</code> with NO host restriction → matches any domain<br>'
                     f'<strong>Schemes:</strong> {", ".join(sorted(schemes))}<br>'
-                    f'<strong>Paths:</strong> {", ".join(paths[:3])}'
-                    + (f' <em>(+{len(paths)-3} more)</em>' if len(paths) > 3 else '') + '<br>'
+                    f'<strong>Paths:</strong> {", ".join(paths) if paths else "none"}<br>'
                     f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
                     f'<em>If your app opens, vulnerability confirmed</em><br>'
                     f'<strong>Fix:</strong> Add <code>android:host="your-domain.com"</code> to at least one &lt;data&gt; tag<br><br>'
@@ -2658,13 +2657,18 @@ def check_browsable_deeplinks(manifest):
                 if auto_verify.lower() != 'true':
                     example_path = paths[0] if paths else '/example'
                     example_scheme = 'https' if 'https' in schemes else 'http'
-                    url = f"{example_scheme}://{all_hosts[0]}{example_path}"
-                    cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+
+                    # Build test commands for EACH host
+                    test_commands = []
+                    for host in all_hosts:
+                        url = f"{example_scheme}://{host}{example_path}"
+                        cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                        test_commands.append(f'<pre>{cmd}</pre>')
+
                     issues.append(
                         f'<strong>{name}</strong>: missing <code>android:autoVerify</code> on App Link<br>'
-                        f'<strong>Hosts:</strong> {", ".join(all_hosts[:3])}'
-                        + (f' <em>(+{len(all_hosts)-3} more)</em>' if len(all_hosts) > 3 else '') + '<br>'
-                        f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
+                        f'<strong>Hosts:</strong> {", ".join(all_hosts)}<br>'
+                        f'<strong>Test with:</strong><br>{"".join(test_commands)}'
                         f'<strong>Fix:</strong> Add <code>android:autoVerify="true"</code> to the &lt;intent-filter&gt; tag<br>'
                         f'<strong>Note:</strong> Enables App Links verification - ensures only your verified domain opens the app<br><br>'
                     )
@@ -2674,13 +2678,18 @@ def check_browsable_deeplinks(manifest):
             if wildcard_paths:
                 example_scheme = list(schemes)[0] if schemes else 'http'
                 example_host = all_hosts[0] if all_hosts else 'example.com'
-                sample_path = wildcard_paths[0].replace('.*', 'malicious').replace('*', 'malicious')
-                url = f"{example_scheme}://{example_host}{sample_path}"
-                cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+
+                # Build test commands for EACH wildcard path
+                test_commands = []
+                for wildcard_path in wildcard_paths:
+                    sample_path = wildcard_path.replace('.*', 'malicious').replace('*', 'malicious')
+                    url = f"{example_scheme}://{example_host}{sample_path}"
+                    cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                    test_commands.append(f'<pre>{cmd}</pre>')
+
                 issues.append(
-                    f'<strong>{name}</strong>: pathPattern with wildcards: <code>{", ".join(wildcard_paths[:3])}</code><br>'
-                    + (f'<em>(+{len(wildcard_paths)-3} more)</em><br>' if len(wildcard_paths) > 3 else '')
-                    + f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
+                    f'<strong>{name}</strong>: pathPattern with wildcards: <code>{", ".join(wildcard_paths)}</code><br>'
+                    f'<strong>Test with:</strong><br>{"".join(test_commands)}'
                     f'<strong>Fix:</strong> Use specific paths or validate all path parameters in code<br><br>'
                 )
 
@@ -3275,10 +3284,11 @@ def check_http_uris(base):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0233/' target='_blank'>MASTG-TEST-0233: Hardcoded HTTP URLs</a></div>"
 
     if not hits:
-        return True, f"None{mastg_ref}"
+        return True, f"None{mastg_ref}", 0
 
-    hits.append(mastg_ref)
-    return False, "<br>\n".join(hits)
+    # Return explicit count as third value to avoid automatic counting of mastg_ref links
+    result = "<br>\n".join(hits) + mastg_ref
+    return False, result, len(hits)
 
 def check_debuggable(manifest, base):
     """
@@ -10982,7 +10992,7 @@ def main():
         try:
             if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
                        "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                       "Custom URI Schemes", "Keyboard Cache", "OS Command Injection"):
+                       "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs"):
                 ok, det, cnt = fn()
             elif name == "Task Hijacking":
                 # Task Hijacking returns ('PASS'|'WARN'|'FAIL', details, count)
@@ -11010,7 +11020,7 @@ def main():
         # Determine status and class
         if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
                     "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection"):
+                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs"):
             status = "PASS" if ok else f"FAIL ({cnt})"
             cls = 'pass' if ok else 'fail'
 
