@@ -10701,7 +10701,39 @@ def main():
             shutil.rmtree(base)
         os.makedirs(base)
         print(f"[+] Decompiling {apk_path} → {base}")
-        run_cmd(f"apktool d {apk_path} -o {base} -f")
+
+        # Detect available memory and set appropriate heap size
+        try:
+            if sys.platform.startswith('linux') or sys.platform == 'darwin':
+                # Get available memory in GB
+                mem_info = subprocess.check_output(['free', '-g'], text=True)
+                available_gb = int([line.split()[6] for line in mem_info.split('\n') if 'Mem:' in line][0])
+            elif sys.platform == 'win32':
+                # Windows: use wmic or assume 4GB default
+                try:
+                    mem_info = subprocess.check_output(['wmic', 'OS', 'get', 'FreePhysicalMemory'], text=True)
+                    available_kb = int([line.strip() for line in mem_info.split('\n') if line.strip().isdigit()][0])
+                    available_gb = available_kb // (1024 * 1024)
+                except:
+                    available_gb = 4  # Default fallback
+            else:
+                available_gb = 4  # Default fallback
+
+            # Set heap size to 75% of available memory (max 8GB, min 2GB)
+            heap_size = max(2, min(8, int(available_gb * 0.75)))
+            print(f"[*] Available memory: {available_gb}GB, using {heap_size}GB for decompilation")
+
+            # Set JAVA_OPTS (works on some systems)
+            os.environ['JAVA_OPTS'] = f'-Xmx{heap_size}G'
+
+        except Exception as e:
+            print(f"[!] Could not detect memory, using default 4GB heap: {e}")
+            os.environ['JAVA_OPTS'] = '-Xmx4G'
+
+        # Use single-threaded decompilation (-j 1) for large APKs to avoid OOM errors
+        # Note: If apktool still fails with OOM, manually edit apktool wrapper:
+        #   sudo sed -i 's/exec java /exec java -Xmx6G /' $(which apktool)
+        run_cmd(f"apktool d {apk_path} -o {base} -f -j 1")
         with open(os.path.join(base, '.apk_source'), 'w') as m:
             m.write(apk_path)
     else:
