@@ -2026,7 +2026,12 @@ def check_uri_scheme(manifest):
     result += f"<strong>Schemes:</strong> {', '.join(f'<code>{s}://</code>' for s in unique_schemes)}<br>"
 
     if oauth_count > 0:
-        result += f"<strong>⚠ OAuth Indicators:</strong> {oauth_count} scheme(s) may be used for OAuth (high risk for account takeover)<br>"
+        result += f"<strong>⚠ OAuth Indicators:</strong> {oauth_count} instance(s) may be used for OAuth (high risk for account takeover)<br>"
+
+    result += "<br><strong>Vulnerable Activities:</strong><br>"
+    for info in issues:
+        oauth_marker = " 🔴 OAuth" if info['is_oauth'] else ""
+        result += f"<div>• <code>{info['activity']}</code> - <code>{info['scheme']}://{info['host']}</code>{oauth_marker}</div>"
 
     result += "<br><strong>Vulnerability:</strong> Custom URI schemes can be hijacked by malicious apps to intercept intents/tokens.<br>"
 
@@ -2565,7 +2570,7 @@ def check_browsable_deeplinks(manifest):
             # Issue 1: BROWSABLE filter with no <data> tags
             if not data_elems:
                 url = 'http://example.com/'
-                cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                 issues.append(
                     f'<strong>{name}</strong>: BROWSABLE filter with no &lt;data&gt; → matches everything<br>'
                     f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
@@ -2604,7 +2609,7 @@ def check_browsable_deeplinks(manifest):
                 example_path = paths[0] if paths else '/example'
                 example_scheme = 'https' if 'https' in schemes else 'http'
                 url = f"{example_scheme}://attacker.com{example_path}"
-                cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                 issues.append(
                     f'<strong>{name}</strong>: <code>{example_scheme}://</code> with NO host restriction → matches any domain<br>'
                     f'<strong>Schemes:</strong> {", ".join(sorted(schemes))}<br>'
@@ -2626,7 +2631,7 @@ def check_browsable_deeplinks(manifest):
                     test_commands = []
                     for host in all_hosts:
                         url = f"{example_scheme}://{host}{example_path}"
-                        cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                        cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                         test_commands.append(f'<pre>{cmd}</pre>')
 
                     issues.append(
@@ -2648,7 +2653,7 @@ def check_browsable_deeplinks(manifest):
                 for wildcard_path in wildcard_paths:
                     sample_path = wildcard_path.replace('.*', 'malicious').replace('*', 'malicious')
                     url = f"{example_scheme}://{example_host}{sample_path}"
-                    cmd = f'adb shell am start -a android.intent.action.VIEW -d "{url}"'
+                    cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                     test_commands.append(f'<pre>{cmd}</pre>')
 
                 issues.append(
