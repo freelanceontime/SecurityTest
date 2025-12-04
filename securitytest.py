@@ -2833,10 +2833,7 @@ def check_deep_link_misconfiguration(manifest):
             else:
                 issue_msg += f"<strong>Hosts:</strong> <span style='color:#d32f2f;'>NONE (accepts any domain)</span><br>"
             if paths:
-                issue_msg += f"<strong>Paths:</strong> {', '.join(paths[:3])}"
-                if len(paths) > 3:
-                    issue_msg += f" <em>(+{len(paths)-3} more)</em>"
-                issue_msg += "<br>"
+                issue_msg += f"<strong>Paths:</strong> {', '.join(paths)}<br>"
 
             example_path = paths[0] if paths else '/malicious'
             example_scheme = schemes[0] if schemes else 'https'
@@ -2851,9 +2848,7 @@ def check_deep_link_misconfiguration(manifest):
                 f"android:pathPrefix=\"{paths[0] if paths else '/path'}\" /&gt;</code><br>"
                 f"OR add host to EVERY &lt;data&gt; tag if you need multiple patterns.<br>"
                 f"<br><strong>Test command (verify vulnerability):</strong><br>"
-                f"<pre>adb shell am start -a android.intent.action.VIEW "
-                f"-c android.intent.category.BROWSABLE "
-                f"-d '{example_scheme}://attacker.com{example_path}'</pre>"
+                f"<pre>adb shell am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -n {pkg}/{activity_name} -d '{example_scheme}://attacker.com{example_path}'</pre>"
                 f"<em>If the app opens, vulnerability is confirmed.</em><br>"
                 f"<br><strong>OWASP Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028</a>"
             )
