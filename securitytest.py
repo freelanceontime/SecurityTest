@@ -2285,7 +2285,7 @@ def check_logging(base):
 
     if total_sensitive == 0:
         lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745;'><strong>✓ No sensitive data detected in logs</strong><br>All log statements appear to be non-sensitive.</div>")
-        return 'WARN', "<br>\n".join(lines) + mastg_ref, 0
+        return 'WARN', "\n".join(lines) + mastg_ref, 0
 
     # Generate table ID
     import random
@@ -2398,7 +2398,7 @@ function filterLogTable_{table_id}() {{
 
     lines.append(mastg_ref)
 
-    return False, "<br>\n".join(lines), total_sensitive
+    return False, "\n".join(lines), total_sensitive
 
 def check_updates(base):
     """
