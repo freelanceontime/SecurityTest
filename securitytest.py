@@ -3785,9 +3785,49 @@ def check_safe_browsing(manifest, base):
     if disable_hits:
         links = []
         for rel in sorted(set(disable_hits)):
-            file_rel = rel.split(':', 1)[0]
-            links.append(_first_anchor(file_rel, r'setSafeBrowsingEnabled'))
-        return False, "Safe Browsing disabled at runtime via code:<br>" + "<br>".join(links) + mastg_ref
+            # Extract file path and line number if present
+            if ':' in rel:
+                file_rel, line_str = rel.split(':', 1)
+                line_no = int(line_str)
+            else:
+                file_rel = rel
+                line_no = None
+
+            # Build the clickable link with code snippet
+            full_path = os.path.join(base, file_rel)
+            hit_html = f'<div style="margin-bottom:10px;">'
+            hit_html += f'<div><a href="file://{os.path.abspath(full_path)}'
+            if line_no:
+                hit_html += f':{line_no}'
+            hit_html += f'">{html.escape(file_rel)}'
+            if line_no:
+                hit_html += f':{line_no}'
+            hit_html += '</a></div>'
+
+            # Extract code snippet with context
+            try:
+                with open(full_path, 'r', errors='ignore') as f:
+                    lines = f.readlines()
+                    if line_no and 1 <= line_no <= len(lines):
+                        # Extract 3 lines of context (1 before, match, 1 after)
+                        start = max(0, line_no - 2)
+                        end = min(len(lines), line_no + 2)
+                        context_lines = []
+                        for i in range(start, end):
+                            prefix = "→ " if i == line_no - 1 else "  "
+                            context_lines.append(f"{prefix}{i+1:4d} | {lines[i].rstrip()}")
+                        code_snippet = "\n".join(context_lines)
+                        hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
+            except:
+                pass
+
+            hit_html += '</div>'
+            links.append(hit_html)
+
+        return False, (
+            "<div style='margin-bottom:10px;'><strong>Safe Browsing disabled at runtime via code:</strong></div>"
+            + "".join(links) + mastg_ref
+        )
 
     # 3) Suppressing the interstitial? Only if proceed() is called from the app's onSafeBrowsingHit(...)
     #    Ignore library namespaces to avoid false positives (androidx, chromium, RN, etc.)
@@ -3831,9 +3871,36 @@ def check_safe_browsing(manifest, base):
     if real_suppress:
         links = []
         for rel, start_ln in real_suppress:
-            full = os.path.join(base, rel)
-            links.append(f'<a href="file://{os.path.abspath(full)}:{start_ln}">{html.escape(rel)}:{start_ln}</a>')
-        return False, "App suppresses Safe Browsing interstitial (proceed() inside onSafeBrowsingHit):<br>" + "<br>".join(links) + mastg_ref
+            full_path = os.path.join(base, rel)
+
+            # Build the clickable link with code snippet
+            hit_html = f'<div style="margin-bottom:10px;">'
+            hit_html += f'<div><a href="file://{os.path.abspath(full_path)}:{start_ln}">{html.escape(rel)}:{start_ln}</a></div>'
+
+            # Extract code snippet showing the onSafeBrowsingHit method
+            try:
+                with open(full_path, 'r', errors='ignore') as f:
+                    lines = f.readlines()
+                    if 1 <= start_ln <= len(lines):
+                        # Show method signature and a few lines after
+                        start = max(0, start_ln - 1)
+                        end = min(len(lines), start_ln + 4)
+                        context_lines = []
+                        for i in range(start, end):
+                            prefix = "→ " if i == start_ln - 1 else "  "
+                            context_lines.append(f"{prefix}{i+1:4d} | {lines[i].rstrip()}")
+                        code_snippet = "\n".join(context_lines)
+                        hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
+            except:
+                pass
+
+            hit_html += '</div>'
+            links.append(hit_html)
+
+        return False, (
+            "<div style='margin-bottom:10px;'><strong>App suppresses Safe Browsing interstitial (proceed() inside onSafeBrowsingHit):</strong></div>"
+            + "".join(links) + mastg_ref
+        )
 
     # explicit enable → PASS
     if enable_hits:
@@ -6416,6 +6483,7 @@ def check_biometric_auth(base):
 def check_flag_secure(base, manifest):
     """
     Check if FLAG_SECURE is used to prevent screenshots on sensitive screens.
+    Also detects if FLAG_SECURE is explicitly disabled or cleared.
     """
     flag_secure_patterns = [
         r'FLAG_SECURE',
@@ -6423,9 +6491,22 @@ def check_flag_secure(base, manifest):
         r'setFlags\s*\([^)]*FLAG_SECURE',
     ]
 
+    # Patterns that indicate FLAG_SECURE is being disabled/cleared
+    disabled_patterns = [
+        r'clearFlags\s*\(\s*[^)]*FLAG_SECURE',
+        r'clearFlags\s*\(\s*WindowManager\.LayoutParams\.FLAG_SECURE',
+        r'FLAG_SECURE.*false',
+        r'setFlags\s*\(\s*0\s*,\s*[^)]*FLAG_SECURE',  # setFlags(0, FLAG_SECURE) clears it
+    ]
+
     hits = set()
+    disabled_hits = set()
+
     for pat in flag_secure_patterns:
         hits.update(grep_code(base, pat))
+
+    for pat in disabled_patterns:
+        disabled_hits.update(grep_code(base, pat))
 
     # Count activities in manifest
     try:
@@ -6438,17 +6519,44 @@ def check_flag_secure(base, manifest):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0010/' target='_blank'>MASTG-TEST-0010: Finding Sensitive Information in Auto-Generated Screenshots</a></div>"
 
+    # Check if FLAG_SECURE is being disabled
+    if disabled_hits:
+        lines = [
+            f"<div style='color:#dc3545'><strong>⚠ FLAG_SECURE is being DISABLED/CLEARED in {len(disabled_hits)} file(s)</strong></div>",
+            "<div><strong>Risk:</strong> Explicitly disabling FLAG_SECURE allows screenshots and screen recording of sensitive data.</div>",
+            "<div style='margin-top:8px;'><strong>Files:</strong></div>"
+        ]
+        for rel in sorted(disabled_hits)[:15]:
+            full = os.path.abspath(os.path.join(base, rel))
+            # Try to extract the code snippet
+            try:
+                path = os.path.join(base, rel)
+                with open(path, 'r', errors='ignore') as f:
+                    txt = f.read()
+                    for i, line in enumerate(txt.splitlines(), 1):
+                        if any(re.search(pat, line) for pat in disabled_patterns):
+                            lines.append(f'<div style="margin-top:5px;"><a href="file://{html.escape(full)}:{i}">{html.escape(rel)}:{i}</a>')
+                            lines.append(f'<pre style="background:#f8f9fa; padding:6px; margin-top:2px; font-size:10px; color:#212529; border-left:3px solid #dc3545;">→ {html.escape(line.strip())}</pre></div>')
+                            break
+            except:
+                lines.append(f'<div><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
+
+        lines.append(mastg_ref)
+        return 'FAIL', "<br>\n".join(lines)
+
+    # Normal FLAG_SECURE usage detected
     if hits:
         lines = [
-            f"<div> FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
+            f"<div>✓ FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
         ]
         for rel in sorted(hits)[:15]:
             full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            lines.append(f'<div><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
         lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
-    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em> Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>{mastg_ref}"
+    # No FLAG_SECURE usage at all
+    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em>Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>{mastg_ref}"
 
 def check_webview_javascript_bridge(base):
     """
