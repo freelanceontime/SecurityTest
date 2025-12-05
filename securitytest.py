@@ -2193,8 +2193,15 @@ def check_logging(base):
 
                             # Extract the line and surrounding context
                             line_num = content[:match.start()].count('\n')
-                            start_idx = max(0, line_num - 1)
-                            end_idx = min(len(lines), line_num + 3)
+
+                            # Use larger context window for smali files (const-string instructions can be far from Log calls)
+                            if fn.endswith('.smali'):
+                                start_idx = max(0, line_num - 20)
+                                end_idx = min(len(lines), line_num + 5)
+                            else:
+                                start_idx = max(0, line_num - 2)
+                                end_idx = min(len(lines), line_num + 3)
+
                             context = lines[start_idx:end_idx]
                             log_line = lines[line_num] if line_num < len(lines) else ""
 
@@ -2220,12 +2227,32 @@ def check_logging(base):
                                 if high_entropy_strings:
                                     reason_parts.append(f"High-entropy strings: {len(high_entropy_strings)}")
 
+                                # For smali files, create a focused display context showing only relevant lines
+                                display_context = context
+                                if fn.endswith('.smali') and len(context) > 10:
+                                    # Filter to show only: const-string lines, invoke-static Log lines, and lines with keywords
+                                    relevant_lines = []
+                                    for i, ctx_line in enumerate(context):
+                                        line_lower = ctx_line.lower()
+                                        # Include if it's a const-string, Log call, or contains sensitive keywords
+                                        if ('const-string' in ctx_line or
+                                            'Log;->' in ctx_line or
+                                            any(kw in line_lower for kw in found_keywords)):
+                                            # Add line number prefix for context
+                                            actual_line_no = start_idx + i + 1
+                                            prefix = "→ " if actual_line_no == line_num + 1 else "  "
+                                            relevant_lines.append(f"{prefix}L{actual_line_no}: {ctx_line.strip()}")
+
+                                    # If we found relevant lines, use them; otherwise fall back to full context
+                                    if relevant_lines:
+                                        display_context = relevant_lines
+
                                 finding = {
                                     'file': rel,
                                     'line': line_num + 1,
                                     'level': lvl,
                                     'severity': severity,
-                                    'context': context,
+                                    'context': display_context,
                                     'keywords': found_keywords,
                                     'high_entropy': high_entropy_strings,
                                     'reason': ' | '.join(reason_parts)
