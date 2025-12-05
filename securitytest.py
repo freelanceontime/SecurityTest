@@ -199,7 +199,7 @@ def check_for_updates():
 
     print()  # Empty line for spacing
 
-def interactive_frida_monitor(proc, test_name, instructions):
+def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=False):
     """
     Interactive Frida log collection with user prompt.
     Replaces hardcoded timeouts with "Press ENTER when done" workflow.
@@ -209,6 +209,7 @@ def interactive_frida_monitor(proc, test_name, instructions):
         proc: Frida subprocess
         test_name: Name of test (e.g., "CERTIFICATE PINNING")
         instructions: List of strings with testing instructions
+        send_exit_on_stop: If True, send 'exit' command to Frida and wait for graceful exit (needed for some tests)
 
     Returns:
         List of collected log lines (raw, not escaped)
@@ -259,12 +260,13 @@ def interactive_frida_monitor(proc, test_name, instructions):
 
             if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
-                print("[*] Sending exit command to Frida...")
-                try:
-                    proc.stdin.write('exit\n')
-                    proc.stdin.flush()
-                except:
-                    pass
+                if send_exit_on_stop:
+                    print("[*] Sending exit command to Frida...")
+                    try:
+                        proc.stdin.write('exit\n')
+                        proc.stdin.flush()
+                    except:
+                        pass
                 break
 
             # Collect Frida output (platform-specific)
@@ -319,30 +321,36 @@ def interactive_frida_monitor(proc, test_name, instructions):
         print("\n[!] Test interrupted by user")
         pass
 
-    # Wait for Frida to exit gracefully (we sent 'exit' command)
-    # This ensures all output is flushed
-    print("[*] Waiting for Frida to exit and flush output...")
-    try:
-        proc.wait(timeout=5)  # Wait up to 5 seconds for graceful exit
-    except subprocess.TimeoutExpired:
-        print("[!] Frida didn't exit in time, forcing termination...")
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except:
-            proc.kill()
+    # Only do graceful exit and output draining if requested
+    if send_exit_on_stop:
+        # Give a moment for any remaining daemon threads to finish their timeout and exit
+        # This prevents "could not acquire lock" errors at interpreter shutdown
+        time.sleep(0.3)
 
-    # Now read ALL remaining output (Frida has exited so all output is available)
-    print("[*] Reading all remaining output...")
-    try:
-        # Read everything that's left in the pipe
-        remaining = proc.stdout.read()
-        if remaining:
-            for line in remaining.splitlines():
-                print(line)
-                logs.append(line)
-    except:
-        pass
+        # Wait for Frida to exit gracefully (we sent 'exit' command)
+        # This ensures all output is flushed
+        print("[*] Waiting for Frida to exit and flush output...")
+        try:
+            proc.wait(timeout=5)  # Wait up to 5 seconds for graceful exit
+        except subprocess.TimeoutExpired:
+            print("[!] Frida didn't exit in time, forcing termination...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except:
+                proc.kill()
+
+        # Now read ALL remaining output (Frida has exited so all output is available)
+        print("[*] Reading all remaining output...")
+        try:
+            # Read everything that's left in the pipe
+            remaining = proc.stdout.read()
+            if remaining:
+                for line in remaining.splitlines():
+                    print(line)
+                    logs.append(line)
+        except:
+            pass
 
     return logs
 
@@ -8277,7 +8285,7 @@ def check_frida_strict_mode(base, wait_secs=7):
         "Navigate through app features and settings",
         "Watch for StrictMode policy violations below"
     ]
-    logs = interactive_frida_monitor(proc, "STRICTMODE", instructions)
+    logs = interactive_frida_monitor(proc, "STRICTMODE", instructions, send_exit_on_stop=True)
 
     # 7) cleanup
     # Frida should already be terminated by interactive_frida_monitor
