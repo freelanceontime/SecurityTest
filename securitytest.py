@@ -11643,7 +11643,10 @@ def main():
         sections += "<h4>Other Checks</h4>\n" + ''.join(ungrouped)
 
     # 10) Write out HTML report with metadata
-    with open('report.html', 'w') as f:
+    # Create report filename with package name
+    report_filename = f"{metadata['package']}.report.html" if metadata['package'] else 'report.html'
+
+    with open(report_filename, 'w') as f:
         f.write(HTML_TEMPLATE.format(
             package=metadata['package'],
             version_name=metadata['version_name'],
@@ -11653,7 +11656,7 @@ def main():
             finish_time=finish_time_str,
             sections=sections
         ))
-    print('[+] Report generated: report.html')
+    print(f'[+] Report generated: {report_filename}')
 
     # Display summary
     duration = finish_timestamp - start_timestamp
