@@ -7390,13 +7390,30 @@ def check_tls_versions(base):
         suspicious = any(re.search(p, txt) for p in use_patterns)
 
         if suspicious and not is_lib:
-            # find a line number to link
+            # find a line number to link and extract code snippet
             line_no = None
-            for i, line in enumerate(txt.splitlines(), 1):
+            code_snippet = ""
+            lines = txt.splitlines()
+            for i, line in enumerate(lines, 1):
                 if ('TLSv1' in line) or ('TLSv1.1' in line) or re.search(r'setEnabledProtocols|setProtocols|SSLContext\.getInstance', line):
-                    line_no = i; break
+                    line_no = i
+                    # Extract 3 lines of context (before, match, after)
+                    start = max(0, i - 2)
+                    end = min(len(lines), i + 2)
+                    context_lines = []
+                    for j in range(start, end):
+                        prefix = "→ " if j == i - 1 else "  "
+                        context_lines.append(f"{prefix}{j+1:4d} | {lines[j]}")
+                    code_snippet = "\n".join(context_lines)
+                    break
+
             href = f'file://{os.path.abspath(path)}' + (f':{line_no}' if line_no else '')
-            hard_hits.append(f'<a href="{href}">{html.escape(rel)}{":" + str(line_no) if line_no else ""}</a>')
+            hit_html = f'<div style="margin-bottom:10px;">'
+            hit_html += f'<div><a href="{href}">{html.escape(rel)}{":" + str(line_no) if line_no else ""}</a></div>'
+            if code_snippet:
+                hit_html += f'<pre style="background:#f5f5f5; padding:6px; margin-top:4px; font-size:10px; border-left:3px solid #dc3545; overflow-x:auto;">{html.escape(code_snippet)}</pre>'
+            hit_html += '</div>'
+            hard_hits.append(hit_html)
         else:
             soft_hits.append(rel)
 
@@ -7404,8 +7421,8 @@ def check_tls_versions(base):
 
     if hard_hits:
         return False, (
-            "App code may use legacy TLS:\n"
-            "• " + "<br>• ".join(hard_hits) + mastg_ref
+            "<div style='margin-bottom:10px;'><strong>App code may use legacy TLS:</strong></div>"
+            + "".join(hard_hits) + mastg_ref
         )
 
     # No app-owned risky usage; only library mentions or nothing
@@ -7629,6 +7646,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     # Parse collected logs for verdicts
     legacy_neg = any('VERDICT: LEGACY_NEGOTIATED' in line for line in logs)
     legacy_enabled = any('VERDICT: LEGACY_ENABLED_BY_APP' in line for line in logs)
+    tls_v1_context = sum(1 for line in logs if 'SSLContext.getInstance("TLSv1")' in line)
 
     # 6) cleanup
     proc.terminate()
@@ -7649,11 +7667,16 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     summary_parts = []
 
     if legacy_neg:
-        summary_parts.append("<div style='color:#dc3545'><strong>TLS 1.0/1.1 WAS NEGOTIATED</strong></div>")
+        summary_parts.append("<div style='color:#dc3545'><strong>⚠ CRITICAL: TLS 1.0/1.1 WAS NEGOTIATED</strong></div>")
         summary_parts.append("<div>The app successfully connected using legacy TLS during this test session!</div>")
     elif legacy_enabled:
-        summary_parts.append("<div style='color:#ff8c00'><strong>TLS 1.0/1.1 IS ENABLED</strong></div>")
-        summary_parts.append("<div>The app explicitly enables legacy TLS versions (via setEnabledProtocols) but didn't negotiate them during this session</div>")
+        summary_parts.append("<div style='color:#dc3545'><strong>⚠ WARNING: TLS 1.0/1.1 IS ENABLED BY APP</strong></div>")
+        summary_parts.append("<div><strong>Vulnerability:</strong> The app explicitly enables legacy TLS versions (TLSv1/TLSv1.1) via <code>setEnabledProtocols()</code> or <code>SSLContext.getInstance(\"TLSv1\")</code></div>")
+        if tls_v1_context > 0:
+            summary_parts.append(f"<div style='margin-top:5px;'>• Detected <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code></div>")
+        summary_parts.append("<div style='margin-top:5px;'><strong>Risk:</strong> Even though modern TLS 1.3 was negotiated during this test, enabling legacy protocols makes the app vulnerable to:</div>")
+        summary_parts.append("<ul style='margin:5px 0 5px 20px;'><li>MitM downgrade attacks - attacker can force TLS 1.0/1.1 connection</li><li>Known TLS 1.0/1.1 vulnerabilities (BEAST, POODLE, etc.)</li></ul>")
+        summary_parts.append("<div><strong>Observed:</strong> All {0} connections used TLS 1.3 because servers rejected legacy versions, but app code still allows them.</div>".format(okhttp_calls + jsse_calls))
     else:
         # Check if actual network connections happened
         if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
@@ -7711,8 +7734,16 @@ def check_frida_tls_negotiation(base, wait_secs=12):
             "</div>" + mastg_ref
         )
 
-    # Return INFO status (not PASS/FAIL) - this is observational data
-    return ('INFO', detail)
+    # Return appropriate status based on findings
+    if legacy_neg:
+        # Critical: App actually negotiated legacy TLS
+        return ('FAIL', detail)
+    elif legacy_enabled:
+        # Warning: App enables legacy TLS (vulnerable to downgrade attacks)
+        return ('WARN', detail)
+    else:
+        # Info: Observational data about TLS usage
+        return ('INFO', detail)
 
 def check_frida_pinning(base, wait_secs=15):
     """
