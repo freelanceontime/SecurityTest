@@ -7411,7 +7411,7 @@ def check_tls_versions(base):
             hit_html = f'<div style="margin-bottom:10px;">'
             hit_html += f'<div><a href="{href}">{html.escape(rel)}{":" + str(line_no) if line_no else ""}</a></div>'
             if code_snippet:
-                hit_html += f'<pre style="background:#f5f5f5; padding:6px; margin-top:4px; font-size:10px; border-left:3px solid #dc3545; overflow-x:auto;">{html.escape(code_snippet)}</pre>'
+                hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
             hit_html += '</div>'
             hard_hits.append(hit_html)
         else:
