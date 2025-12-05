@@ -8792,9 +8792,24 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         # Show sample of captured logs
         report_lines.append("<details><summary style='cursor:pointer; color:#0066cc; font-weight:bold; margin:10px 0;'>📋 Sample Captured Logs (first 10)</summary>")
         report_lines.append("<div style='background:#f8f9fa; padding:10px; margin:10px 0; border:1px solid #dee2e6; font-family:monospace; font-size:11px;'>")
-        for log in captured_logs[:10]:
+        for idx, log in enumerate(captured_logs[:10], 1):
             level_color = {'VERBOSE':'#6c757d', 'DEBUG':'#17a2b8', 'INFO':'#28a745', 'WARN':'#ffc107', 'ERROR':'#dc3545'}.get(log['level'], '#000')
-            report_lines.append(f"<div style='margin:2px 0;'><span style='color:{level_color}; font-weight:bold;'>{log['level']}</span> <span style='color:#495057;'>{html.escape(log['tag'])}</span>: {html.escape(log['msg'])}</div>")
+            msg = log['msg']
+
+            # Check if message is long
+            if len(msg) > 100:
+                preview = msg[:100] + '...'
+                msg_id = f"sample_log_{idx}"
+                report_lines.append(f"<div style='margin:5px 0; padding:5px; border-left:2px solid {level_color};'>")
+                report_lines.append(f"<div><span style='color:{level_color}; font-weight:bold;'>{log['level']}</span> <span style='color:#495057;'>{html.escape(log['tag'])}</span></div>")
+                report_lines.append(f"<div style='margin-top:3px;'>{html.escape(preview)}</div>")
+                report_lines.append(f"<button onclick=\"document.getElementById('{msg_id}').style.display = document.getElementById('{msg_id}').style.display === 'none' ? 'block' : 'none';\" ")
+                report_lines.append(f"style='margin-top:3px; padding:2px 6px; background:#6c757d; color:white; border:none; border-radius:2px; cursor:pointer; font-size:9px;'>")
+                report_lines.append("Show Full</button>")
+                report_lines.append(f"<pre id='{msg_id}' style='display:none; margin-top:5px; padding:5px; background:#fff; border:1px solid #dee2e6; font-size:10px; white-space:pre-wrap; max-height:200px; overflow-y:auto;'>{html.escape(msg)}</pre>")
+                report_lines.append("</div>")
+            else:
+                report_lines.append(f"<div style='margin:2px 0;'><span style='color:{level_color}; font-weight:bold;'>{log['level']}</span> <span style='color:#495057;'>{html.escape(log['tag'])}</span>: {html.escape(msg)}</div>")
         report_lines.append("</div></details>")
 
         return 'PASS', "\n".join(report_lines) + mastg_ref
@@ -8820,7 +8835,29 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; text-align:center;'>{idx}</td>")
         report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6;'><span style='background:{level_color}; color:white; padding:2px 6px; border-radius:3px; font-size:10px;'>{log['level']}</span></td>")
         report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; font-family:monospace;'>{html.escape(log['tag'])}</td>")
-        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; font-family:monospace; max-width:400px; word-break:break-word;'>{html.escape(log['msg'])}</td>")
+
+        # Message cell with expandable content for long messages
+        msg = log['msg']
+        msg_lines = msg.split('\n')
+        is_long = len(msg_lines) > 2 or len(msg) > 150
+
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; font-family:monospace; max-width:400px;'>")
+
+        if is_long:
+            # Show preview + expand button
+            preview = msg_lines[0][:150] + ('...' if len(msg_lines[0]) > 150 or len(msg_lines) > 1 else '')
+            msg_id = f"log_msg_{idx}"
+
+            report_lines.append(f"<div>{html.escape(preview)}</div>")
+            report_lines.append(f"<button onclick=\"document.getElementById('{msg_id}').style.display = document.getElementById('{msg_id}').style.display === 'none' ? 'block' : 'none';\" ")
+            report_lines.append(f"style='margin-top:4px; padding:3px 8px; background:#007bff; color:white; border:none; border-radius:3px; cursor:pointer; font-size:10px;'>")
+            report_lines.append("Show Full</button>")
+            report_lines.append(f"<pre id='{msg_id}' style='display:none; margin-top:8px; padding:8px; background:#f8f9fa; border:1px solid #dee2e6; border-radius:3px; font-size:10px; white-space:pre-wrap; word-break:break-word; max-height:300px; overflow-y:auto;'>{html.escape(msg)}</pre>")
+        else:
+            # Short message - display directly
+            report_lines.append(f"<div style='word-break:break-word;'>{html.escape(msg)}</div>")
+
+        report_lines.append("</td>")
         report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6;'><span style='color:#dc3545; font-weight:bold;'>{', '.join(log['keywords'])}</span></td>")
         report_lines.append("</tr>")
 
