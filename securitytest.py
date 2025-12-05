@@ -8411,7 +8411,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     # Library/framework StrictMode calls are out of the developer's control and should not cause failure
     if app_strictmode_calls:
         severity_note = "<div style='background:#fff3cd; padding:15px; border-left:5px solid #ffc107; font-size:12px; margin-bottom:15px;'>"
-        severity_note += f"<div style='font-size:16px; font-weight:bold; color:#856404; margin-bottom:10px;'>⚠️ WARNING: StrictMode in App Code ({len(app_strictmode_calls)} call{'s' if len(app_strictmode_calls) > 1 else ''})</div>"
+        severity_note += f"<div style='font-size:16px; font-weight:bold; color:#856404; margin-bottom:10px;'>WARNING: StrictMode in App Code ({len(app_strictmode_calls)} call{'s' if len(app_strictmode_calls) > 1 else ''})</div>"
         severity_note += "<strong>MASTG Guidance (MASTG-TEST-0264, MASTG-TEST-0263, MASTG-TEST-0265):</strong><br>"
         severity_note += "StrictMode detected in <strong>APP CODE</strong> at runtime in production build.<br><br>"
         severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br><br>"
