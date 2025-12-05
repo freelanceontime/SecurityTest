@@ -2089,8 +2089,41 @@ def check_logging(base):
     """
     Find logging statements and analyze for potentially sensitive data.
     Uses keyword detection and entropy analysis to identify risky logs.
+    Only scans app code (not third-party libraries or framework code).
     Returns (ok, details_html, total_sensitive_hits).
     """
+
+    # Get app package name from AndroidManifest.xml
+    app_package = None
+    manifest_path = os.path.join(base, 'AndroidManifest.xml')
+    if os.path.exists(manifest_path):
+        try:
+            tree = ET.parse(manifest_path)
+            root = tree.getroot()
+            app_package = root.attrib.get('package', '')
+        except:
+            pass
+
+    # Third-party library packages to skip (not developer-controlled code)
+    library_packages = [
+        'com/google/android/gms',      # Google Play Services
+        'com/google/firebase',         # Firebase
+        'androidx/',                   # AndroidX
+        'android/support/',            # Android Support Library
+        'com/facebook/',               # Facebook SDK
+        'io/fabric/',                  # Fabric/Crashlytics
+        'com/squareup/',               # Square libraries (OkHttp, Retrofit, etc.)
+        'com/google/gson',             # Gson
+        'kotlin/',                     # Kotlin stdlib
+        'kotlinx/',                    # Kotlin extensions
+        'org/jetbrains/',              # JetBrains libraries
+        'com/android/volley',          # Volley
+        'com/google/common',           # Guava
+        'org/apache/',                 # Apache libraries
+        'io/reactivex/',               # RxJava
+        'com/bumptech/glide',          # Glide
+        'com/airbnb/lottie',           # Lottie
+    ]
 
     # Comprehensive sensitive keywords that indicate potentially sensitive data being logged
     sensitive_keywords = [
@@ -2179,6 +2212,16 @@ def check_logging(base):
 
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
+
+            # Skip third-party library code (not developer-controlled)
+            rel_normalized = rel.replace('\\', '/')
+            if any(lib in rel_normalized for lib in library_packages):
+                continue
+
+            # Skip Android framework code
+            if any(fw in rel_normalized for fw in ['android/', 'java/', 'javax/', 'dalvik/', 'com/android/internal/']):
+                continue
+
             scanned_files += 1
 
             try:
@@ -2280,7 +2323,7 @@ def check_logging(base):
     summary = ", ".join(summary_parts)
 
     lines = []
-    lines.append(f"<div style='margin:10px 0'><strong>Total Logs:</strong> {total_logs} ({summary})</div>")
+    lines.append(f"<div style='margin:10px 0'><strong>Total Logs:</strong> {total_logs} ({summary}) <span style='color:#6c757d; font-size:12px;'>(app code only, excluding third-party libraries)</span></div>")
     lines.append(f"<div style='margin:10px 0'><strong>Potentially Sensitive Logs:</strong> {total_sensitive} (filtered by keywords & entropy)</div>")
 
     if total_sensitive == 0:
@@ -8610,6 +8653,191 @@ def check_frida_strict_mode(base, wait_secs=7):
         return 'PASS', detail
 
 
+def check_frida_dynamic_logging(base, wait_secs=15):
+    """
+    Dynamic logging monitor via Frida that captures ALL Log.* calls in real-time.
+    Hooks android.util.Log methods (v, d, i, w, e) to show actual logged messages.
+    Filters results for sensitive keywords to identify credential/token leakage.
+    """
+    # 1) Find the installed package name
+    manifest = os.path.join(base, 'AndroidManifest.xml')
+    pkg_prefix = ET.parse(manifest).getroot().attrib.get('package','')
+    out = subprocess.check_output(
+        ['adb','shell','pm','list','packages', pkg_prefix], text=True
+    )
+    pkgs = [l.split(':',1)[1] for l in out.splitlines() if l.startswith('package:')]
+    if not pkgs:
+        raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
+    spawn_name = pkgs[0]
+
+    # 2) Force-stop any running instance
+    subprocess.run(
+        ['adb','shell','am','force-stop', spawn_name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
+    # 3) Frida script to hook all Log methods
+    jscode = r"""
+    Java.perform(function(){
+      var Log = Java.use("android.util.Log");
+
+      // Hook Log.v (VERBOSE)
+      Log.v.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
+        send({level:"VERBOSE", tag:tag, msg:msg});
+        return this.v(tag, msg);
+      };
+
+      // Hook Log.d (DEBUG)
+      Log.d.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
+        send({level:"DEBUG", tag:tag, msg:msg});
+        return this.d(tag, msg);
+      };
+
+      // Hook Log.i (INFO)
+      Log.i.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
+        send({level:"INFO", tag:tag, msg:msg});
+        return this.i(tag, msg);
+      };
+
+      // Hook Log.w (WARN)
+      Log.w.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
+        send({level:"WARN", tag:tag, msg:msg});
+        return this.w(tag, msg);
+      };
+
+      // Hook Log.e (ERROR)
+      Log.e.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
+        send({level:"ERROR", tag:tag, msg:msg});
+        return this.e(tag, msg);
+      };
+
+      console.log("[*] Dynamic logging monitor active - all Log.* calls will be captured");
+    });
+    """
+
+    # 4) Write script to temp file
+    tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
+    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+
+    # 5) Launch Frida
+    proc = subprocess.Popen(
+        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+
+    # 6) Interactive collection with user prompt
+    instructions = [
+        f"App '{spawn_name}' is running with dynamic logging monitor",
+        "Navigate through the app and trigger features that might log data",
+        "Login, authentication, API calls, data operations, etc.",
+        "All Log.v/d/i/w/e calls will be captured in real-time..."
+    ]
+    logs = interactive_frida_monitor(proc, "DYNAMIC LOGGING", instructions, send_exit_on_stop=True)
+
+    # 7) Parse captured logs for sensitive data
+    sensitive_keywords = [
+        'password', 'passwd', 'pwd', 'pass', 'token', 'auth', 'bearer',
+        'secret', 'credential', 'login', 'session', 'cookie', 'jwt',
+        'api_key', 'apikey', 'private_key', 'encryption_key',
+        'credit_card', 'cvv', 'ssn', 'pin'
+    ]
+
+    captured_logs = []
+    sensitive_logs = []
+
+    for line in logs:
+        if 'message:' not in line:
+            continue
+
+        try:
+            # Extract the payload from Frida message
+            part = line.split('message:',1)[1].split('data:',1)[0].strip()
+            msg = ast.literal_eval(part)
+            payload = msg.get('payload', {})
+
+            if 'level' in payload and 'tag' in payload and 'msg' in payload:
+                log_entry = {
+                    'level': payload['level'],
+                    'tag': payload['tag'],
+                    'msg': payload['msg']
+                }
+                captured_logs.append(log_entry)
+
+                # Check for sensitive keywords in tag or message
+                search_text = (payload['tag'] + ' ' + payload['msg']).lower()
+                found_keywords = [kw for kw in sensitive_keywords if kw in search_text]
+
+                if found_keywords:
+                    log_entry['keywords'] = found_keywords
+                    sensitive_logs.append(log_entry)
+        except:
+            continue
+
+    # 8) Build report
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0003/' target='_blank'>MASTG-TEST-0003: Testing Logs for Sensitive Data</a></div>"
+
+    if not captured_logs:
+        return 'INFO', f"<div>No log calls captured during monitoring session</div>{mastg_ref}"
+
+    report_lines = []
+    report_lines.append(f"<div style='margin:10px 0'><strong>Total Logs Captured:</strong> {len(captured_logs)} (during {wait_secs}s monitoring session)</div>")
+    report_lines.append(f"<div style='margin:10px 0'><strong>Sensitive Logs Detected:</strong> {len(sensitive_logs)} (filtered by keywords)</div>")
+
+    if not sensitive_logs:
+        report_lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745; margin:10px 0;'><strong>✓ No sensitive data detected in captured logs</strong></div>")
+
+        # Show sample of captured logs
+        report_lines.append("<details><summary style='cursor:pointer; color:#0066cc; font-weight:bold; margin:10px 0;'>📋 Sample Captured Logs (first 10)</summary>")
+        report_lines.append("<div style='background:#f8f9fa; padding:10px; margin:10px 0; border:1px solid #dee2e6; font-family:monospace; font-size:11px;'>")
+        for log in captured_logs[:10]:
+            level_color = {'VERBOSE':'#6c757d', 'DEBUG':'#17a2b8', 'INFO':'#28a745', 'WARN':'#ffc107', 'ERROR':'#dc3545'}.get(log['level'], '#000')
+            report_lines.append(f"<div style='margin:2px 0;'><span style='color:{level_color}; font-weight:bold;'>{log['level']}</span> <span style='color:#495057;'>{html.escape(log['tag'])}</span>: {html.escape(log['msg'])}</div>")
+        report_lines.append("</div></details>")
+
+        return 'PASS', "\n".join(report_lines) + mastg_ref
+
+    # Sensitive logs detected - show them with highlighting
+    report_lines.append("<div style='background:#ffe6e6; padding:10px; border-left:4px solid #dc3545; margin:10px 0;'><strong style='color:#721c24;'>⚠ SENSITIVE DATA IN LOGS</strong></div>")
+    report_lines.append("<div style='margin:10px 0;'>The following log statements contain sensitive keywords and may expose credentials, tokens, or personal data:</div>")
+
+    # Table with sensitive logs
+    report_lines.append("<div style='overflow-x:auto; margin:10px 0; border:1px solid #dee2e6;'>")
+    report_lines.append("<table style='width:100%; border-collapse:collapse; font-size:12px;'>")
+    report_lines.append("<thead><tr style='background:#343a40; color:white;'>")
+    report_lines.append("<th style='padding:8px; border:1px solid #dee2e6;'>#</th>")
+    report_lines.append("<th style='padding:8px; border:1px solid #dee2e6;'>Level</th>")
+    report_lines.append("<th style='padding:8px; border:1px solid #dee2e6;'>Tag</th>")
+    report_lines.append("<th style='padding:8px; border:1px solid #dee2e6;'>Message</th>")
+    report_lines.append("<th style='padding:8px; border:1px solid #dee2e6;'>Keywords Found</th>")
+    report_lines.append("</tr></thead><tbody>")
+
+    for idx, log in enumerate(sensitive_logs, 1):
+        level_color = {'VERBOSE':'#6c757d', 'DEBUG':'#17a2b8', 'INFO':'#28a745', 'WARN':'#ffc107', 'ERROR':'#dc3545'}.get(log['level'], '#000')
+        report_lines.append("<tr style='border-bottom:1px solid #dee2e6;'>")
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; text-align:center;'>{idx}</td>")
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6;'><span style='background:{level_color}; color:white; padding:2px 6px; border-radius:3px; font-size:10px;'>{log['level']}</span></td>")
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; font-family:monospace;'>{html.escape(log['tag'])}</td>")
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6; font-family:monospace; max-width:400px; word-break:break-word;'>{html.escape(log['msg'])}</td>")
+        report_lines.append(f"<td style='padding:8px; border:1px solid #dee2e6;'><span style='color:#dc3545; font-weight:bold;'>{', '.join(log['keywords'])}</span></td>")
+        report_lines.append("</tr>")
+
+    report_lines.append("</tbody></table></div>")
+
+    # Recommendation
+    report_lines.append("<div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107; margin:10px 0;'>")
+    report_lines.append("<strong>Recommendation:</strong> Remove or sanitize these log statements before production release. ")
+    report_lines.append("Consider using:<br>")
+    report_lines.append("• <code>if (BuildConfig.DEBUG)</code> guards around debug logs<br>")
+    report_lines.append("• ProGuard/R8 rules to strip logging: <code>-assumenosideeffects class android.util.Log { *; }</code><br>")
+    report_lines.append("• Timber or other logging libraries with release-mode filtering")
+    report_lines.append("</div>")
+
+    return 'FAIL', "\n".join(report_lines) + mastg_ref
+
+
 import subprocess, tempfile, time, ast, os, threading, xml.etree.ElementTree as ET
 
 def check_frida_task_hijack(base, manifest,
@@ -11684,6 +11912,7 @@ def main():
             ("Dynamic File Read",            lambda: check_frida_file_reads(base)),
             ("Dynamic Exported Activity",    lambda: check_frida_task_hijack(base, manifest, 2, 8)),
             ("Dynamic StrictMode",           lambda: check_frida_strict_mode(base)),
+            ("Dynamic Logging Monitor",      lambda: check_frida_dynamic_logging(base)),
             ("Dynamic Use of TLS 1.0 or 1.1",lambda: check_frida_tls_negotiation(base)),
             # New dynamic verification checks
             ("Dynamic SharedPreferences",    lambda: check_frida_sharedprefs(base)),
@@ -11697,6 +11926,7 @@ def main():
          "Dynamic File Read":             "Dynamic File Read",
          "Dynamic Exported Activity":     "Exported Components",
          "Dynamic StrictMode":            "Dynamic StrictMode",
+         "Dynamic Logging Monitor":       "Logging Statements",
          "Dynamic Use of TLS 1.0 or 1.1": "Use of TLS 1.0 or 1.1",
          # Map new dynamic checks to their static equivalents
          "Dynamic SharedPreferences":     "SharedPreferences Encryption",
