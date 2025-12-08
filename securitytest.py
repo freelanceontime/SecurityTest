@@ -48,6 +48,15 @@ def curses_select_menu(stdscr, items, title="SELECT TESTS"):
     current = 0
     selected = set()
 
+    # Initialize color pairs if supported
+    try:
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)  # Highlighted
+        curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Selected
+        has_color = True
+    except:
+        has_color = False
+
     while True:
         stdscr.clear()
         height, width = stdscr.getmaxyx()
@@ -60,22 +69,43 @@ def curses_select_menu(stdscr, items, title="SELECT TESTS"):
         stdscr.addstr(4, 0, "")
 
         # Display items (with scrolling if needed)
-        display_start = max(0, current - (height - 10))
-        display_end = min(len(items), display_start + (height - 10))
+        visible_lines = height - 10
+        display_start = max(0, current - (visible_lines // 2))
+        display_end = min(len(items), display_start + visible_lines)
+
+        # Adjust display_start if we're near the end
+        if display_end == len(items):
+            display_start = max(0, len(items) - visible_lines)
 
         for idx in range(display_start, display_end):
             y = 5 + (idx - display_start)
             if y >= height - 3:
                 break
 
+            # Enhanced visual indicators
             status = "[*]" if idx in selected else "[ ]"
-            marker = ">" if idx == current else " "
+            marker = ">>>" if idx == current else "   "
             item_text = f"{marker} {status} [{idx+1:2d}] {items[idx][0]}"
 
+            # Apply visual highlighting for current item
             if idx == current:
-                stdscr.addstr(y, 0, item_text[:width-1], curses.A_REVERSE)
+                if has_color:
+                    stdscr.addstr(y, 0, item_text[:width-1], curses.color_pair(1) | curses.A_BOLD)
+                else:
+                    stdscr.addstr(y, 0, item_text[:width-1], curses.A_REVERSE | curses.A_BOLD)
+            elif idx in selected:
+                if has_color:
+                    stdscr.addstr(y, 0, item_text[:width-1], curses.color_pair(2))
+                else:
+                    stdscr.addstr(y, 0, item_text[:width-1])
             else:
                 stdscr.addstr(y, 0, item_text[:width-1])
+
+        # Scroll indicator
+        if display_start > 0:
+            stdscr.addstr(5, width - 10, "^ MORE ^")
+        if display_end < len(items):
+            stdscr.addstr(height - 4, width - 10, "v MORE v")
 
         # Instructions
         instr_y = height - 2
@@ -2712,6 +2742,7 @@ def check_serialize(base):
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/',
         '/com/google/gson/', '/com/google/crypto/tink/', '/com/google/protobuf/',
+        '/com/google/common/', '/com/google/android/play/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/org/chromium/', '/io/reactivex/',
@@ -4152,63 +4183,174 @@ def check_exported_components(manifest, base=None):
 def check_sql_injection(base, manifest):
     """
     MASTG-TEST-0025 (Injection flaws):
-      • Grep for appendWhere(…) usages
-      • Grep for rawQuery(…) without args
-      • For each hit, show a placeholder `adb shell content query` command
+      • Detect exported ContentProviders
+      • Link them to vulnerable SQL code (appendWhere, rawQuery)
+      • Provide concrete exploitation examples
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0025/' target='_blank'>MASTG-TEST-0025: Testing for Injection Flaws</a></div>"
 
     AND_NS   = "http://schemas.android.com/apk/res/android"
     auth_attr = f"{{{AND_NS}}}authorities"
     exp_attr  = f"{{{AND_NS}}}exported"
+    name_attr = f"{{{AND_NS}}}name"
 
-    # first, build a list of all exported provider authorities
+    # Build list of exported ContentProvider details
     tree = ET.parse(manifest)
     root = tree.getroot()
-    auths = []
-    for prov in root.findall("provider"):
+
+    # Get target SDK to determine default export behavior
+    uses_sdk = root.find("uses-sdk")
+    target_sdk = 17
+    if uses_sdk is not None:
+        target_sdk_str = uses_sdk.get(f"{{{AND_NS}}}targetSdkVersion")
+        if target_sdk_str:
+            try:
+                target_sdk = int(target_sdk_str)
+            except:
+                pass
+
+    exported_providers = []
+    for prov in root.findall("application/provider"):
         exported = prov.get(exp_attr)
-        if exported is not None and exported.lower() == "false":
+
+        # Providers are exported by default on API < 17
+        is_exported = False
+        if exported is None:
+            is_exported = (target_sdk < 17)
+        elif exported.lower() == "true":
+            is_exported = True
+
+        if not is_exported:
             continue
-        raw = prov.get(auth_attr, "")
-        for a in raw.split(";"):
-            a = a.strip()
-            if a:
-                auths.append(a)
+
+        authority = prov.get(auth_attr, "")
+        class_name = prov.get(name_attr, "")
+
+        for auth in authority.split(";"):
+            auth = auth.strip()
+            if auth:
+                exported_providers.append({
+                    'authority': auth,
+                    'class': class_name,
+                    'smali_path': class_name.replace('.', '/') + '.smali'
+                })
 
     issues = []
+    vulnerable_providers = []
 
-    # helper to emit a suggestion for each authority
-    def suggest():
-        cmds = []
-        for a in auths:
-            cmds.append(
-                f'<code>adb shell content query '
-                f'--uri content://{html.escape(a)}/&lt;PATH&gt; '
-                f'--where "1=1) OR 1=1--"</code>'
-            )
-        return "<br>".join(cmds) if cmds else "<em>(no exported providers found to test)</em>"
+    # Find vulnerable code patterns
+    append_where_files = list(grep_code(base, r'appendWhere\('))
+    raw_query_files = list(grep_code(base, r'rawQuery\([^)]*\bLjava/lang/String;[^)]*\)'))
 
-    # 1) appendWhere
-    for rel in grep_code(base, r'appendWhere\('):
-        full = os.path.join(base, rel)
-        issues.append(
-            f'<a href="file://{full}">{html.escape(rel)}</a> uses <code>appendWhere(...)</code><br>'
-            f'<em>try:</em> {suggest()}'
-        )
+    # Try to link vulnerable code to exported providers
+    for provider in exported_providers:
+        provider_files = []
+        uri_paths = []
 
-    # 2) rawQuery without args
-    for rel in grep_code(base, r'\.rawQuery\('):
-        full = os.path.join(base, rel)
-        issues.append(
-            f'<a href="file://{full}">{html.escape(rel)}</a> uses <code>rawQuery(...)</code> without args<br>'
-            f'<em>try:</em> {suggest()}'
-        )
+        # Search for the provider implementation and related files
+        class_base = provider['class'].split('.')[-1]
+        package_path = '/'.join(provider['class'].split('.')[:-1])
+
+        for root_dir, _, files in os.walk(base):
+            for fname in files:
+                if not fname.endswith('.smali'):
+                    continue
+                rel_path = os.path.relpath(os.path.join(root_dir, fname), base)
+
+                # Match provider class or related inner classes
+                if class_base in fname or provider['smali_path'] in rel_path:
+                    provider_files.append(rel_path)
+
+                    # Try to extract URI paths from UriMatcher patterns
+                    try:
+                        with open(os.path.join(root_dir, fname), 'r', errors='ignore') as f:
+                            content = f.read()
+                            # Look for addURI calls or path strings
+                            path_matches = re.findall(r'const-string[^"]*"(/[\w/]+)"', content)
+                            uri_paths.extend(path_matches)
+                    except:
+                        pass
+
+        # Check if provider uses vulnerable patterns
+        vulnerable_code = []
+        for pf in provider_files:
+            if any(pf in vf for vf in append_where_files):
+                vulnerable_code.append(('appendWhere', pf))
+            if any(pf in vf for vf in raw_query_files):
+                vulnerable_code.append(('rawQuery', pf))
+
+        if vulnerable_code or provider_files:
+            vulnerable_providers.append({
+                'provider': provider,
+                'vulnerable_code': vulnerable_code,
+                'files': provider_files,
+                'paths': list(set(uri_paths)) if uri_paths else ['<PATH>']
+            })
+
+    # Generate report
+    total_count = 0
+
+    if vulnerable_providers:
+        total_count = len(vulnerable_providers)
+        issues.append(f"<div><strong>CRITICAL: {len(vulnerable_providers)} exported ContentProvider(s) with SQL injection risk</strong></div>")
+
+        for vp in vulnerable_providers:
+            provider = vp['provider']
+            issues.append("<div style='margin:4px 0;padding:10px;background:#f8f9fa;border-left:3px solid #dc2626;border-radius:4px;'>")
+            issues.append(f"<div><strong>Class:</strong> <code>{html.escape(provider['class'])}</code></div>")
+            issues.append(f"<div><strong>Authority:</strong> <code>{html.escape(provider['authority'])}</code></div>")
+
+            if vp['vulnerable_code']:
+                issues.append("<div style='margin-top:4px;'><strong>Vulnerable Code:</strong></div>")
+                for vuln_type, file_path in vp['vulnerable_code']:
+                    full = os.path.join(base, file_path)
+                    issues.append(f"<div style='margin-left:20px;'>• <a href='file://{full}'>{html.escape(file_path)}</a> uses <code>{vuln_type}()</code></div>")
+
+            # Provide exploitation examples
+            # Use detected paths or show generic example
+            example_path = vp['paths'][0] if vp['paths'] else '<PATH>'
+            issues.append(f"<div style='margin-top:4px;'><strong>Path(s):</strong> {', '.join(f'<code>{p}</code>' for p in vp['paths'])}</div>")
+
+            issues.append("<div style='margin-top:4px;'><strong>Exploitation Examples:</strong></div>")
+            exploit_uri = f"content://{html.escape(provider['authority'])}{example_path}"
+            issues.append(f"<pre style='margin:4px 0;background:#1e293b;color:#e2e8f0;padding:8px;border-radius:4px;overflow-x:auto;font-size:12px;'><code># Data exfiltration\nadb shell content query --uri \"{exploit_uri}?where=1=1 OR username='admin'--\"\n\n# Tautology attack\nadb shell content query --uri \"{exploit_uri}?where=1=1--\"\n\n# Destructive attack (DROP TABLE)\nadb shell content query --uri \"{exploit_uri}?where=1=1;DROP TABLE user_personal_info--\"</code></pre>")
+            issues.append("</div>")
+
+    # Report other vulnerable files not linked to exported providers
+    # Exclude third-party libraries
+    third_party_patterns = [
+        r'androidx/', r'android/support/', r'com/google/', r'org/apache/',
+        r'kotlin/', r'kotlinx/', r'okhttp', r'retrofit', r'gson',
+        r'net/sqlcipher/', r'org/spongycastle/', r'com/squareup/',
+    ]
+
+    def is_third_party(path):
+        return any(re.search(pattern, path) for pattern in third_party_patterns)
+
+    unlinked_vuln = []
+    for rel in append_where_files:
+        if not any(rel in vp['files'] for vp in vulnerable_providers) and not is_third_party(rel):
+            unlinked_vuln.append(('appendWhere', rel))
+    for rel in raw_query_files:
+        if not any(rel in vp['files'] for vp in vulnerable_providers) and not is_third_party(rel):
+            unlinked_vuln.append(('rawQuery', rel))
+
+    if unlinked_vuln:
+        total_count += len(unlinked_vuln)
+        issues.append("<div style='margin-top:12px;'><strong>Other SQL Injection Risks (not linked to exported providers):</strong></div>")
+        for vuln_type, rel in unlinked_vuln[:10]:
+            full = os.path.join(base, rel)
+            issues.append(f"<div>• <a href='file://{full}'>{html.escape(rel)}</a> uses <code>{vuln_type}()</code></div>")
+        if len(unlinked_vuln) > 10:
+            issues.append(f"<div><em>...and {len(unlinked_vuln) - 10} more files</em></div>")
 
     if not issues:
-        return True, "None" + mastg_ref
+        if exported_providers:
+            return 'WARN', f"<div>{len(exported_providers)} exported ContentProvider(s) found, but no obvious SQL injection patterns detected</div>" + mastg_ref, 0
+        return 'PASS', "<div>No SQL injection risks detected</div>" + mastg_ref, 0
 
-    return False, "<br>\n".join(issues) + mastg_ref
+    status = 'FAIL' if vulnerable_providers else 'WARN'
+    return status, "\n".join(issues) + mastg_ref, total_count
 
 
 def check_raw_sql_queries(base):
@@ -10804,10 +10946,26 @@ def check_pending_intent_flags(base):
     flag_mutable = r'0x8000000|134217728'   # FLAG_MUTABLE = 0x08000000 (134217728)
     flag_update = r'0x8000000[08]|134217728'  # FLAG_UPDATE_CURRENT = 0x08000000 (134217728)
 
+    # Library paths to exclude (third-party code)
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/',
+        '/com/google/common/', '/com/google/android/play/',
+        '/okhttp3/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        """Check if path is library code"""
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
     vulnerable_files = []
     mutable_files = []
     update_current_files = []
     immutable_files = set()
+    library_files = []  # Track library files separately
 
     for root, _, files in os.walk(base):
         for fn in files:
@@ -10815,6 +10973,10 @@ def check_pending_intent_flags(base):
                 continue
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, base)
+
+            # Skip library code
+            if is_library_path(rel):
+                continue
 
             try:
                 lines = open(full, errors='ignore').readlines()
@@ -10828,13 +10990,24 @@ def check_pending_intent_flags(base):
                 has_mutable = re.search(flag_mutable, content)
                 has_update_current = re.search(flag_update, content)
 
-                # Find the line with PendingIntent call for snippet
+                # Find the line with PendingIntent call for snippet with context
                 code_snippet = None
                 line_num = 0
                 for i, line in enumerate(lines, 1):
                     if any(re.search(pat, line) for pat in pending_intent_patterns):
-                        code_snippet = line.strip()
                         line_num = i
+                        # Extract 3 lines before and after for context
+                        start = max(0, i - 4)
+                        end = min(len(lines), i + 3)
+                        context_lines = []
+                        for j in range(start, end):
+                            line_text = lines[j].rstrip()
+                            # Highlight the vulnerable line
+                            if j == i - 1:
+                                context_lines.append(f'→ {j+1:4d} | {line_text}  ⚠️ MISSING FLAG_IMMUTABLE')
+                            else:
+                                context_lines.append(f'  {j+1:4d} | {line_text}')
+                        code_snippet = '\n'.join(context_lines)
                         break
 
                 if has_immutable:
@@ -10867,7 +11040,11 @@ def check_pending_intent_flags(base):
                 full = os.path.abspath(os.path.join(base, rel))
                 issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
                 if code_snippet:
-                    issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
+                    issues.append(
+                        f'<div style="background:#2d1b1e;border-left:4px solid #dc2626;padding:8px;margin:8px 0;border-radius:4px;">'
+                        f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
+                        f'</div>'
+                    )
 
         if mutable_files:
             issues.append(
@@ -10878,7 +11055,11 @@ def check_pending_intent_flags(base):
                 full = os.path.abspath(os.path.join(base, rel))
                 issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
                 if code_snippet:
-                    issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
+                    issues.append(
+                        f'<div style="background:#2d1b1e;border-left:4px solid #dc2626;padding:8px;margin:8px 0;border-radius:4px;">'
+                        f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
+                        f'</div>'
+                    )
 
     if update_current_files:
         if status == 'PASS':
@@ -10893,7 +11074,11 @@ def check_pending_intent_flags(base):
             full = os.path.abspath(os.path.join(base, rel))
             issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
             if code_snippet:
-                issues.append(f'<pre><code>{html.escape(code_snippet)}</code></pre>')
+                issues.append(
+                    f'<div style="background:#2d1b1e;border-left:4px solid #d97706;padding:8px;margin:8px 0;border-radius:4px;">'
+                    f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
+                    f'</div>'
+                )
 
     if immutable_files and status == 'PASS':
         issues.append(f"<div>FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
@@ -11421,11 +11606,12 @@ def print_banner():
       -a, --all-tests  Run all tests without interactive selection
 
     Notes:
-     the -u requires Frida to be running on rooted android device connected via usb
+     ensure adb devices identifes the connected devices 
+     while the -u requires Frida to be running on rooted android device connected via usb
      verify frida-ps -Uai finds the app before using this option
 
     Usage:
-      python3 securitytest.py -f app.apk -u -a
+      python3 securitytest.py -f /path/to/app.apk -u -a
       python3 securitytest.py -d /path/to/decompiled -u -a
       python3 securitytest.py --help
 
@@ -11456,6 +11642,16 @@ def main():
 
     apk_path = None
     if args.file:
+        # Validate APK file exists
+        if not os.path.exists(args.file):
+            print(f"[!] Error: APK file not found at '{args.file}'")
+            print(f"[!] Please check the file path and try again.")
+            sys.exit(1)
+
+        if not os.path.isfile(args.file):
+            print(f"[!] Error: '{args.file}' is not a file")
+            sys.exit(1)
+
         base = os.path.splitext(args.file)[0]
         apk_path = args.file
         if os.path.exists(base):
@@ -11498,6 +11694,16 @@ def main():
         with open(os.path.join(base, '.apk_source'), 'w') as m:
             m.write(apk_path)
     else:
+        # Validate directory exists
+        if not os.path.exists(args.dir):
+            print(f"[!] Error: Directory not found at '{args.dir}'")
+            print(f"[!] Please check the directory path and try again.")
+            sys.exit(1)
+
+        if not os.path.isdir(args.dir):
+            print(f"[!] Error: '{args.dir}' is not a directory")
+            sys.exit(1)
+
         base = args.dir
         print(f"[+] Using existing directory `{base}`")
         marker = os.path.join(base, '.apk_source')
@@ -11805,10 +12011,12 @@ def main():
     print("[*] Executing individual checks:")
     for name, fn in checks:
         print(f"    - {name}…", flush=True)
+        cnt = None  # Initialize count variable
         try:
             if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
                        "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                       "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs"):
+                       "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs",
+                       "SQLi via ContentProvider"):
                 ok, det, cnt = fn()
             elif name == "Task Hijacking":
                 # Task Hijacking returns ('PASS'|'WARN'|'FAIL', details, count)
@@ -11832,13 +12040,27 @@ def main():
                     ok, det = res
         except Exception as e:
             ok, det = False, f"<strong>Error: {html.escape(str(e))}</strong>"
+            cnt = None
 
         # Determine status and class
         if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
                     "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs"):
-            status = "PASS" if ok else f"FAIL ({cnt})"
-            cls = 'pass' if ok else 'fail'
+                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs",
+                    "SQLi via ContentProvider"):
+            # Handle PASS/WARN/FAIL status with count
+            if ok == 'PASS' or ok is True:
+                status = "PASS"
+                cls = 'pass'
+            elif ok == 'WARN':
+                status = f"WARN ({cnt})" if cnt else "WARN"
+                cls = 'warn'
+            elif ok == 'FAIL' or ok is False:
+                status = f"FAIL ({cnt})" if cnt else "FAIL"
+                cls = 'fail'
+            else:
+                # Handle None or other unexpected values
+                status = "FAIL"
+                cls = 'fail'
 
         elif name == "Clipboard Security":
             # Can be PASS, WARN, or FAIL with count
