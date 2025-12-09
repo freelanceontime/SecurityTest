@@ -20,6 +20,8 @@ import curses
 import hashlib
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
+from typing import Literal, List, Optional, Dict
 from datetime import datetime
 import platform
 
@@ -38,6 +40,30 @@ __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest
 ## Add to Tests
 ## Add to HTML Special
 ## Add to Group MASVS
+
+Status = Literal["PASS", "FAIL", "WARN", "INFO"]
+
+@dataclass
+class FindingBlock:
+    title: str                         # e.g. "smali_classes3/...VulnerableStorage.smali"
+    subtitle: Optional[str] = None     # e.g. "Unencrypted calls: 2"
+    link: Optional[str] = None         # file:// link
+    meta: Dict[str, str] = field(default_factory=dict)
+    code: Optional[str] = None         # raw text, not HTML
+    code_language: str = "smali"       # for future syntax hi-lite if needed
+    is_collapsible: bool = True        # “click to expand/collapse”
+    open_by_default: bool = False
+
+@dataclass
+class TestResult:
+    name: str                          # test name as in `checks`
+    status: Status                     # PASS/FAIL/WARN/INFO
+    summary_lines: List[str]           # short, single-line facts at top
+    mastg_ref_html: Optional[str] = None
+    findings: List[FindingBlock] = field(default_factory=list)
+    tables_html: List[str] = field(default_factory=list)  # for checksec, big searchable tables, etc.
+    raw_html: Optional[str] = None     # escape hatch for very custom content
+    is_dynamic: bool = False           # mark Frida-based tests
 
 def curses_select_menu(stdscr, items, title="SELECT TESTS"):
     """
@@ -584,6 +610,14 @@ HTML_TEMPLATE = '''
     color: #e2e8f0 !important;
     border: 1px solid #334155 !important;
     font-family: 'Menlo', 'Monaco', 'Courier New', monospace !important;
+    border-radius: 6px;
+    padding: 10px;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
   }}
 
   .detail-list-item {{
@@ -846,6 +880,11 @@ HTML_TEMPLATE = '''
     margin-top: 8px;
     max-height: 200px;
     overflow-y: auto;
+    overflow-x: auto;
+    width: 100%;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+    word-break: break-word;
     font-size: 12px;
   }}
 
@@ -858,7 +897,8 @@ HTML_TEMPLATE = '''
 
   .code-details {{
     margin-top: 8px;
-    display: inline-block;
+    display: block;
+    width: 100%;
   }}
 
   .code-details summary {{
@@ -1385,28 +1425,51 @@ def check_debug_symbols(lib_dir):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0040/' target='_blank'>MASTG-TEST-0040: Testing for Debugging Symbols</a></div>"
 
-    details = []
+    findings = []
+    scanned = 0
     for root, _, files in os.walk(lib_dir):
         for f in files:
             if not f.endswith('.so'):
                 continue
+            scanned += 1
             full_path = os.path.join(root, f)
-            # Build and run the grep command
+            rel_path = os.path.relpath(full_path, lib_dir)
             cmd = f"readelf --sections {full_path}"
             grep_cmd = cmd + " | grep '\\.debug_'"
-            out = run_cmd(grep_cmd)
-            clean = out.strip()
-            if clean:
-                # Record the command and its output
-                details.append(f"$ {grep_cmd}")
-                for line in clean.splitlines():
-                    details.append("  " + line)
+            out = run_cmd(grep_cmd).strip()
+            if out:
+                code_lines = [f"$ {grep_cmd}"] + out.splitlines()
+                findings.append(
+                    FindingBlock(
+                        title=rel_path,
+                        subtitle="Debug sections present",
+                        link=f"file://{os.path.abspath(full_path)}",
+                        code="\n".join(code_lines),
+                        code_language="bash",
+                    )
+                )
 
-    if not details:
-        return True, "None" + mastg_ref
+    if not findings:
+        return TestResult(
+            name="Debug Symbols",
+            status="PASS",
+            summary_lines=[
+                f"Scanned native libs: {scanned}",
+                "No debug sections found",
+            ],
+            mastg_ref_html=mastg_ref,
+        )
 
-    # Fail and show the detailed output
-    return False, "\n".join(details) + mastg_ref
+    return TestResult(
+        name="Debug Symbols",
+        status="FAIL",
+        summary_lines=[
+            f"Scanned native libs: {scanned}",
+            f"Debug sections found in {len(findings)} file(s)",
+        ],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_s3_bucket_security(base):
     """
@@ -2536,47 +2599,67 @@ def check_updates(base):
 
     ok = google_play_ok or custom_ok
 
-    if ok:
-        # Success case - show what was found
-        details = "<div> Update mechanism detected</div>"
+    status = "PASS" if ok else "FAIL"
+    summary_lines = [
+        f"Searched code files: {file_count}",
+        f"Google Play API patterns: {len(google_found)}/{len(google_play_patterns)}",
+        f"Custom update patterns: {len(custom_found)}/{len(custom_update_patterns)}",
+    ]
 
-        if google_play_ok:
-            details += "<div class='detail-section'><strong>Google Play In-App Updates API:</strong></div>"
-            for pattern in google_play_patterns:
-                if pattern in google_found:
-                    _, file_path = google_found[pattern]
-                    details += f"<div class='detail-list-item'>• Found '{pattern}' in: {file_path}</div>"
+    google_lines = []
+    for pattern, desc in google_play_patterns.items():
+        if pattern in google_found:
+            _, path = google_found[pattern]
+            google_lines.append(f"✓ {pattern} ({desc}) in {path}")
+        else:
+            google_lines.append(f"✗ {pattern} ({desc})")
 
-        if custom_ok:
-            details += "<div class='detail-section'><strong>Custom server-side update check:</strong></div>"
-            for pattern in custom_update_patterns:
-                if pattern in custom_found:
-                    _, file_path = custom_found[pattern]
-                    details += f"<div class='detail-list-item'>• Found '{pattern}' in: {file_path}</div>"
+    custom_lines = []
+    for pattern, desc in custom_update_patterns.items():
+        if pattern in custom_found:
+            _, path = custom_found[pattern]
+            custom_lines.append(f"✓ {pattern} ({desc}) in {path}")
+        else:
+            custom_lines.append(f"✗ {pattern} ({desc})")
 
-            details += "<div style='margin-top:10px;'><em>Note: App uses custom update dialog that redirects to Play Store. This is an acceptable alternative to Google Play In-App Updates API.</em></div>"
-    else:
-        # Failure case - show missing components
-        details = f"<div>Searched {file_count} code files (.smali/.java)</div>"
-        details += "<div class='detail-section'><strong>Missing: Google Play In-App Updates API components:</strong></div>"
-        for pattern, desc in google_play_patterns.items():
-            if pattern not in google_found:
-                details += f"<div class='detail-list-item'>✗ '{pattern}' ({desc})</div>"
+    findings = [
+        FindingBlock(
+            title="Google Play In-App Updates",
+            subtitle="Complete" if google_play_ok else "Missing components",
+            code="\n".join(google_lines),
+            code_language="text",
+            open_by_default=not google_play_ok,
+        ),
+        FindingBlock(
+            title="Custom server-side updates",
+            subtitle="Detected" if custom_ok else "Missing components",
+            code="\n".join(custom_lines),
+            code_language="text",
+            open_by_default=not custom_ok,
+        )
+    ]
 
-        details += "<div class='detail-section'><strong>Missing: Custom server-side update components:</strong></div>"
-        for pattern, desc in custom_update_patterns.items():
-            if pattern not in custom_found:
-                details += f"<div class='detail-list-item'>✗ '{pattern}' ({desc})</div>"
-
-        details += "<div style='margin-top:10px;'><em>Neither Google Play In-App Updates API nor custom server-side update mechanism detected.</em></div>"
-
-    return ok, details + mastg_ref
+    return TestResult(
+        name="In-App Updates",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_memtag(manifest):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
     txt = open(manifest, errors='ignore').read()
-    ok = bool(re.search(r'memtagMode="(async|sync)"', txt))
-    return ok, ('Enabled' if ok else 'Memtag Not Enabled') + mastg_ref
+    m = re.search(r'memtagMode="(async|sync)"', txt)
+    ok = bool(m)
+    status = "PASS" if ok else "FAIL"
+    summary = [f"memtagMode={m.group(1)}" if ok else "memtagMode not enabled"]
+    return TestResult(
+        name="Memory Tagging",
+        status=status,
+        summary_lines=summary,
+        mastg_ref_html=mastg_ref,
+    )
 
 def check_min_sdk(manifest, apk_path=None, threshold=28):
     """
@@ -2588,6 +2671,8 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
 
+    min_value = None
+
     # 1) Try decompiled XML
     try:
         tree = ET.parse(manifest)
@@ -2598,9 +2683,7 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
             minSdk = uses.get(f'{{{AND_NS}}}minSdkVersion')
             if minSdk:
                 v = int(minSdk)
-                if v < threshold:
-                    return False, f"minSdkVersion={v} (below recommended {threshold})" + mastg_ref
-                return True, f"minSdkVersion={v}" + mastg_ref
+                min_value = v
     except Exception:
         # ignore and fall back
         pass
@@ -2616,17 +2699,29 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
             m = re.search(r"sdkVersion:'(\d+)'", out)
             if m:
                 v = int(m.group(1))
-                if v < threshold:
-                    return False, f"minSdkVersion={v} (below recommended {threshold})" + mastg_ref
-                return True, f"minSdkVersion={v}" + mastg_ref
+                min_value = v if min_value is None else min_value
         except Exception:
             pass
 
-    # If we still don't have a valid value:
-    return False, (
-        "minSdkVersion is missing (neither decompiled manifest nor aapt badging "
-        "produced a value)"
-    ) + mastg_ref
+    summary = []
+    status = "FAIL"
+    if min_value is not None:
+        summary.append(f"minSdkVersion={min_value}")
+        if min_value < threshold:
+            summary.append(f"Below recommended threshold: {threshold}")
+            status = "FAIL"
+        else:
+            status = "PASS"
+            summary.append(f"Meets recommended threshold (≥ {threshold})")
+    else:
+        summary.append("minSdkVersion not found in manifest or aapt badging")
+
+    return TestResult(
+        name="Min SDK Version",
+        status=status,
+        summary_lines=summary,
+        mastg_ref_html=mastg_ref,
+    )
 
 def check_file_provider(res_dir):
     """
@@ -5033,6 +5128,17 @@ def check_os_command_injection(base):
                 # Check for string concatenation (StringBuilder/StringBuffer)
                 has_string_concat = 'StringBuilder;-><init>' in lines or 'StringBuffer;-><init>' in lines
 
+                # Grab a small snippet around the first suspicious pattern
+                snippet = ""
+                line_list = lines.splitlines()
+                search_patterns = exec_patterns + command_patterns
+                for idx, line in enumerate(line_list):
+                    if any(re.search(pat, line, re.IGNORECASE) for pat in search_patterns):
+                        start = max(0, idx - 2)
+                        end = min(len(line_list), idx + 3)
+                        snippet = "\n".join(line_list[start:end])
+                        break
+
                 # Determine risk level
                 if has_exec and (has_user_input or (has_command and has_string_concat)):
                     severity = "CRITICAL" if has_user_input else "HIGH"
@@ -5054,29 +5160,43 @@ def check_os_command_injection(base):
                         vulnerable_activities[activity_key] = {
                             'severity': severity,
                             'file': rel,
-                            'indicators': indicators
+                            'indicators': indicators,
+                            'snippet': snippet,
+                            'abs_path': os.path.abspath(path),
                         }
 
             except:
                 continue
 
     if not vulnerable_activities:
-        return True, "No OS command injection risks detected" + mastg_ref, 0
-
-    # Build output from deduplicated results
-    hits = []
-    for activity_key, data in vulnerable_activities.items():
-        hit = (
-            f"<strong>{data['severity']}:</strong> <code>{data['file']}</code><br>"
-            f"<strong>Issue:</strong> Runtime.exec() or ProcessBuilder with potential command injection<br>"
-            f"<strong>Indicators:</strong> {', '.join(data['indicators'])}<br>"
-            f"<strong>Risk:</strong> Attacker can execute arbitrary OS commands<br>"
-            f"<strong>Fix:</strong> Avoid Runtime.exec() with user input. Use allowlist validation or safer alternatives.<br>"
-            f"<strong>MASVS:</strong> MASVS-CODE-4<br>"
+        return TestResult(
+            name="OS Command Injection",
+            status="PASS",
+            summary_lines=["No OS command injection risks detected"],
+            mastg_ref_html=mastg_ref,
         )
-        hits.append(hit)
 
-    return False, "<br><br>\n".join(hits) + mastg_ref, len(vulnerable_activities)
+    findings = []
+    for activity_key, data in vulnerable_activities.items():
+        indicators = "\n".join(f"- {i}" for i in data['indicators'])
+        findings.append(
+            FindingBlock(
+                title=data['file'],
+                subtitle=f"Severity: {data['severity']}",
+                link=f"file://{data['abs_path']}",
+                code=data['snippet'] or indicators,
+                code_language="smali",
+                open_by_default=data['severity'] == "CRITICAL",
+            )
+        )
+
+    return TestResult(
+        name="OS Command Injection",
+        status="FAIL",
+        summary_lines=[f"Vulnerable activities: {len(findings)}"],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 
 def check_weak_crypto(base):
@@ -5635,22 +5755,24 @@ def check_sharedprefs_encryption(base):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0287/' target='_blank'>MASTG-TEST-0287: Sensitive Data Stored Unencrypted via the SharedPreferences API</a></div>"
 
-    if unencrypted_count == 0 and encrypted_count == 0:
-        return 'PASS', f"<div>No SharedPreferences usage detected in app code</div><div>Scanned {scanned_files} app code files</div>{mastg_ref}"
+    summary_lines = [
+        f"Scanned: {scanned_files} app code files (libraries excluded)"
+    ]
+    if encrypted_count > 0:
+        summary_lines.append(f"Encrypted usage found: {encrypted_count} instance(s)")
+    if unencrypted_count > 0:
+        summary_lines.append(f"WARNING: Unencrypted usage found in app code: {unencrypted_count} instance(s)")
+    if encrypted_count == 0 and unencrypted_count == 0:
+        summary_lines.append("No SharedPreferences usage detected in app code")
 
     if unencrypted_count == 0:
-        return 'PASS', f"<div>All SharedPreferences usage in app code is encrypted</div><div>Found {encrypted_count} encrypted usage(s)</div>{mastg_ref}"
+        return TestResult(
+            name="SharedPreferences Encryption",
+            status="PASS",
+            summary_lines=summary_lines,
+            mastg_ref_html=mastg_ref,
+        )
 
-    # Build detailed report with collapsible sections
-    lines = []
-    lines.append(f"<div><strong>Scanned:</strong> {scanned_files} app code files (libraries excluded)</div>")
-
-    if encrypted_count > 0:
-        lines.append(f"<div><strong>Encrypted usage found:</strong> {encrypted_count} instance(s)</div>")
-
-    lines.append(f"<div><strong>WARNING: Unencrypted usage found in app code:</strong> {unencrypted_count} instance(s)</div><br>")
-
-    # Group by file for better organization
     files_with_unencrypted = {}
     for finding in findings['unencrypted']:
         file_path = finding['file']
@@ -5658,48 +5780,36 @@ def check_sharedprefs_encryption(base):
             files_with_unencrypted[file_path] = []
         files_with_unencrypted[file_path].append(finding)
 
-    # Collapsible section for unencrypted findings
-    lines.append('<details open>')
-    lines.append('<summary class="warning">')
-    lines.append(f'WARNING: Unencrypted SharedPreferences in App Code ({len(files_with_unencrypted)} files) - Click to expand/collapse')
-    lines.append('</summary>')
-    lines.append('<div>')
-
+    finding_blocks = []
     for file_path in sorted(files_with_unencrypted.keys()):
         full = os.path.abspath(os.path.join(base, file_path))
         file_findings = files_with_unencrypted[file_path]
 
-        lines.append(
-            f'<div class="finding-card">'
-            f'<a href="file://{html.escape(full)}">{html.escape(file_path)}</a><br>'
-            f'<strong>Unencrypted calls:</strong> {len(file_findings)}<br>'
+        code_lines = []
+        for finding in file_findings:
+            header = f"Line {finding['line']}"
+            if finding.get('pref_name'):
+                header += f", Preference name: {finding['pref_name']}"
+            code_lines.append(header)
+            code_lines.append(finding['snippet'])
+            code_lines.append("")
+
+        finding_blocks.append(
+            FindingBlock(
+                title=file_path,
+                subtitle=f"Unencrypted calls: {len(file_findings)}",
+                link=f"file://{full}",
+                code="\n".join(code_lines).rstrip(),
+            )
         )
 
-        for finding in file_findings[:3]:  # Show first 3 per file
-            lines.append(f'<div class="finding-detail">')
-            lines.append(f'<strong>Line {finding["line"]}:</strong>')
-            if finding['pref_name']:
-                lines.append(f'<br>Preference name: <code>{html.escape(finding["pref_name"])}</code>')
-            lines.append(f'<br><code>{html.escape(finding["snippet"])}</code>')
-            lines.append('</div>')
-
-        if len(file_findings) > 3:
-            lines.append(f'<div class="finding-detail"><em>...and {len(file_findings) - 3} more in this file</em></div>')
-
-        lines.append('</div>')
-
-    lines.append('</div></details>')
-
-    lines.append(
-        '<div class="info-box"><em> Recommendation: Use EncryptedSharedPreferences from '
-        'androidx.security:security-crypto to encrypt sensitive preferences. '
-        'See: <a href="https://developer.android.com/reference/androidx/security/crypto/EncryptedSharedPreferences" '
-        'target="_blank">Android Security Crypto</a></em></div>'
+    return TestResult(
+        name="SharedPreferences Encryption",
+        status="FAIL",
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=finding_blocks,
     )
-
-    lines.append(mastg_ref)
-
-    return 'FAIL', '\n'.join(lines)
 
 
 def extract_preference_name(lines, call_line_num):
@@ -6926,13 +7036,79 @@ def check_webview_javascript_bridge(base):
     if len(hits) > 20:
         lines.append(f"<div style='margin-left:20px;'>...and {len(hits) - 20} more</div>")
 
-    # FAIL if remote content loading detected, regardless of annotations
-    is_secure = len(files_with_remote_loading) == 0 and len(vulnerable_interfaces) == 0
-
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0033/' target='_blank'>MASTG-TEST-0033: Testing for Java Objects Exposed Through WebViews</a></div>"
-    lines.append(mastg_ref)
 
-    return is_secure, "<br>\n".join(lines)
+    summary_lines = [
+        f"addJavascriptInterface usage: {len(hits)} file(s)",
+        f"Interface classes identified: {len(interface_classes)}",
+    ]
+    if files_with_remote_loading:
+        summary_lines.append(f"Remote content + JS interface: {len(files_with_remote_loading)} file(s)")
+    if vulnerable_interfaces:
+        summary_lines.append(f"Interfaces missing @JavascriptInterface: {len(vulnerable_interfaces)}")
+
+    findings = []
+
+    def snippet_for_file(rel_path: str, patterns):
+        full_path = os.path.join(base, rel_path)
+        try:
+            lines = open(full_path, errors='ignore').read().splitlines()
+            for idx, line in enumerate(lines):
+                if any(re.search(pat, line) for pat in patterns):
+                    start = max(0, idx - 2)
+                    end = min(len(lines), idx + 3)
+                    return "\n".join(lines[start:end])
+        except Exception:
+            return ""
+        return ""
+
+    for item in files_with_remote_loading[:10]:
+        rel = item['file']
+        full = os.path.abspath(os.path.join(base, rel))
+        snippet = snippet_for_file(rel, [r'addJavascriptInterface', r'loadUrl', r'loadDataWithBaseURL'])
+        findings.append(
+            FindingBlock(
+                title=rel,
+                subtitle="Remote content with JavaScript interface" + (" (has some URL validation)" if item['has_validation'] else " (no URL validation detected)"),
+                link=f"file://{full}",
+                code=snippet or "Relevant code snippet not captured",
+                code_language="smali",
+                open_by_default=True,
+            )
+        )
+
+    for vuln_class in vulnerable_interfaces[:10]:
+        findings.append(
+            FindingBlock(
+                title=vuln_class.replace('/', '.') ,
+                subtitle="Interface may lack @JavascriptInterface annotations",
+            )
+        )
+
+    for rel in sorted(hits)[:10]:
+        full = os.path.abspath(os.path.join(base, rel))
+        if any(f.title == rel for f in findings):
+            continue
+        snippet = snippet_for_file(rel, [r'addJavascriptInterface'])
+        findings.append(
+            FindingBlock(
+                title=rel,
+                subtitle="addJavascriptInterface usage",
+                link=f"file://{full}",
+                code=snippet or "Relevant code snippet not captured",
+                code_language="smali",
+            )
+        )
+
+    status = "PASS" if not files_with_remote_loading and not vulnerable_interfaces else "FAIL"
+
+    return TestResult(
+        name="WebView JavaScript Bridges",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_clipboard_security(base):
     """
@@ -7475,7 +7651,14 @@ def check_insecure_fingerprint_api(base):
 
     MASTG Reference: https://github.com/OWASP/owasp-mastg/blob/master/Document/0x05f-Testing-Local-Authentication.md
     """
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/' target='_blank'>MASTG-TEST-0018: Testing Biometric Authentication</a></div>"
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0002/' target='_blank'>"
+        "MASTG-KNOW-0002: FingerprintManager Security</a></div>"
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-AUTH/MASTG-TEST-0018/' target='_blank'>"
+        "MASTG-TEST-0018: Testing Biometric Authentication</a></div>"
+    )
 
     # Library paths to exclude (only well-maintained framework libraries)
     # NOTE: For FingerprintManager detection, we want to catch deprecated API usage
@@ -7572,88 +7755,98 @@ def check_insecure_fingerprint_api(base):
                     file_has_crypto_obj = rel_path in crypto_files
 
                     if has_null or not file_has_crypto_obj:
-                        snippet = html.escape(line.strip()[:120])
-                        link = f'<a href="file://{html.escape(path)}">{html.escape(rel_path)}:{i}</a>'
-                        null_crypto_files.append((link, snippet))
+                        context_end = min(len(lines), i + 2)
+                        context_snippet = "\n".join(lines[context_start:context_end])
+                        null_crypto_files.append({
+                            "rel": rel_path,
+                            "abs": os.path.abspath(path),
+                            "line": i,
+                            "snippet": context_snippet,
+                        })
                         break
 
-    # No FingerprintManager API usage detected
     if not fingerprint_files:
-        return 'PASS', "<div>No FingerprintManager API usage detected (deprecated API not found)</div>" + mastg_ref
+        return TestResult(
+            name="Insecure Fingerprint API",
+            status="PASS",
+            summary_lines=["No deprecated FingerprintManager API usage detected"],
+            mastg_ref_html=mastg_ref,
+        )
 
-    # CRITICAL: null CryptoObject detected - allows Frida bypass
     if null_crypto_files:
-        lines = [
-            "<div><strong style='color:#dc2626;'>FingerprintManager.authenticate() with NULL CryptoObject</strong></div>",
-            f"<div style='margin-top:8px;'><strong>Vulnerable Code ({len(null_crypto_files)} file(s)):</strong></div>"
-        ]
-        for link, snippet in null_crypto_files[:15]:
-            lines.append(f"{link} → <code>{snippet}</code>")
+        findings = []
+        for entry in null_crypto_files[:15]:
+            findings.append(
+                FindingBlock(
+                    title=f"{entry['rel']}:{entry['line']}",
+                    subtitle="authenticate() with NULL CryptoObject",
+                    link=f"file://{entry['abs']}",
+                    code=entry['snippet'],
+                    code_language="smali",
+                    open_by_default=True,
+                )
+            )
+        return TestResult(
+            name="Insecure Fingerprint API",
+            status="FAIL",
+            summary_lines=[
+                f"FingerprintManager authenticate() with NULL CryptoObject in {len(null_crypto_files)} file(s)",
+                "Allows potential Frida bypass",
+            ],
+            mastg_ref_html=mastg_ref,
+            findings=findings,
+        )
 
-        lines.append("<br><div><strong>OWASP Reference:</strong> ")
-        lines.append("<a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-AUTH/MASTG-KNOW-0002/' target='_blank'>")
-        lines.append("MASTG-KNOW-0002: FingerprintManager Security</a></div>")
-
-        return 'FAIL', "<br>\n".join(lines) + mastg_ref
-
-    # FingerprintManager used - check for crypto binding
     if crypto_files or keystore_files:
-        # Potentially secure - but still using deprecated API
-        lines = [
-            f"<div><strong style='color:#d97706;'>WARNING: Deprecated FingerprintManager API with crypto binding detected</strong></div>",
-            f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
-            "<div style='margin-top:8px;'><strong>Status:</strong></div>",
-            "<ul style='margin-left:20px;'>"
-        ]
-
-        if crypto_files:
-            lines.append(f"<li>CryptoObject usage detected in {len(crypto_files)} file(s)</li>")
-        if keystore_files:
-            lines.append(f"<li>KeyStore integration detected in {len(keystore_files)} file(s)</li>")
-
-        lines.append("</ul>")
-        lines.append("<div style='margin-top:8px;'><strong>Issue:</strong> FingerprintManager is deprecated since Android 9.0 (API 28)</div>")
-        lines.append("<div><strong>Recommendation:</strong> Migrate to androidx.biometric.BiometricPrompt</div>")
-
-        lines.append("<div style='margin-top:8px;'><strong>Files using FingerprintManager:</strong></div>")
+        findings = []
         for rel in sorted(fingerprint_files)[:15]:
             full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            subtitle_bits = []
+            if rel in crypto_files:
+                subtitle_bits.append("CryptoObject present")
+            if rel in keystore_files:
+                subtitle_bits.append("KeyStore binding present")
+            subtitle = "; ".join(subtitle_bits) if subtitle_bits else "FingerprintManager usage"
+            findings.append(
+                FindingBlock(
+                    title=rel,
+                    subtitle=subtitle,
+                    link=f"file://{full}",
+                )
+            )
 
-        lines.append("<br><div><strong>Migration Guide:</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
-        lines.append("<li>Replace FingerprintManager with BiometricPrompt</li>")
-        lines.append("<li>Use BiometricPrompt.CryptoObject instead</li>")
-        lines.append("<li>Maintain KeyStore crypto binding (setUserAuthenticationRequired)</li>")
-        lines.append("</ul>")
+        return TestResult(
+            name="Insecure Fingerprint API",
+            status="WARN",
+            summary_lines=[
+                f"Deprecated FingerprintManager with crypto binding in {len(fingerprint_files)} file(s)",
+                "Recommendation: migrate to androidx.biometric.BiometricPrompt",
+            ],
+            mastg_ref_html=mastg_ref,
+            findings=findings,
+        )
 
-        return 'WARN', "<br>\n".join(lines) + mastg_ref
-
-    # FingerprintManager used without crypto binding - potentially vulnerable
-    lines = [
-        f"<div><strong style='color:#dc2626;'>FAIL: FingerprintManager without cryptographic binding</strong></div>",
-        f"<div style='margin-top:8px;'>Found in {len(fingerprint_files)} file(s)</div>",
-        "<div style='margin-top:8px;'><strong>Security Risks:</strong></div>",
-        "<ul style='margin-left:20px;'>",
-        "<li>Likely using null CryptoObject (allows Frida bypass)</li>",
-        "<li>Deprecated API since Android 9.0 (API 28)</li>",
-        "<li>No KeyStore crypto binding detected</li>",
-        "</ul>",
-        "<div style='margin-top:8px;'><strong>Files:</strong></div>"
-    ]
-
+    findings = []
     for rel in sorted(fingerprint_files)[:15]:
         full = os.path.abspath(os.path.join(base, rel))
-        lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        findings.append(
+            FindingBlock(
+                title=rel,
+                subtitle="FingerprintManager without cryptographic binding",
+                link=f"file://{full}",
+            )
+        )
 
-    lines.append("<br><div><strong>Required Actions:</strong></div>")
-    lines.append("<ol style='margin-left:20px;'>")
-    lines.append("<li>Manual review required - check if authenticate() uses CryptoObject or null</li>")
-    lines.append("<li>If null: VULNERABILITY - implement CryptoObject with KeyStore</li>")
-    lines.append("<li>Migrate to androidx.biometric.BiometricPrompt</li>")
-    lines.append("</ol>")
-
-    return 'FAIL', "<br>\n".join(lines) + mastg_ref
+    return TestResult(
+        name="Insecure Fingerprint API",
+        status="FAIL",
+        summary_lines=[
+            f"FingerprintManager without cryptographic binding in {len(fingerprint_files)} file(s)",
+            "Deprecated API since Android 9.0 (API 28)",
+        ],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
     
 def check_tls_versions(base):
@@ -11023,71 +11216,61 @@ def check_pending_intent_flags(base):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/' target='_blank'>MASTG-TEST-0030: Testing for Vulnerable Implementation of PendingIntent</a></div>"
 
-    if not immutable_files and not vulnerable_files and not mutable_files and not update_current_files:
-        return 'PASS', f"No PendingIntent usage detected{mastg_ref}"
+    mastg_ref_html = mastg_ref
 
-    issues = []
-    status = 'PASS'
+    total_pending = len(vulnerable_files) + len(mutable_files) + len(update_current_files) + len(immutable_files)
 
+    if total_pending == 0:
+        return TestResult(
+            name="PendingIntent Flags",
+            status="PASS",
+            summary_lines=[
+                "PendingIntent flag issues: 0",
+                "No PendingIntent usage detected",
+            ],
+            mastg_ref_html=mastg_ref_html,
+        )
+
+    status = "PASS"
     if vulnerable_files or mutable_files:
-        status = 'FAIL'
-        if vulnerable_files:
-            issues.append(
-                f"<div><strong>CRITICAL: {len(vulnerable_files)} file(s) create PendingIntent without FLAG_IMMUTABLE</strong></div>"
-            )
-            issues.append("<div>This is required on Android 12+ (API 31+) and prevents intent hijacking.</div>")
-            for rel, line_num, code_snippet in vulnerable_files[:15]:
-                full = os.path.abspath(os.path.join(base, rel))
-                issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
-                if code_snippet:
-                    issues.append(
-                        f'<div style="background:#2d1b1e;border-left:4px solid #dc2626;padding:8px;margin:8px 0;border-radius:4px;">'
-                        f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
-                        f'</div>'
-                    )
+        status = "FAIL"
+    elif update_current_files:
+        status = "WARN"
 
-        if mutable_files:
-            issues.append(
-                f"<div><strong>CRITICAL: {len(mutable_files)} file(s) explicitly use FLAG_MUTABLE</strong></div>"
-            )
-            issues.append("<div>Mutable PendingIntents allow the recipient to modify the underlying Intent.</div>")
-            for rel, line_num, code_snippet in mutable_files[:15]:
-                full = os.path.abspath(os.path.join(base, rel))
-                issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
-                if code_snippet:
-                    issues.append(
-                        f'<div style="background:#2d1b1e;border-left:4px solid #dc2626;padding:8px;margin:8px 0;border-radius:4px;">'
-                        f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
-                        f'</div>'
-                    )
+    summary_lines = [
+        f"PendingIntent usage: {total_pending} file(s)",
+        f"FLAG_IMMUTABLE missing: {len(vulnerable_files)} file(s)",
+        f"FLAG_MUTABLE used: {len(mutable_files)} file(s)",
+        f"FLAG_UPDATE_CURRENT only: {len(update_current_files)} file(s)",
+    ]
 
-    if update_current_files:
-        if status == 'PASS':
-            status = 'WARN'
-        issues.append(
-            f"<div>WARNING: {len(update_current_files)} file(s) use FLAG_UPDATE_CURRENT</div>"
-        )
-        issues.append(
-            "<div>On Android 12+, combine with FLAG_IMMUTABLE: <code>FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE</code></div>"
-        )
-        for rel, line_num, code_snippet in update_current_files[:15]:
+    findings = []
+
+    def add_findings(files, subtitle):
+        for rel, line_num, code_snippet in files[:15]:
             full = os.path.abspath(os.path.join(base, rel))
-            issues.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
-            if code_snippet:
-                issues.append(
-                    f'<div style="background:#2d1b1e;border-left:4px solid #d97706;padding:8px;margin:8px 0;border-radius:4px;">'
-                    f'<pre style="margin:0;"><code>{html.escape(code_snippet)}</code></pre>'
-                    f'</div>'
+            findings.append(
+                FindingBlock(
+                    title=f"{rel}:{line_num}",
+                    subtitle=subtitle,
+                    link=f"file://{full}",
+                    code=code_snippet or "",
+                    code_language="smali",
+                    open_by_default=True if status == "FAIL" else False,
                 )
+            )
 
-    if immutable_files and status == 'PASS':
-        issues.append(f"<div>FLAG_IMMUTABLE found in {len(immutable_files)} file(s)</div>")
+    add_findings(vulnerable_files, "Missing FLAG_IMMUTABLE")
+    add_findings(mutable_files, "Uses FLAG_MUTABLE")
+    add_findings(update_current_files, "Uses FLAG_UPDATE_CURRENT without FLAG_IMMUTABLE")
 
-    if not issues:
-        return 'PASS', f"All PendingIntents properly secured with FLAG_IMMUTABLE{mastg_ref}"
-
-    issues.append(mastg_ref)
-    return status, "<br>\n".join(issues)
+    return TestResult(
+        name="PendingIntent Flags",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref_html,
+        findings=findings,
+    )
 
 
 def check_webview_ssl_error_handling(base):
@@ -11623,6 +11806,238 @@ def print_banner():
     
 # Main logic
 
+def render_test_result(tr: TestResult) -> str:
+    cls_map = {"PASS": "pass", "FAIL": "fail", "WARN": "warn", "INFO": "info"}
+    cls = cls_map.get(tr.status, "fail")
+
+    status_label = tr.status
+
+    dynamic_badge = ""
+    if tr.is_dynamic:
+        dynamic_badge = (
+            "<span style='background:#4CAF50;color:white;"
+            "padding:2px 6px;border-radius:3px;font-size:10px;"
+            "margin-left:5px;'>DYNAMIC</span>"
+        )
+
+    inner_parts = []
+
+    if tr.summary_lines:
+        inner_parts.append(
+            "<div class='detail-summary-block'>"
+            + "<br>".join(html.escape(line) for line in tr.summary_lines)
+            + "</div>"
+        )
+
+    for t in tr.tables_html:
+        inner_parts.append(
+            "<div class='detail-table-block' style='margin-top:8px;'>"
+            + t +
+            "</div>"
+        )
+
+    for fb in tr.findings:
+        heading = html.escape(fb.title)
+        if fb.link:
+            heading = f'<a href="{html.escape(fb.link)}">{heading}</a>'
+
+        subtitle = f"<div class='detail-meta'>{html.escape(fb.subtitle)}</div>" if fb.subtitle else ""
+
+        code_html = ""
+        if fb.code:
+            code_html = (
+                "<details class='code-details'>"
+                "<summary class='code-toggle'>Show code</summary>"
+                "<pre class='code-snippet'>"
+                f"{html.escape(fb.code)}"
+                "</pre></details>"
+            )
+
+        inner_parts.append(
+            "<div class='finding-detail'>"
+            f"<div class='finding-title'>{heading}</div>"
+            f"{subtitle}"
+            f"{code_html}"
+            "</div>"
+        )
+
+    if tr.raw_html:
+        inner_parts.append(tr.raw_html)
+
+    if tr.mastg_ref_html:
+        inner_parts.append(tr.mastg_ref_html)
+
+    content_html = "".join(inner_parts) or "<div>No details provided.</div>"
+
+    return (
+        "<details>"
+        f"<summary class='{cls}'>"
+        "<span class='bullet'></span>"
+        f"<span class='check-name'>{html.escape(tr.name)}:</span> "
+        f"{dynamic_badge}"
+        f"<span class='check-status'>{status_label}</span>"
+        "</summary>"
+        f"<div class='detail-content'>{content_html}</div>"
+        "</details>\n"
+    )
+
+def legacy_to_test_result(
+    name: str,
+    status: Status,
+    det: str,
+    html_special: bool = False,
+    finding_count: Optional[int] = None,
+    is_dynamic: bool = False,
+    summary_lines: Optional[List[str]] = None,
+) -> TestResult:
+    det_str = det if isinstance(det, str) else str(det)
+    summary: List[str] = summary_lines[:] if summary_lines else []
+    if finding_count and not summary:
+        summary.append(f"Findings: {finding_count}")
+    raw_html = det_str if html_special else f"<pre>{det_str}</pre>"
+    return TestResult(
+        name=name,
+        status=status if status in ("PASS", "FAIL", "WARN", "INFO") else "FAIL",
+        summary_lines=summary,
+        raw_html=raw_html,
+        is_dynamic=is_dynamic,
+    )
+
+def summary_with_count(label: str):
+    def _builder(status: Status, det: str, cnt: Optional[int]) -> List[str]:
+        count_val = cnt if cnt is not None else ("0" if status == "PASS" else "unknown")
+        return [f"{label}: {count_val}"]
+    return _builder
+
+def default_summary_builder(status: Status, det: str, cnt: Optional[int]) -> List[str]:
+    lines: List[str] = []
+    if cnt is not None:
+        lines.append(f"Findings: {cnt}")
+    return lines
+
+# Which checks should render HTML directly vs pre block
+HTML_SPECIAL_CHECKS = {
+    "X509TrustManager Methods", "Kotlin Assertions",
+    "Custom URI Schemes",       "Logging Statements",
+    "FileProvider Paths",       "Insecure Serialize API",
+    "Task Hijacking",           "Network Security Config",
+    "Debuggable APK",           "Allow Backup",
+    "Exported Components",      "Insecure WebView Usage",
+    "Weak Crypto Algorithms",
+    "APK Signature Schemes",    "Insecure Randomness",
+    "Insecure Fingerprint API", "Use of TLS 1.0 or 1.1",
+    "Certificate Pinning",      "Kotlin Metadata",
+    "Insecure HTTP URIs",       "SQLi via ContentProvider",
+    "Safe Browsing Enabled",    "StrictMode APIs",
+    "Browsable DeepLinks",      "Deep Link Intent Filter Misconfiguration",
+    "Root Detection",
+    # New checks
+    "SharedPreferences Encryption", "External Storage Usage",
+    "Hardcoded Keys",
+    "Biometric Authentication", "FLAG_SECURE Usage",
+    "WebView JavaScript Bridges", "Clipboard Security",
+    "Keyboard Cache",
+    "Raw SQL Queries",          "Insecure Package Context",
+    "PII via Ble Wi-Fi Info",   "PII via Location Info",
+    # NEW MASTG TESTS
+    "PendingIntent Flags",      "WebView SSL Error Handling",
+    "Recent Screenshot Protection", "Dangerous Permissions",
+    "DataStore Encryption",     "Room Database Encryption",
+    "Anti-Debugging",
+    "GMS Security Provider",
+    "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
+}
+
+SUMMARY_BUILDERS = {
+    "Exported Components": summary_with_count("Exported components"),
+    "Kotlin Assertions": summary_with_count("Assertion findings"),
+    "Logging Statements": summary_with_count("Logging statements"),
+    "Kotlin Metadata": summary_with_count("Metadata issues"),
+    "Browsable DeepLinks": summary_with_count("Browsable deep links"),
+    "Deep Link Intent Filter Misconfiguration": summary_with_count("Deep link misconfigurations"),
+    "Custom URI Schemes": summary_with_count("Custom URI scheme handlers"),
+    "Keyboard Cache": summary_with_count("Keyboard cache issues"),
+    "OS Command Injection": summary_with_count("Command injection surfaces"),
+    "Insecure HTTP URIs": summary_with_count("HTTP URI usages"),
+    "SQLi via ContentProvider": summary_with_count("ContentProvider SQLi surfaces"),
+    "Task Hijacking": summary_with_count("Task hijackable activities"),
+    "Clipboard Security": summary_with_count("Clipboard exposures"),
+    "PendingIntent Flags": summary_with_count("PendingIntent flag issues"),
+    "WebView SSL Error Handling": summary_with_count("WebView SSL error overrides"),
+    "Recent Screenshot Protection": summary_with_count("Screenshot vulnerabilities"),
+    "Dangerous Permissions": summary_with_count("Dangerous permissions"),
+    "DataStore Encryption": summary_with_count("Unencrypted DataStore files"),
+    "Room Database Encryption": summary_with_count("Unencrypted Room databases"),
+    "S3 Bucket Security": summary_with_count("Misconfigured buckets"),
+}
+
+def wrap_legacy_check(
+    name: str,
+    fn,
+    html_special: bool = False,
+    summary_builder=None,
+    is_dynamic: bool = False,
+):
+    def _runner():
+        cnt: Optional[int] = None
+        try:
+            res = fn()
+        except Exception as e:
+            return legacy_to_test_result(
+                name,
+                "FAIL",
+                f"<strong>Error: {html.escape(str(e))}</strong>",
+                html_special=True,
+                is_dynamic=is_dynamic,
+                summary_lines=[f"Error running check: {str(e)}"],
+            )
+
+        if isinstance(res, TestResult):
+            tr = res
+            if is_dynamic:
+                tr.is_dynamic = True
+            if summary_builder and not tr.summary_lines:
+                tr.summary_lines = summary_builder(tr.status, tr.raw_html or "", None)
+            return tr
+
+        status: Status
+        det = ""
+        if isinstance(res, tuple):
+            if len(res) == 3:
+                status_or_bool, det, cnt = res
+            elif len(res) == 2:
+                status_or_bool, det = res
+            else:
+                status_or_bool = False
+        else:
+            status_or_bool = res
+
+        if isinstance(status_or_bool, str):
+            status = status_or_bool if status_or_bool in ("PASS", "WARN", "FAIL", "INFO") else "FAIL"
+        else:
+            status = "PASS" if status_or_bool else "FAIL"
+
+        det_str = det if isinstance(det, str) else str(det)
+        builder = summary_builder or SUMMARY_BUILDERS.get(name) or default_summary_builder
+        summary_lines = builder(status, det_str, cnt)
+
+        return legacy_to_test_result(
+            name,
+            status,
+            det_str,
+            html_special=html_special,
+            finding_count=cnt,
+            is_dynamic=is_dynamic,
+            summary_lines=summary_lines,
+        )
+    return _runner
+
+def make_check(name: str, fn):
+    return (name, wrap_legacy_check(name, fn, html_special=(name in HTML_SPECIAL_CHECKS), summary_builder=SUMMARY_BUILDERS.get(name)))
+
+def make_dynamic_check(name: str, fn):
+    return (name, wrap_legacy_check(name, fn, html_special=True, summary_builder=SUMMARY_BUILDERS.get(name), is_dynamic=True))
+
 def main():
     # Check for updates before running
     check_for_updates()
@@ -11880,90 +12295,59 @@ def main():
 
     # 4) Main checks list
     checks = [
-        ("Debug Symbols",           lambda: check_debug_symbols(os.path.join(base,'lib'))),
-        ("StrictMode APIs",         lambda: check_strict_mode(base)),
-        ("Debuggable APK",          lambda: check_debuggable(manifest, base)),
-        ("Allow Backup",            lambda: check_allow_backup(manifest)),
-        ("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",lambda: check_x509(base)),
-        ("Certificate Pinning",     lambda: check_certificate_pinning(base)),
-        ("Network Security Config", lambda: check_network_security_config(base)),
-        ("Insecure HTTP URIs",      lambda: check_http_uris(base)),
-        ("Kotlin Assertions",       lambda: check_kotlin_assert(base)),
-        ("Kotlin Metadata",         lambda: check_kotlin_metadata(base)),
-        ("Logging Statements",      lambda: check_logging(base)),
-        ("In-App Updates",          lambda: check_updates(base)),
-        ("Memory Tagging",          lambda: check_memtag(manifest)),
-        ("Min SDK Version",         lambda: check_min_sdk(manifest, apk_path)),
-        ("FileProvider Paths",      lambda: check_file_provider(os.path.join(base,'res'))),
-        ("Insecure Serialize API",  lambda: check_serialize(base)),
-        ("Custom URI Schemes",      lambda: check_uri_scheme(manifest)),
-        ("Browsable DeepLinks",     lambda: check_browsable_deeplinks(manifest)),
-        ("Deep Link Intent Filter Misconfiguration", lambda: check_deep_link_misconfiguration(manifest)),
-        ("SQLi via ContentProvider",lambda: check_sql_injection(base, manifest)),
-        ("Task Hijacking",          lambda: check_task_hijack(manifest)),
-        ("Exported Components",     lambda: check_exported_components(manifest, base)),
-        ("Insecure WebView Usage",  lambda: check_insecure_webview(base)),
-        ("OS Command Injection",    lambda: check_os_command_injection(base)),
-        ("Safe Browsing Enabled",   lambda: check_safe_browsing(manifest, base)),
-        ("Weak Crypto Algorithms",  lambda: check_weak_crypto(base)),
-        ("PII via Ble Wi-Fi Info",  lambda: check_pii_wifi_info(base)),
-        ("PII via Location Info",   lambda: check_pii_location_info(base)),
-        ("Insecure Randomness",     lambda: check_insecure_randomness(base)),
-        ("Insecure Fingerprint API",lambda: check_insecure_fingerprint_api(base)),
-        ("Use of TLS 1.0 or 1.1",   lambda: check_tls_versions(base)),
-        ("Root Detection",          lambda: check_root_detection(manifest, base)),
-        ("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
-        ("External Storage Usage",  lambda: check_external_storage(base)),
-        ("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
-        ("Biometric Authentication",lambda: check_biometric_auth(base)),
-        ("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
-        ("WebView JavaScript Bridges", lambda: check_webview_javascript_bridge(base)),
-        ("Clipboard Security",      lambda: check_clipboard_security(base)),
-        ("Keyboard Cache",          lambda: check_keyboard_cache(base, manifest)),
-        ("Raw SQL Queries",         lambda: check_raw_sql_queries(base)),
-        ("Insecure Package Context", lambda: check_package_context(base)),
+        make_check("Debug Symbols",           lambda: check_debug_symbols(os.path.join(base,'lib'))),
+        make_check("StrictMode APIs",         lambda: check_strict_mode(base)),
+        make_check("Debuggable APK",          lambda: check_debuggable(manifest, base)),
+        make_check("Allow Backup",            lambda: check_allow_backup(manifest)),
+        make_check("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",lambda: check_x509(base)),
+        make_check("Certificate Pinning",     lambda: check_certificate_pinning(base)),
+        make_check("Network Security Config", lambda: check_network_security_config(base)),
+        make_check("Insecure HTTP URIs",      lambda: check_http_uris(base)),
+        make_check("Kotlin Assertions",       lambda: check_kotlin_assert(base)),
+        make_check("Kotlin Metadata",         lambda: check_kotlin_metadata(base)),
+        make_check("Logging Statements",      lambda: check_logging(base)),
+        make_check("In-App Updates",          lambda: check_updates(base)),
+        make_check("Memory Tagging",          lambda: check_memtag(manifest)),
+        make_check("Min SDK Version",         lambda: check_min_sdk(manifest, apk_path)),
+        make_check("FileProvider Paths",      lambda: check_file_provider(os.path.join(base,'res'))),
+        make_check("Insecure Serialize API",  lambda: check_serialize(base)),
+        make_check("Custom URI Schemes",      lambda: check_uri_scheme(manifest)),
+        make_check("Browsable DeepLinks",     lambda: check_browsable_deeplinks(manifest)),
+        make_check("Deep Link Intent Filter Misconfiguration", lambda: check_deep_link_misconfiguration(manifest)),
+        make_check("SQLi via ContentProvider",lambda: check_sql_injection(base, manifest)),
+        make_check("Task Hijacking",          lambda: check_task_hijack(manifest)),
+        make_check("Exported Components",     lambda: check_exported_components(manifest, base)),
+        make_check("Insecure WebView Usage",  lambda: check_insecure_webview(base)),
+        make_check("OS Command Injection",    lambda: check_os_command_injection(base)),
+        make_check("Safe Browsing Enabled",   lambda: check_safe_browsing(manifest, base)),
+        make_check("Weak Crypto Algorithms",  lambda: check_weak_crypto(base)),
+        make_check("PII via Ble Wi-Fi Info",  lambda: check_pii_wifi_info(base)),
+        make_check("PII via Location Info",   lambda: check_pii_location_info(base)),
+        make_check("Insecure Randomness",     lambda: check_insecure_randomness(base)),
+        make_check("Insecure Fingerprint API",lambda: check_insecure_fingerprint_api(base)),
+        make_check("Use of TLS 1.0 or 1.1",   lambda: check_tls_versions(base)),
+        make_check("Root Detection",          lambda: check_root_detection(manifest, base)),
+        make_check("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
+        make_check("External Storage Usage",  lambda: check_external_storage(base)),
+        make_check("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
+        make_check("Biometric Authentication",lambda: check_biometric_auth(base)),
+        make_check("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
+        make_check("WebView JavaScript Bridges", lambda: check_webview_javascript_bridge(base)),
+        make_check("Clipboard Security",      lambda: check_clipboard_security(base)),
+        make_check("Keyboard Cache",          lambda: check_keyboard_cache(base, manifest)),
+        make_check("Raw SQL Queries",         lambda: check_raw_sql_queries(base)),
+        make_check("Insecure Package Context", lambda: check_package_context(base)),
         # NEW MASTG TESTS (2025-11-26)
-        ("PendingIntent Flags",     lambda: check_pending_intent_flags(base)),
-        ("WebView SSL Error Handling", lambda: check_webview_ssl_error_handling(base)),
-        ("Recent Screenshot Protection", lambda: check_recent_screenshot_disabled(base)),
-        ("Dangerous Permissions",   lambda: check_dangerous_permissions(manifest)),
-        ("DataStore Encryption",    lambda: check_datastore_encryption(base)),
-        ("Room Database Encryption", lambda: check_room_encryption(base)),
-        ("Anti-Debugging",          lambda: check_anti_debugging(base)),
-        ("GMS Security Provider",   lambda: check_gms_security_provider(base)),
-        ("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
+        make_check("PendingIntent Flags",     lambda: check_pending_intent_flags(base)),
+        make_check("WebView SSL Error Handling", lambda: check_webview_ssl_error_handling(base)),
+        make_check("Recent Screenshot Protection", lambda: check_recent_screenshot_disabled(base)),
+        make_check("Dangerous Permissions",   lambda: check_dangerous_permissions(manifest)),
+        make_check("DataStore Encryption",    lambda: check_datastore_encryption(base)),
+        make_check("Room Database Encryption", lambda: check_room_encryption(base)),
+        make_check("Anti-Debugging",          lambda: check_anti_debugging(base)),
+        make_check("GMS Security Provider",   lambda: check_gms_security_provider(base)),
+        make_check("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
-    html_special = {
-        "X509TrustManager Methods", "Kotlin Assertions",
-        "Custom URI Schemes",       "Logging Statements",
-        "FileProvider Paths",       "Insecure Serialize API",
-        "Task Hijacking",           "Network Security Config",
-        "Debuggable APK",           "Allow Backup",
-        "Exported Components",      "Insecure WebView Usage",
-        "Weak Crypto Algorithms",
-        "APK Signature Schemes",    "Insecure Randomness",
-        "Insecure Fingerprint API", "Use of TLS 1.0 or 1.1",
-        "Certificate Pinning",      "Kotlin Metadata",
-        "Insecure HTTP URIs",       "SQLi via ContentProvider",
-        "Safe Browsing Enabled",    "StrictMode APIs",
-        "Browsable DeepLinks",      "Deep Link Intent Filter Misconfiguration",
-        "Root Detection",
-        # New checks
-        "SharedPreferences Encryption", "External Storage Usage",
-        "Hardcoded Keys",
-        "Biometric Authentication", "FLAG_SECURE Usage",
-        "WebView JavaScript Bridges", "Clipboard Security",
-        "Keyboard Cache",
-        "Raw SQL Queries",          "Insecure Package Context",
-        "PII via Ble Wi-Fi Info",   "PII via Location Info",
-        # NEW MASTG TESTS
-        "PendingIntent Flags",      "WebView SSL Error Handling",
-        "Recent Screenshot Protection", "Dangerous Permissions",
-        "DataStore Encryption",     "Room Database Encryption",
-        "Anti-Debugging",
-        "GMS Security Provider",
-        "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
-    }
 
     # Interactive test selection
     if not args.all_tests:
@@ -12011,152 +12395,30 @@ def main():
     print("[*] Executing individual checks:")
     for name, fn in checks:
         print(f"    - {name}…", flush=True)
-        cnt = None  # Initialize count variable
         try:
-            if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
-                       "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                       "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs",
-                       "SQLi via ContentProvider"):
-                ok, det, cnt = fn()
-            elif name == "Task Hijacking":
-                # Task Hijacking returns ('PASS'|'WARN'|'FAIL', details, count)
-                ok, det, cnt = fn()
-            elif name == "Clipboard Security":
-                # Clipboard Security can return 2 or 3 values depending on findings
-                res = fn()
-                if len(res) == 3:
-                    ok, det, cnt = res
-                else:
-                    ok, det = res
-                    cnt = None
-            else:
-                res = fn()
-                # Back-compat: handle both (bool, detail) and ('PASS'|'WARN'|'FAIL', detail)
-                if isinstance(res[0], str):
-                    # New format: ('PASS'|'WARN'|'FAIL', detail)
-                    ok, det = res[0], res[1]
-                else:
-                    # Old format: (bool, detail)
-                    ok, det = res
+            tr = fn()
         except Exception as e:
-            ok, det = False, f"<strong>Error: {html.escape(str(e))}</strong>"
-            cnt = None
-
-        # Determine status and class
-        if name in ("Exported Components", "Kotlin Assertions", "Logging Statements", "Kotlin Metadata",
-                    "Browsable DeepLinks", "Deep Link Intent Filter Misconfiguration",
-                    "Custom URI Schemes", "Keyboard Cache", "OS Command Injection", "Insecure HTTP URIs",
-                    "SQLi via ContentProvider"):
-            # Handle PASS/WARN/FAIL status with count
-            if ok == 'PASS' or ok is True:
-                status = "PASS"
-                cls = 'pass'
-            elif ok == 'WARN':
-                status = f"WARN ({cnt})" if cnt else "WARN"
-                cls = 'warn'
-            elif ok == 'FAIL' or ok is False:
-                status = f"FAIL ({cnt})" if cnt else "FAIL"
-                cls = 'fail'
-            else:
-                # Handle None or other unexpected values
-                status = "FAIL"
-                cls = 'fail'
-
-        elif name == "Clipboard Security":
-            # Can be PASS, WARN, or FAIL with count
-            if ok == 'PASS' or ok is True:
-                status = "PASS"
-                cls = 'pass'
-            elif ok == 'WARN':
-                status = "WARN"
-                cls = 'warn'
-            elif ok is False and cnt is not None:
-                # FAIL with count (critical findings)
-                status = f"FAIL ({cnt})"
-                cls = 'fail'
-            else:
-                status = "WARN"
-                cls = 'warn'
-
-        elif name == "Task Hijacking":
-            # Task Hijacking uses status string + count
-            if ok == 'PASS':
-                status = "PASS"
-                cls = 'pass'
-            elif ok == 'WARN':
-                status = f"WARN ({cnt})" if cnt > 0 else "WARN"
-                cls = 'warn'
-            else:  # FAIL
-                status = f"FAIL ({cnt})" if cnt > 0 else "FAIL"
-                cls = 'fail'
-
-        elif name in ("Biometric Authentication", "Insecure Package Context"):
-            # Explicit FAIL (1), no automatic counting from HTML
-            if ok == 'PASS':
-                status = "PASS"
-                cls = 'pass'
-            elif ok == 'WARN':
-                status = "WARN"
-                cls = 'warn'
-            else:  # FAIL
-                status = "FAIL (1)"
-                cls = 'fail'
-
-        elif isinstance(ok, str):
-            # New format with explicit status string
-            status = ok
-            if ok == 'PASS':
-                cls = 'pass'
-            elif ok == 'WARN':
-                cls = 'warn'
-                count = det.count('<a href=') or (det.count('<br>') + 1)
-                if count > 1:
-                    status = f"WARN ({count})"
-            elif ok == 'INFO':
-                cls = 'info'
-            else:  # FAIL (string)
-                cls = 'fail'
-                count = det.count('<a href=') or (det.count('<br>') + 1)
-                status = f"FAIL ({count})" if count > 1 else "FAIL"
-
-        else:
-            # ok is a bool, generic handling + S3 override
-            if name == "S3 Bucket Security":
-                if ok:
-                    status = "PASS"
-                    cls = "pass"
-                else:
-                    # One misconfigured bucket → treat as a single finding
-                    status = "FAIL (1)"
-                    cls = "fail"
-            elif ok:
-                status = "PASS"
-                cls = 'pass'
-            else:
-                count = det.count('<a href=') or (det.count('<br>') + 1)
-                status = f"FAIL ({count})" if count > 1 else "FAIL"
-                cls = 'fail'
-        if name in html_special:
-            html_block = (
-                "<details>"
-                f"<summary class='{cls}'><span class='bullet'></span> "
-                f"<span class='check-name'>{name}:</span> "
-                f"<span class='check-status'>{status}</span></summary>"
-                f"<div class='detail-content'>{det}</div>"
-                "</details>\n"
+            tr = legacy_to_test_result(
+                name,
+                "FAIL",
+                f"<strong>Error: {html.escape(str(e))}</strong>",
+                html_special=True,
+                summary_lines=[f"Error running check: {str(e)}"],
             )
-        else:
-            html_block = (
-                "<details>"
-                f"<summary class='{cls}'><span class='bullet'></span> "
-                f"<span class='check-name'>{name}:</span> "
-                f"<span class='check-status'>{status}</span></summary>"
-                f"<pre>{det}</pre>"
-                "</details>\n"
+
+        if not isinstance(tr, TestResult):
+            tr = legacy_to_test_result(
+                name,
+                "FAIL",
+                "<strong>Invalid result format</strong>",
+                html_special=True,
             )
+
+        html_block = render_test_result(tr)
+        key_name = tr.name
         placed = False
         for cat, info in MASVS_CATEGORIES.items():
-            if name in info['checks']:
+            if key_name in info['checks']:
                 grouped[cat].append(html_block)
                 placed = True
                 break
@@ -12167,18 +12429,18 @@ def main():
     dynamic_results = []  # Track dynamic check results for summary
     if args.usb:
         frida_checks = [
-            ("Dynamic Cert Pinning",         lambda: check_frida_pinning(base)),
-            ("Dynamic File Read",            lambda: check_frida_file_reads(base)),
-            ("Dynamic Exported Activity",    lambda: check_frida_task_hijack(base, manifest, 2, 8)),
-            ("Dynamic StrictMode",           lambda: check_frida_strict_mode(base)),
-            ("Dynamic Logging Monitor",      lambda: check_frida_dynamic_logging(base)),
-            ("Dynamic Use of TLS 1.0 or 1.1",lambda: check_frida_tls_negotiation(base)),
+            make_dynamic_check("Dynamic Cert Pinning",         lambda: check_frida_pinning(base)),
+            make_dynamic_check("Dynamic File Read",            lambda: check_frida_file_reads(base)),
+            make_dynamic_check("Dynamic Exported Activity",    lambda: check_frida_task_hijack(base, manifest, 2, 8)),
+            make_dynamic_check("Dynamic StrictMode",           lambda: check_frida_strict_mode(base)),
+            make_dynamic_check("Dynamic Logging Monitor",      lambda: check_frida_dynamic_logging(base)),
+            make_dynamic_check("Dynamic Use of TLS 1.0 or 1.1",lambda: check_frida_tls_negotiation(base)),
             # New dynamic verification checks
-            ("Dynamic SharedPreferences",    lambda: check_frida_sharedprefs(base)),
-            ("Dynamic External Storage",     lambda: check_frida_external_storage(base)),
-            ("Dynamic Crypto Keys",          lambda: check_frida_crypto_keys(base)),
-            ("Dynamic Clipboard",            lambda: check_frida_clipboard(base)),
-            ("Storage Analysis",             run_storage_analysis),
+            make_dynamic_check("Dynamic SharedPreferences",    lambda: check_frida_sharedprefs(base)),
+            make_dynamic_check("Dynamic External Storage",     lambda: check_frida_external_storage(base)),
+            make_dynamic_check("Dynamic Crypto Keys",          lambda: check_frida_crypto_keys(base)),
+            make_dynamic_check("Dynamic Clipboard",            lambda: check_frida_clipboard(base)),
+            make_dynamic_check("Storage Analysis",             run_storage_analysis),
         ]
         DYNAMIC_TO_STATIC = {
          "Dynamic Cert Pinning":          "Certificate Pinning",
@@ -12237,36 +12499,50 @@ def main():
 
         for name, fn in frida_checks:
             print(f"[*] Running {name}…")
+            key_name = name
+            res = None
+            ok = None
+            det = ""
             try:
                 res = fn()
             except Exception as e:
                 res = ('FAIL', f"<strong>Error: {html.escape(str(e))}</strong>")
 
-            # Back-compat: existing fns return (bool, detail); new fns return ('PASS'|'WARN'|'FAIL', detail)
-            if isinstance(res[0], str):
-                status, det = res[0], res[1]
-                cls = {'PASS':'pass', 'WARN':'warn', 'FAIL':'fail', 'INFO':'info'}.get(status, 'fail')
+            cls_map = {'PASS': 'pass', 'WARN': 'warn', 'FAIL': 'fail', 'INFO': 'info'}
+            if isinstance(res, TestResult):
+                tr = res
+                if not tr.is_dynamic:
+                    tr.is_dynamic = True
             else:
-                ok, det = res
-                status  = 'PASS' if ok else 'FAIL'
-                cls     = 'pass' if ok else 'fail'
+                if res is not None:
+                    if isinstance(res[0], str):
+                        status_base = res[0] if res[0] in ("PASS", "WARN", "FAIL", "INFO") else "FAIL"
+                        det = res[1]
+                    else:
+                        try:
+                            ok, det = res
+                        except Exception:
+                            ok, det = False, det
+                        status_base = 'PASS' if ok else 'FAIL'
+                else:
+                    status_base = "FAIL"
+                    det = det or "<strong>Error: Unknown failure</strong>"
 
-            # Track result for summary
-            dynamic_results.append((name, status, cls))
+                det_str = det if isinstance(det, str) else str(det)
+                tr = legacy_to_test_result(
+                    name,
+                    status_base,
+                    det_str,
+                    html_special=True,
+                    is_dynamic=True,
+                )
 
-            # Add visual indicator for dynamic checks
-            dynamic_badge = "<span style='background:#4CAF50;color:white;padding:2px 6px;border-radius:3px;font-size:10px;margin-left:5px;'>DYNAMIC</span>"
+            html_block = render_test_result(tr)
+            cls = cls_map.get(tr.status, 'fail')
+            dynamic_results.append((tr.name, tr.status, cls))
 
-            html_block = (
-                "<details>"
-                f"<summary class='{cls}'><span class='bullet'></span> "
-                f"<span class='check-name'>{name}:</span> {dynamic_badge} "
-                f"<span class='check-status'>{status}</span></summary>"
-                f"<div class='detail-content'>{det}</div>"
-                "</details>\n"
-            )
-
-            key = DYNAMIC_TO_STATIC.get(name, name)
+            key_name = tr.name
+            key = DYNAMIC_TO_STATIC.get(key_name, key_name)
             placed = False
             for cat, info in MASVS_CATEGORIES.items():
                 if key in info['checks']:
