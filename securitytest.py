@@ -2733,11 +2733,16 @@ def check_file_provider(res_dir):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
-    issues = []
+    findings = []
     xml_dir = os.path.join(res_dir, 'xml')
 
     if not os.path.exists(xml_dir):
-        return True, "No xml directory found" + mastg_ref
+        return TestResult(
+            name="FileProvider Paths",
+            status="PASS",
+            summary_lines=["No xml directory found"],
+            mastg_ref_html=mastg_ref,
+        )
 
     for root, _, files in os.walk(xml_dir):
         for f in files:
@@ -2746,13 +2751,12 @@ def check_file_provider(res_dir):
 
             full = os.path.join(root, f)
             rel  = os.path.relpath(full, res_dir)
-            href = f'file://{html.escape(full)}'
-            link = f'<a href="{href}">{html.escape(rel)}</a>'
+            abs_path = os.path.abspath(full)
 
             try:
-                txt = open(full, errors='ignore').read()
                 tree = ET.parse(full)
                 root_elem = tree.getroot()
+                lines = open(full, errors='ignore').read().splitlines()
 
                 # Check all FileProvider path types for insecure configurations
                 path_types = [
@@ -2765,31 +2769,43 @@ def check_file_provider(res_dir):
                     'external-media-path'  # External media directory
                 ]
 
+                def grab_snippet(search_terms):
+                    for idx, line in enumerate(lines):
+                        if all(term in line for term in search_terms):
+                            start = max(0, idx - 2)
+                            end = min(len(lines), idx + 3)
+                            return "\n".join(lines[start:end])
+                    return ""
+
                 for path_type in path_types:
                     for elem in root_elem.findall(f'.//{path_type}'):
                         path_attr = elem.get('path', '')
                         name_attr = elem.get('name', '')
 
-                        # Check for insecure path values
                         if path_attr in ('.', '/', ''):
-                            # Reconstruct the XML element to show in output
                             attrs = []
                             if name_attr:
                                 attrs.append(f'name="{name_attr}"')
                             attrs.append(f'path="{path_attr}"')
+                            xml_element = f"<{path_type} {' '.join(attrs)}/>"
 
-                            xml_element = f'&lt;{path_type} {" ".join(attrs)}/&gt;'
-
-                            # Determine severity
                             if path_type == 'root-path':
-                                severity = '<strong style="color:#dc2626;">CRITICAL</strong>'
+                                severity = "CRITICAL"
                             elif path_attr in ('.', '/'):
-                                severity = '<strong style="color:#dc2626;">HIGH</strong>'
+                                severity = "HIGH"
                             else:
-                                severity = '<strong style="color:#d97706;">MEDIUM</strong>'
+                                severity = "MEDIUM"
 
-                            issues.append(
-                                f"{link} – {severity} insecure {xml_element}"
+                            snippet = grab_snippet([path_type, name_attr if name_attr else "", path_attr])
+                            findings.append(
+                                FindingBlock(
+                                    title=rel,
+                                    subtitle=f"{severity}: insecure {xml_element}",
+                                    link=f"file://{abs_path}",
+                                    code=snippet or xml_element,
+                                    code_language="xml",
+                                    open_by_default=True,
+                                )
                             )
 
                 # Check for overly-broad grant-uri-permission / path-permission
@@ -2797,17 +2813,37 @@ def check_file_provider(res_dir):
                     for perm in root_elem.findall(f'.//{tag}'):
                         p = perm.get('path') or perm.get('pathPrefix') or perm.get('pathPattern') or ''
                         if p in ('.', '/', '..') or p.startswith('../'):
-                            issues.append(
-                                f"{link} – <strong>&lt;{tag}&gt;</strong> insecure path=\"{html.escape(p)}\""
+                            xml_element = f"<{tag} path=\"{p}\"/>"
+                            snippet = grab_snippet([tag, p])
+                            findings.append(
+                                FindingBlock(
+                                    title=rel,
+                                    subtitle=f"Insecure {tag} path=\"{p}\"",
+                                    link=f"file://{abs_path}",
+                                    code=snippet or xml_element,
+                                    code_language="xml",
+                                    open_by_default=True,
+                                )
                             )
 
-            except Exception as e:
-                # If XML parsing fails, continue to next file
+            except Exception:
                 continue
 
-    if not issues:
-        return True, "None" + mastg_ref
-    return False, "<br>\n".join(issues) + mastg_ref
+    if not findings:
+        return TestResult(
+            name="FileProvider Paths",
+            status="PASS",
+            summary_lines=["No insecure FileProvider paths detected"],
+            mastg_ref_html=mastg_ref,
+        )
+
+    return TestResult(
+        name="FileProvider Paths",
+        status="FAIL",
+        summary_lines=[f"Insecure FileProvider configurations: {len(findings)}"],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_serialize(base):
     """
@@ -3639,13 +3675,11 @@ def check_http_uris(base):
     except known safe namespaces (Android schema, W3C, Maven, Apache, etc.).
     Also filters out common false positives like localhost, example.com, test URLs,
     and URLs appearing in error messages or documentation strings.
-    Returns (ok: bool, details_html: str).
     """
 
-    hits = []
+    findings = []
     http_re = re.compile(r'http://[^\s"\'<>]+')
 
-    # Known safe namespaces and schema URLs
     ignore_prefixes = (
         "http://schemas.android.com",
         "http://www.w3.org",
@@ -3661,7 +3695,6 @@ def check_http_uris(base):
         "http://xml.org",
         "http://www.android.com",
         "http://jsoup.org",
-        # Test/placeholder URLs
         "http://localhost",
         "http://127.0.0.1",
         "http://0.0.0.0",
@@ -3671,13 +3704,14 @@ def check_http_uris(base):
         "http://undefined",
     )
 
-    # Patterns that indicate the URL is in documentation/error messages (not actual code)
     false_positive_patterns = [
         r'(error|exception|warning|log|message|description|comment|make sure|example|e\.g\.|i\.e\.|see https?://)',
         r'(starts with|should be|must be|can be|try|instead)',
         r'(malformed|invalid|supplied.*url)',
     ]
     false_positive_re = re.compile('|'.join(false_positive_patterns), re.IGNORECASE)
+
+    ext_lang = {'.smali': 'smali', '.java': 'java', '.xml': 'xml'}
 
     for root, _, files in os.walk(base):
         for fn in files:
@@ -3686,30 +3720,52 @@ def check_http_uris(base):
             full = os.path.join(root, fn)
             rel  = os.path.relpath(full, base)
             try:
-                for lineno, line in enumerate(open(full, errors='ignore'), 1):
-                    for m in http_re.findall(line):
-                        # Skip known safe prefixes
-                        if any(m.startswith(pref) for pref in ignore_prefixes):
-                            continue
-
-                        # Skip if this appears to be in an error message or documentation
-                        if false_positive_re.search(line):
-                            continue
-
-                        snippet = html.escape(line.strip())
-                        link    = f'<a href="file://{html.escape(full)}">{html.escape(rel)}:{lineno}</a>'
-                        hits.append(f"{link} ⟶ {snippet}")
+                lines = open(full, errors='ignore').read().splitlines()
             except:
-                pass
+                continue
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0233/' target='_blank'>MASTG-TEST-0233: Hardcoded HTTP URLs</a></div>"
+            for lineno, line in enumerate(lines, 1):
+                for m in http_re.findall(line):
+                    if any(m.startswith(pref) for pref in ignore_prefixes):
+                        continue
+                    if false_positive_re.search(line):
+                        continue
 
-    if not hits:
-        return True, f"None{mastg_ref}", 0
+                    start = max(0, lineno - 3)
+                    end = min(len(lines), lineno + 2)
+                    context = []
+                    for idx in range(start, end):
+                        prefix = "→ " if idx == lineno - 1 else "  "
+                        context.append(f"{prefix}{idx+1:4d} | {lines[idx]}")
+                    findings.append(
+                        FindingBlock(
+                            title=rel,
+                            subtitle=f"Line {lineno}",
+                            link=f"file://{os.path.abspath(full)}:{lineno}",
+                            code="\n".join(context),
+                            code_language=ext_lang.get(os.path.splitext(fn)[1].lower(), "text"),
+                            open_by_default=True,
+                        )
+                    )
+                # don't double count multiple matches on same line; continue scanning for more
 
-    # Return explicit count as third value to avoid automatic counting of mastg_ref links
-    result = "<br>\n".join(hits) + mastg_ref
-    return False, result, len(hits)
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0233/' target='_blank'>MASTG-TEST-0233: Hardcoded HTTP URLs</a></div>"
+
+    if not findings:
+        return TestResult(
+            name="Insecure HTTP URIs",
+            status="PASS",
+            summary_lines=["No hardcoded http:// URLs detected"],
+            mastg_ref_html=mastg_ref,
+        )
+
+    return TestResult(
+        name="Insecure HTTP URIs",
+        status="FAIL",
+        summary_lines=[f"HTTP URI usages: {len(findings)}"],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_debuggable(manifest, base):
     """
@@ -7869,7 +7925,12 @@ def check_tls_versions(base):
     candidates = (files_tls10 | files_tls11)
 
     if not candidates:
-        return True, "None"
+        return TestResult(
+            name="Use of TLS 1.0 or 1.1",
+            status="PASS",
+            summary_lines=["No TLSv1/1.1 usage detected"],
+            mastg_ref_html="<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>",
+        )
 
     def is_library_path(rel):
         rp = '/' + rel.replace('\\', '/')
@@ -7920,34 +7981,50 @@ def check_tls_versions(base):
                     code_snippet = "\n".join(context_lines)
                     break
 
-            href = f'file://{os.path.abspath(path)}' + (f':{line_no}' if line_no else '')
-            hit_html = f'<div style="margin-bottom:10px;">'
-            hit_html += f'<div><a href="{href}">{html.escape(rel)}{":" + str(line_no) if line_no else ""}</a></div>'
-            if code_snippet:
-                hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
-            hit_html += '</div>'
-            hard_hits.append(hit_html)
+            findings_entry = FindingBlock(
+                title=rel,
+                subtitle=f"Line {line_no}" if line_no else "Legacy TLS usage",
+                link=f"file://{os.path.abspath(path)}" + (f":{line_no}" if line_no else ""),
+                code=code_snippet,
+                code_language="smali" if rel.endswith(".smali") else "java",
+                open_by_default=True,
+            )
+            hard_hits.append(findings_entry)
         else:
             soft_hits.append(rel)
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
 
     if hard_hits:
-        return False, (
-            "<div style='margin-bottom:10px;'><strong>App code may use legacy TLS:</strong></div>"
-            + "".join(hard_hits) + mastg_ref
+        return TestResult(
+            name="Use of TLS 1.0 or 1.1",
+            status="FAIL",
+            summary_lines=[f"Legacy TLS usage in app code: {len(hard_hits)} file(s)"],
+            mastg_ref_html=mastg_ref,
+            findings=hard_hits,
         )
 
     # No app-owned risky usage; only library mentions or nothing
     if soft_hits:
-        # Trim to a few examples to keep the report tidy
         examples = [h for h in soft_hits if not is_library_path(h)]
         libs_only = len(examples) == 0
-        note = "Only library constants/enums mention TLSv1/1.1 (e.g., OkHttp/Conscrypt/React Native)." \
-               if libs_only else "Mentions found, but no enabling/initialization detected."
-        return True, note + mastg_ref
+        note = (
+            "Only library constants/enums mention TLSv1/1.1 (e.g., OkHttp/Conscrypt/React Native)."
+            if libs_only else "Mentions found, but no enabling/initialization detected."
+        )
+        return TestResult(
+            name="Use of TLS 1.0 or 1.1",
+            status="PASS",
+            summary_lines=[note],
+            mastg_ref_html=mastg_ref,
+        )
 
-    return True, f"None{mastg_ref}"
+    return TestResult(
+        name="Use of TLS 1.0 or 1.1",
+        status="PASS",
+        summary_lines=["No TLSv1/1.1 usage detected"],
+        mastg_ref_html=mastg_ref,
+    )
 
 def check_frida_tls_negotiation(base, wait_secs=12):
     """
@@ -10145,8 +10222,14 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
     # Build clean report
     if not prefs_accessed and not datastore_ops and not file_writes:
-        mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
-        return 'INFO', f"<strong>No SharedPreferences/DataStore usage observed during runtime</strong>{mastg_ref}"
+        mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+        return TestResult(
+            name="Dynamic SharedPreferences",
+            status="INFO",
+            summary_lines=["No SharedPreferences/DataStore usage observed during runtime"],
+            mastg_ref_html=mastg_ref,
+            is_dynamic=True,
+        )
 
     detail = []
 
@@ -10165,7 +10248,6 @@ def check_frida_sharedprefs(base, wait_secs=10):
             )
         if len(datastore_ops) > 20:
             detail.append(f"<div style='margin-left:15px'><em>...and {len(datastore_ops) - 20} more operations</em></div>")
-        detail.append("<br>")
 
     # SharedPreferences operations
     if prefs_accessed:
@@ -10190,8 +10272,6 @@ def check_frida_sharedprefs(base, wait_secs=10):
                     )
                 if len(data['writes']) > 10:
                     detail.append(f"<div style='margin-left:30px'><em>...and {len(data['writes']) - 10} more writes</em></div>")
-        detail.append("<br>")
-
     if file_writes:
         detail.append("<div><strong>Direct File Writes to shared_prefs/:</strong></div>")
         MAX_FILE_WRITE_ENTRIES = 30  # per file
@@ -10243,15 +10323,11 @@ def check_frida_sharedprefs(base, wait_secs=10):
             detail.append(
                 f"<div style='margin-left:15px'><em>...and {len(file_writes) - 10} more files</em></div>"
             )
-        detail.append("<br>")
+        # spacer handled by block structure
 
-    # MASTG reference
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
-    detail.append(mastg_ref)
 
-    # Add collapsible Frida output section
     if logs:
-        detail.append("<br>")
         detail.append(
             "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
             "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
@@ -10259,7 +10335,24 @@ def check_frida_sharedprefs(base, wait_secs=10):
         detail.append("\n".join(logs[-600:]))  # cap output to last 600 lines
         detail.append("\n</pre></details>")
 
-    return 'INFO', "<br>\n".join(detail)
+    summary_lines = []
+    if prefs_accessed:
+        summary_lines.append(f"SharedPreferences files accessed: {len(prefs_accessed)}")
+    if datastore_ops:
+        summary_lines.append(f"DataStore operations: {len(datastore_ops)}")
+    if file_writes:
+        summary_lines.append(f"Direct shared_prefs file writes: {len(file_writes)}")
+
+    detail.append(mastg_ref)
+
+    return TestResult(
+        name="Dynamic SharedPreferences",
+        status="INFO",
+        summary_lines=summary_lines or ["SharedPreferences activity observed"],
+        mastg_ref_html=mastg_ref,
+        raw_html="".join(detail),
+        is_dynamic=True,
+    )
 
 
 def check_frida_external_storage(base, wait_secs=10):
@@ -10525,8 +10618,6 @@ def check_frida_external_storage(base, wait_secs=10):
             if len(regular_files) > 20:
                 detail.append(f"<div style='margin-left:30px'><em>...and {len(regular_files) - 20} more files</em></div>")
 
-        detail.append("<br>")
-
     # Read operations section
     if read_operations:
         detail.append("<div><strong>Files Read from External Storage:</strong></div>")
@@ -10549,8 +10640,6 @@ def check_frida_external_storage(base, wait_secs=10):
             if len(regular_reads) > 20:
                 detail.append(f"<div style='margin-left:30px'><em>...and {len(regular_reads) - 20} more files</em></div>")
 
-        detail.append("<br>")
-
     # Access operations section
     if access_operations:
         detail.append("<div><strong>External Storage Paths Accessed:</strong></div>")
@@ -10560,15 +10649,8 @@ def check_frida_external_storage(base, wait_secs=10):
             detail.append(f"<div style='margin-left:15px'><code>{html.escape(path)}</code></div>")
         if len(unique_paths) > 30:
             detail.append(f"<div style='margin-left:15px'><em>...and {len(unique_paths) - 30} more paths</em></div>")
-        detail.append("<br>")
-
-    # MASTG reference
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0002/' target='_blank'>MASTG-TEST-0002: Testing External Storage for Sensitive Data</a></div>"
-    detail.append(mastg_ref)
-
-    # Add collapsible Frida output section (like Dynamic SharedPreferences)
     if logs:
-        detail.append("<br>")
         detail.append(
             "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
             "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
@@ -10576,7 +10658,24 @@ def check_frida_external_storage(base, wait_secs=10):
         detail.append("\n".join(logs[-600:]))  # cap output to last 600 lines
         detail.append("\n</pre></details>")
 
-    return 'INFO', "<br>\n".join(detail)
+    summary_lines = [
+        f"Writes: {len(write_operations)} file(s)",
+        f"Reads: {len(read_operations)} file(s)",
+        f"Accessed paths: {len(set(access_operations))} unique",
+    ]
+
+    status = 'FAIL' if any(w['sensitive'] for w in write_operations) else 'WARN'
+
+    detail.append(mastg_ref)
+
+    return TestResult(
+        name="Dynamic External Storage",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        raw_html="".join(detail),
+        is_dynamic=True,
+    )
 
 
 def check_frida_crypto_keys(base, wait_secs=10):
@@ -10706,18 +10805,32 @@ def check_frida_crypto_keys(base, wait_secs=10):
     os.unlink(tmp.name)
 
     if not findings:
-        return 'PASS', "<strong>No cryptographic operations observed during runtime</strong>"
+        return TestResult(
+            name="Dynamic Crypto Keys",
+            status="PASS",
+            summary_lines=["No cryptographic operations observed during runtime"],
+            is_dynamic=True,
+        )
 
     detail = [f"<div><strong>Cryptographic operations detected:</strong></div>"]
     if weak_keys:
-        detail.append(f"<div><strong>WARNING: Weak keys found:</strong> {', '.join(set(weak_keys))}</div><br>")
+        detail.append(f"<div><strong>WARNING: Weak keys found:</strong> {', '.join(set(weak_keys))}</div>")
 
     detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:30]])
     if len(findings) > 30:
         detail.append(f"<div>...and {len(findings) - 30} more</div>")
 
     status = 'FAIL' if weak_keys else 'PASS'
-    return status, "<br>\n".join(detail)
+    return TestResult(
+        name="Dynamic Crypto Keys",
+        status=status,
+        summary_lines=[
+            f"Crypto operations observed: {len(findings)}",
+            f"Weak keys: {len(set(weak_keys))}" if weak_keys else "No weak keys detected",
+        ],
+        raw_html="".join(detail),
+        is_dynamic=True,
+    )
 
 
 def check_frida_clipboard(base, wait_secs=10):
