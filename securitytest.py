@@ -2837,10 +2837,14 @@ def check_file_provider(res_dir):
             mastg_ref_html=mastg_ref,
         )
 
+    unique_files = len({f.title for f in findings})
     return TestResult(
         name="FileProvider Paths",
         status="FAIL",
-        summary_lines=[f"Insecure FileProvider configurations: {len(findings)}"],
+        summary_lines=[
+            f"Insecure FileProvider configurations: {len(findings)}",
+            f"Affected files: {unique_files}",
+        ],
         mastg_ref_html=mastg_ref,
         findings=findings,
     )
@@ -5837,6 +5841,34 @@ def check_sharedprefs_encryption(base):
         files_with_unencrypted[file_path].append(finding)
 
     finding_blocks = []
+    # Encrypted usage details (if present)
+    if encrypted_count > 0:
+        files_with_encrypted = {}
+        for finding in findings['encrypted']:
+            file_path = finding['file']
+            files_with_encrypted.setdefault(file_path, []).append(finding)
+
+        for file_path in sorted(files_with_encrypted.keys()):
+            full = os.path.abspath(os.path.join(base, file_path))
+            file_findings = files_with_encrypted[file_path]
+
+            code_lines = []
+            for finding in file_findings:
+                code_lines.append(f"Line {finding['line']}")
+                code_lines.append(finding['snippet'])
+                code_lines.append("")
+
+            finding_blocks.append(
+                FindingBlock(
+                    title=file_path,
+                    subtitle=f"Encrypted usage: {len(file_findings)}",
+                    link=f"file://{full}",
+                    code="\n".join(code_lines).rstrip(),
+                    code_language="smali",
+                    open_by_default=False,
+                )
+            )
+
     for file_path in sorted(files_with_unencrypted.keys()):
         full = os.path.abspath(os.path.join(base, file_path))
         file_findings = files_with_unencrypted[file_path]
@@ -12069,7 +12101,7 @@ SUMMARY_BUILDERS = {
     "Browsable DeepLinks": summary_with_count("Browsable deep links"),
     "Deep Link Intent Filter Misconfiguration": summary_with_count("Deep link misconfigurations"),
     "Custom URI Schemes": summary_with_count("Custom URI scheme handlers"),
-    "Keyboard Cache": summary_with_count("Keyboard cache issues"),
+    "Keyboard Cache": lambda status, det, cnt: [f"Vulnerable fields: {cnt or 0}"],
     "OS Command Injection": summary_with_count("Command injection surfaces"),
     "Insecure HTTP URIs": summary_with_count("HTTP URI usages"),
     "SQLi via ContentProvider": summary_with_count("ContentProvider SQLi surfaces"),
