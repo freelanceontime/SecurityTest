@@ -10698,8 +10698,6 @@ def check_frida_external_storage(base, wait_secs=10):
 
     status = 'FAIL' if any(w['sensitive'] for w in write_operations) else 'WARN'
 
-    detail.append(mastg_ref)
-
     return TestResult(
         name="Dynamic External Storage",
         status=status,
