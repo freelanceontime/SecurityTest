@@ -277,7 +277,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
     print("\n[!] INSTRUCTIONS:")
     for i, instruction in enumerate(instructions, 1):
         print(f"    {i}. {instruction}")
-    print("    {0}. When done testing, press ENTER to stop and analyze results".format(len(instructions) + 1))
+    print("    {0}. When done testing, press ENTER to stop and analyze results (or Ctrl+C to force exit)".format(len(instructions) + 1))
     print("\n[*] Frida output will appear below as you use the app...")
     print("="*70 + "\n")
 
@@ -296,6 +296,11 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
         fl = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
+        # Unix: Also make stdin non-blocking for better input detection
+        stdin_fd = sys.stdin.fileno()
+        stdin_fl = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
+        fcntl.fcntl(stdin_fd, fcntl.F_SETFL, stdin_fl | os.O_NONBLOCK)
+
     # Real-time log collection with user prompt
     try:
         while True:
@@ -308,11 +313,15 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                     if key == '\r' or key == '\n':
                         user_pressed_enter = True
             else:
-                # Unix: Use select on stdin
-                user_ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                # Unix: Use select on stdin with longer timeout for better responsiveness
+                user_ready, _, _ = select.select([sys.stdin], [], [], 0.5)
                 if user_ready:
-                    input()  # User pressed Enter
-                    user_pressed_enter = True
+                    try:
+                        # Read and discard the input
+                        sys.stdin.readline()
+                        user_pressed_enter = True
+                    except:
+                        pass
 
             if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
@@ -376,6 +385,13 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
     except KeyboardInterrupt:
         print("\n[!] Test interrupted by user")
         pass
+    finally:
+        # Restore stdin to blocking mode on Unix
+        if not is_windows:
+            try:
+                fcntl.fcntl(stdin_fd, fcntl.F_SETFL, stdin_fl)
+            except:
+                pass
 
     # Only do graceful exit and output draining if requested
     if send_exit_on_stop:
@@ -1631,13 +1647,14 @@ def run_cmd(cmd):
 def extract_apk_metadata(apk_path, manifest_path):
     """
     Extract APK metadata for the report header.
-    Returns: dict with package, version_name, version_code, size_mb
+    Returns: dict with package, version_name, version_code, size_mb, size_bytes
     """
     metadata = {
         'package': 'Unknown',
         'version_name': 'Unknown',
         'version_code': 'Unknown',
-        'size_mb': 'Unknown'
+        'size_mb': 'Unknown',
+        'size_bytes': None,
     }
 
     # Try aapt first (most reliable for version info)
@@ -1691,7 +1708,8 @@ def extract_apk_metadata(apk_path, manifest_path):
         try:
             size_bytes = os.path.getsize(apk_path)
             size_mb = size_bytes / (1024 * 1024)
-            metadata['size_mb'] = f"{size_mb:.1f}"
+            metadata['size_bytes'] = size_bytes
+            metadata['size_mb'] = round(size_mb, 1)
         except Exception as e:
             print(f"[!] Could not get APK size: {e}")
 
@@ -13113,6 +13131,54 @@ def format_size_diff(current_bytes, previous_bytes):
     return f"{sign}{diff_mb:.1f} MB"
 
 
+def parse_previous_scan_history(package_name, reports_dir='.'):
+    """
+    Parse all previous scan history from the HTML report.
+
+    Returns: list of dicts with keys:
+        - version: str
+        - size_mb: float
+        - size_diff: str
+        - scan_time: str
+
+    Returns empty list if no previous report found or parsing fails.
+    """
+    report_filename = os.path.join(reports_dir, f"{package_name}.report.html")
+
+    if not os.path.exists(report_filename):
+        return []
+
+    try:
+        with open(report_filename, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        history = []
+
+        # Look for all "Previous scan:" entries
+        # Pattern: <strong>Previous scan:</strong> version X.Y (Z.W MB, +A.B MB since last scan)<br>
+        #          <span style="opacity: 0.8;">Scanned on Date at Time</span>
+        pattern = r'<strong>Previous scan:</strong>\s*version\s+([^\s(]+)\s+\(([0-9.]+)\s*MB,\s*([^)]+)\s+since last scan\)[^<]*<br>\s*<span[^>]*>([^<]+)</span>'
+
+        for match in re.finditer(pattern, html_content, re.DOTALL):
+            version = match.group(1).strip()
+            size_mb = float(match.group(2))
+            size_diff = match.group(3).strip()
+            scan_time = match.group(4).strip()
+
+            history.append({
+                'version': version,
+                'size_mb': size_mb,
+                'size_diff': size_diff,
+                'scan_time': scan_time,
+            })
+
+        return history
+
+    except Exception as e:
+        print(f"[!] Warning: Could not parse previous scan history: {e}")
+        return []
+
+
 def generate_library_changes_section(current_lib_paths, previous_info):
     """
     Generate HTML for the Native Library Changes section (part of header block).
@@ -13130,8 +13196,17 @@ def generate_library_changes_section(current_lib_paths, previous_info):
         return html
 
     previous_libs = previous_info['lib_paths']
-    added_libs = sorted(current_lib_paths - previous_libs)
-    removed_libs = sorted(previous_libs - current_lib_paths)
+
+    # Extract unique basenames (just the .so filename, not the full path)
+    def get_unique_basenames(lib_paths):
+        """Extract unique .so filenames from full paths"""
+        return set(os.path.basename(path) for path in lib_paths)
+
+    current_basenames = get_unique_basenames(current_lib_paths)
+    previous_basenames = get_unique_basenames(previous_libs)
+
+    added_libs = sorted(current_basenames - previous_basenames)
+    removed_libs = sorted(previous_basenames - current_basenames)
 
     if not added_libs and not removed_libs:
         html = "<div style='margin-top:20px; padding:15px; background:rgba(255,255,255,0.15); border-radius:8px; backdrop-filter:blur(10px); color:white;'>"
@@ -13139,29 +13214,26 @@ def generate_library_changes_section(current_lib_paths, previous_info):
         html += "</div>\n"
         return html
 
-    # Show changes
+    # Show changes with + and - prefixes
     html = "<div style='margin-top:20px; padding:15px; background:rgba(255,255,255,0.15); border-radius:8px; backdrop-filter:blur(10px); color:white;'>\n"
     html += "<div style='font-size:14px; font-weight:600; margin-bottom:10px;'>Native Library Changes Since Last Scan</div>\n"
 
-    if added_libs:
-        html += "<div style='margin-bottom:10px;'>\n"
-        html += f"<div style='font-size:12px; margin-bottom:5px;'><strong>New Libraries ({len(added_libs)}):</strong></div>\n"
-        html += "<ul style='margin-left:20px; font-family:monospace; font-size:11px; margin-top:5px;'>\n"
-        for lib in added_libs[:10]:  # Limit to first 10 to avoid cluttering header
-            html += f"<li style='margin-bottom:3px;'><code style='background:rgba(34,197,94,0.2); padding:2px 6px; border-radius:3px; color:white;'>{escape(lib)}</code></li>\n"
-        if len(added_libs) > 10:
-            html += f"<li style='opacity:0.8;'>...and {len(added_libs) - 10} more</li>\n"
-        html += "</ul>\n</div>\n"
+    if removed_libs or added_libs:
+        html += "<div style='font-family:monospace; font-size:11px; line-height:1.8;'>\n"
 
-    if removed_libs:
-        html += "<div style='margin-bottom:5px;'>\n"
-        html += f"<div style='font-size:12px; margin-bottom:5px;'><strong>Removed Libraries ({len(removed_libs)}):</strong></div>\n"
-        html += "<ul style='margin-left:20px; font-family:monospace; font-size:11px; margin-top:5px;'>\n"
-        for lib in removed_libs[:10]:  # Limit to first 10
-            html += f"<li style='margin-bottom:3px;'><code style='background:rgba(239,68,68,0.2); padding:2px 6px; border-radius:3px; color:white;'>{escape(lib)}</code></li>\n"
-        if len(removed_libs) > 10:
-            html += f"<li style='opacity:0.8;'>...and {len(removed_libs) - 10} more</li>\n"
-        html += "</ul>\n</div>\n"
+        # Show removed libraries with - prefix
+        for lib in removed_libs[:20]:  # Show up to 20 changes
+            html += f"<div style='margin-bottom:2px;'><code style='background:rgba(239,68,68,0.2); padding:2px 6px; border-radius:3px; color:white;'>- {escape(lib)}</code></div>\n"
+
+        # Show added libraries with + prefix
+        for lib in added_libs[:20]:  # Show up to 20 changes
+            html += f"<div style='margin-bottom:2px;'><code style='background:rgba(34,197,94,0.2); padding:2px 6px; border-radius:3px; color:white;'>+ {escape(lib)}</code></div>\n"
+
+        total_changes = len(removed_libs) + len(added_libs)
+        if total_changes > 20:
+            html += f"<div style='opacity:0.8; margin-top:5px;'>...and {total_changes - 20} more changes</div>\n"
+
+        html += "</div>\n"
 
     html += "</div>\n"
     return html
@@ -13703,10 +13775,24 @@ def main():
     # Generate HTML for previous scan comparison
     previous_scan_info_html = ""
     if previous_info:
-        size_diff = format_size_diff(
-            int(metadata['size_mb'] * 1024 * 1024),
-            previous_info['apk_size_bytes']
-        )
+        # Parse all previous scan history
+        scan_history = []
+
+        # Add the most recent previous scan
+        current_size_bytes = metadata.get('size_bytes')
+        if current_size_bytes is None:
+            try:
+                current_size_bytes = int(float(metadata['size_mb']) * 1024 * 1024)
+            except (TypeError, ValueError):
+                current_size_bytes = None
+
+        size_diff = None
+        if current_size_bytes is not None:
+            size_diff = format_size_diff(
+                current_size_bytes,
+                previous_info['apk_size_bytes']
+            )
+
         # Parse the scan started date to extract date and time separately
         scan_datetime = previous_info['scan_started_at']
         # Format: "December 10, 2025, 14:30:15" -> "Scanned on December 10, 2025 at 14:30:15"
@@ -13716,13 +13802,31 @@ def main():
         else:
             formatted_scan_time = f"Scanned on {scan_datetime}"
 
-        previous_scan_info_html = f'''
+        size_diff_text = escape(size_diff) if size_diff is not None else "unknown"
+
+        # Add the current previous scan to history
+        scan_history.append({
+            'version': previous_info['version'],
+            'size_mb': previous_info['apk_size_mb'],
+            'size_diff': size_diff_text,
+            'scan_time': formatted_scan_time,
+        })
+
+        # Get older scan history if it exists
+        older_scans = parse_previous_scan_history(metadata['package'], reports_dir='.')
+        scan_history.extend(older_scans)
+
+        # Generate HTML for all previous scans
+        previous_scan_info_html = '''
     <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 15px; margin-top: 15px;">
-      <div style="font-size: 12px; opacity: 0.9;">
-        <strong>Previous scan:</strong> version {escape(previous_info['version'])} ({previous_info['apk_size_mb']:.1f} MB, {escape(size_diff)} since last scan)<br>
-        <span style="opacity: 0.8;">{escape(formatted_scan_time)}</span>
+'''
+        for scan in scan_history:
+            previous_scan_info_html += f'''      <div style="font-size: 12px; opacity: 0.9; margin-bottom: 10px;">
+        <strong>Previous scan:</strong> version {escape(scan['version'])} ({scan['size_mb']:.1f} MB, {scan['size_diff']} since last scan)<br>
+        <span style="opacity: 0.8;">{escape(scan['scan_time'])}</span>
       </div>
-    </div>
+'''
+        previous_scan_info_html += '''    </div>
 '''
 
     # Generate HTML for library changes section
