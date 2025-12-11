@@ -921,6 +921,24 @@ HTML_TEMPLATE = '''
     color: #1e40af;
   }}
 
+  /* === LIGHT MODE CONTRAST IMPROVEMENTS === */
+
+  /* Ensure #666 gray text has enough contrast in light mode */
+  div[style*="color:#666"],
+  span[style*="color:#666"] {{
+    color: #4b5563 !important;
+  }}
+
+  /* Ensure table text is dark enough */
+  td {{
+    color: #1f2937;
+  }}
+
+  /* Ensure labels are readable */
+  label {{
+    color: #1f2937;
+  }}
+
   /* === RESPONSIVE === */
   @media (max-width: 768px) {{
     body {{
@@ -951,6 +969,534 @@ HTML_TEMPLATE = '''
     th, td {{
       padding: 8px 10px;
     }}
+  }}
+
+  /* === DARK MODE TOGGLE BUTTON === */
+  .dark-mode-toggle {{
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1000;
+    background: rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50px;
+    padding: 10px 20px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: white;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }}
+
+  .dark-mode-toggle:hover {{
+    background: rgba(255, 255, 255, 0.3);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+    transform: translateY(-2px);
+  }}
+
+  .dark-mode-toggle:active {{
+    transform: translateY(0);
+  }}
+
+  /* === DARK MODE STYLES === */
+  [data-theme="dark"] {{
+    /* Global dark mode colors */
+  }}
+
+  [data-theme="dark"] body {{
+    background: #0f172a;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] h1 {{
+    color: #f1f5f9;
+    border-bottom-color: #3b82f6;
+  }}
+
+  [data-theme="dark"] h2 {{
+    color: #f1f5f9;
+    background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  }}
+
+  [data-theme="dark"] h3 {{
+    color: #cbd5e1;
+  }}
+
+  [data-theme="dark"] h4 {{
+    color: #94a3b8;
+  }}
+
+  /* Dark mode details/summary */
+  [data-theme="dark"] details {{
+    background: #1e293b;
+    border-color: #334155;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }}
+
+  [data-theme="dark"] details:hover {{
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    border-color: #475569;
+  }}
+
+  [data-theme="dark"] details[open] {{
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }}
+
+  [data-theme="dark"] summary {{
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] summary:hover {{
+    background: #293548;
+  }}
+
+  [data-theme="dark"] summary .bullet {{
+    color: #94a3b8;
+  }}
+
+  [data-theme="dark"] summary .check-name {{
+    color: #cbd5e1;
+  }}
+
+  /* Dark mode status badges - high contrast */
+  [data-theme="dark"] summary.pass .check-status {{
+    background: #065f46;
+    color: #d1fae5;
+  }}
+
+  [data-theme="dark"] summary.fail .check-status {{
+    background: #991b1b;
+    color: #fee2e2;
+  }}
+
+  [data-theme="dark"] summary.warn .check-status {{
+    background: #92400e;
+    color: #fef3c7;
+  }}
+
+  /* Dark mode content areas */
+  [data-theme="dark"] details > div {{
+    border-top-color: #334155;
+    background: #0f172a;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .detail-content {{
+    border-top-color: #334155;
+    background: #0f172a;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .detail-content > div {{
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .detail-list-item {{
+    color: #cbd5e1;
+  }}
+
+  [data-theme="dark"] .detail-section {{
+    color: #e2e8f0;
+  }}
+
+  /* Dark mode code blocks */
+  [data-theme="dark"] details > pre {{
+    background: #1e293b;
+    color: #e2e8f0;
+    border-color: #334155;
+  }}
+
+  [data-theme="dark"] pre {{
+    background: #0f172a;
+    color: #e2e8f0;
+    border-color: #1e293b;
+  }}
+
+  [data-theme="dark"] code {{
+    background: #1e293b;
+    color: #e2e8f0;
+  }}
+
+  /* Code snippets stay the same in dark mode (already dark) */
+  [data-theme="dark"] .code-snippet {{
+    background: #0f172a !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #1e293b !important;
+  }}
+
+  [data-theme="dark"] .code-evidence {{
+    background: #1e293b;
+    color: #e2e8f0;
+    border-left-color: #22c55e;
+  }}
+
+  [data-theme="dark"] .highlight {{
+    background: #713f12;
+    color: #fef3c7;
+  }}
+
+  /* Dark mode storage/file elements */
+  [data-theme="dark"] .storage-section {{
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .storage-item {{
+    color: #cbd5e1;
+  }}
+
+  [data-theme="dark"] .storage-issue-box {{
+    background: #422006;
+    border-left-color: #fbbf24;
+    color: #fef3c7;
+  }}
+
+  [data-theme="dark"] .file-list-box {{
+    background: #1e293b;
+    border-left-color: #475569;
+    color: #e2e8f0;
+  }}
+
+  /* Dark mode tables */
+  [data-theme="dark"] table {{
+    background: #1e293b;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }}
+
+  [data-theme="dark"] thead {{
+    background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+  }}
+
+  [data-theme="dark"] td {{
+    border-bottom-color: #334155;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] tbody tr:hover {{
+    background: #293548;
+  }}
+
+  /* Dark mode links - higher contrast */
+  [data-theme="dark"] a {{
+    color: #60a5fa;
+  }}
+
+  [data-theme="dark"] a:hover {{
+    color: #93c5fd;
+  }}
+
+  /* Dark mode info boxes */
+  [data-theme="dark"] .info-box {{
+    background: #1e3a8a;
+    border-left-color: #3b82f6;
+    color: #dbeafe;
+  }}
+
+  [data-theme="dark"] .info-box em {{
+    color: #93c5fd;
+  }}
+
+  [data-theme="dark"] .warning-box {{
+    background: #422006;
+    border-left-color: #f59e0b;
+    color: #fef3c7;
+  }}
+
+  [data-theme="dark"] .error-box {{
+    background: #450a0a;
+    border-left-color: #dc2626;
+    color: #fee2e2;
+  }}
+
+  /* Dark mode filter controls */
+  [data-theme="dark"] .filter-controls {{
+    background: #1e293b;
+    border-color: #334155;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }}
+
+  [data-theme="dark"] .filter-select {{
+    background: #0f172a;
+    border-color: #475569;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .filter-select:hover {{
+    border-color: #3b82f6;
+  }}
+
+  [data-theme="dark"] .filter-select:focus {{
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  }}
+
+  /* Dark mode utility classes */
+  [data-theme="dark"] .chevron {{
+    color: #94a3b8;
+  }}
+
+  [data-theme="dark"] strong {{
+    color: #f1f5f9;
+  }}
+
+  [data-theme="dark"] .text-success {{
+    color: #4ade80;
+  }}
+
+  [data-theme="dark"] .text-danger {{
+    color: #f87171;
+  }}
+
+  [data-theme="dark"] .text-warning {{
+    color: #fbbf24;
+  }}
+
+  [data-theme="dark"] .text-muted {{
+    color: #94a3b8;
+  }}
+
+  /* Dark mode finding cards */
+  [data-theme="dark"] .finding-card {{
+    background: #1e293b;
+    border-left-color: #f59e0b;
+  }}
+
+  [data-theme="dark"] .finding-detail {{
+    background: #0f172a;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] summary.warning {{
+    background: #422006;
+    border-left-color: #f59e0b;
+  }}
+
+  [data-theme="dark"] summary.warning:hover {{
+    background: #713f12;
+  }}
+
+  [data-theme="dark"] .code-toggle {{
+    color: #60a5fa;
+  }}
+
+  [data-theme="dark"] .code-toggle:hover {{
+    color: #93c5fd;
+  }}
+
+  /* Dark mode status colors */
+  [data-theme="dark"] .pass {{
+    color: #4ade80;
+  }}
+
+  [data-theme="dark"] .fail {{
+    color: #f87171;
+  }}
+
+  [data-theme="dark"] .warn {{
+    color: #fbbf24;
+  }}
+
+  [data-theme="dark"] .info {{
+    color: #60a5fa;
+  }}
+
+  /* Dark mode header gradient styling */
+  [data-theme="dark"] .report-header {{
+    background: linear-gradient(135deg, #312e81 0%, #581c87 100%) !important;
+  }}
+
+  /* Library changes section - ensure readability in dark mode */
+  [data-theme="dark"] code[style*="background:rgba(34,197,94"] {{
+    background: rgba(34,197,94,0.3) !important;
+  }}
+
+  [data-theme="dark"] code[style*="background:rgba(239,68,68"] {{
+    background: rgba(239,68,68,0.3) !important;
+  }}
+
+  /* === DARK MODE INLINE STYLE OVERRIDES === */
+
+  /* Frida output sections - improve contrast */
+  [data-theme="dark"] summary[style*="color:#0066cc"] {{
+    color: #60a5fa !important;
+  }}
+
+  [data-theme="dark"] details summary[style*="color:#0066cc"] {{
+    color: #60a5fa !important;
+  }}
+
+  [data-theme="dark"] pre[style*="background:#f5f5f5"] {{
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #334155 !important;
+  }}
+
+  /* Low contrast gray text (#666) */
+  [data-theme="dark"] div[style*="color:#666"],
+  [data-theme="dark"] span[style*="color:#666"] {{
+    color: #94a3b8 !important;
+  }}
+
+  /* Critical/High severity labels - keep high contrast */
+  [data-theme="dark"] span[style*="color:#dc3545"],
+  [data-theme="dark"] div[style*="color:#dc3545"],
+  [data-theme="dark"] strong[style*="color:#dc3545"] {{
+    color: #f87171 !important;
+  }}
+
+  /* Warning/Medium severity - orange/yellow */
+  [data-theme="dark"] span[style*="color:#ffc107"] {{
+    color: #fbbf24 !important;
+  }}
+
+  /* Warning boxes (red background) */
+  [data-theme="dark"] div[style*="background:#ffe6e6"] {{
+    background: #450a0a !important;
+    border-left-color: #dc2626 !important;
+  }}
+
+  [data-theme="dark"] div[style*="background:#ffe6e6"] strong[style*="color:#721c24"],
+  [data-theme="dark"] strong[style*="color:#721c24"] {{
+    color: #fecaca !important;
+  }}
+
+  /* Success boxes (green background) */
+  [data-theme="dark"] div[style*="background:#d4edda"] {{
+    background: #064e3b !important;
+    border-left-color: #10b981 !important;
+    color: #d1fae5 !important;
+  }}
+
+  /* Storage secure boxes */
+  [data-theme="dark"] .storage-secure-box[style*="background:#d4edda"] {{
+    background: #064e3b !important;
+    color: #d1fae5 !important;
+  }}
+
+  /* Info boxes (yellow background) */
+  [data-theme="dark"] div[style*="background:#fff8e1"] {{
+    background: #422006 !important;
+    color: #fef3c7 !important;
+  }}
+
+  /* Table filter labels and search */
+  [data-theme="dark"] label[style*="font-weight:600"] {{
+    color: #e2e8f0 !important;
+  }}
+
+  [data-theme="dark"] input[type="text"][style*="border:1px solid #ced4da"] {{
+    background: #1e293b !important;
+    border-color: #475569 !important;
+    color: #e2e8f0 !important;
+  }}
+
+  [data-theme="dark"] input[type="text"][style*="border:1px solid #ced4da"]:focus {{
+    border-color: #60a5fa !important;
+    outline: none !important;
+  }}
+
+  [data-theme="dark"] input[type="text"]::placeholder {{
+    color: #64748b !important;
+  }}
+
+  /* Table cells with low contrast */
+  [data-theme="dark"] td[style*="color:#666"] {{
+    color: #cbd5e1 !important;
+  }}
+
+  /* Clipboard content markers and character counts */
+  [data-theme="dark"] div[style*="font-family:monospace"][style*="color:#666"] {{
+    color: #cbd5e1 !important;
+  }}
+
+  /* SQLi severity labels - Critical, High, Medium, Low */
+  [data-theme="dark"] td span[style*="color:#dc3545; font-weight:bold"] {{
+    color: #f87171 !important;
+  }}
+
+  [data-theme="dark"] label span[style*="color:#dc3545; font-weight:600"] {{
+    color: #f87171 !important;
+  }}
+
+  /* Row numbers in tables */
+  [data-theme="dark"] td:first-child {{
+    color: #cbd5e1 !important;
+  }}
+
+  /* Sensitive field indicators */
+  [data-theme="dark"] span[style*="(SENSITIVE"] {{
+    color: #fca5a5 !important;
+  }}
+
+  /* Code blocks with specific backgrounds */
+  [data-theme="dark"] div[style*="background:#f8f9fa"] {{
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-color: #334155 !important;
+  }}
+
+  /* White background divs in details */
+  [data-theme="dark"] div[style*="background:#fff"] {{
+    background: #0f172a !important;
+    border-color: #334155 !important;
+    color: #e2e8f0 !important;
+  }}
+
+  /* Additional warning/error text colors */
+  [data-theme="dark"] div[style*="color:#fd7e14"] {{
+    color: #fb923c !important;
+  }}
+
+  /* Ensure all inline colored divs have readable text */
+  [data-theme="dark"] div[style*="background:#"] {{
+    color: inherit !important;
+  }}
+
+  /* Fix checkbox labels */
+  [data-theme="dark"] label[style*="cursor:pointer"] {{
+    color: #e2e8f0 !important;
+  }}
+
+  /* Ensure table backgrounds are dark */
+  [data-theme="dark"] table[style*="background:"] {{
+    background: #1e293b !important;
+  }}
+
+  /* Ensure proper contrast for emphasis text */
+  [data-theme="dark"] em {{
+    color: #cbd5e1 !important;
+  }}
+
+  /* Fix any remaining light backgrounds */
+  [data-theme="dark"] div[style*="background:#f5f5f5"],
+  [data-theme="dark"] div[style*="background:#fafafa"],
+  [data-theme="dark"] div[style*="background:#f9f9f9"] {{
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+  }}
+
+  /* Show Full buttons in Dynamic Logging table */
+  [data-theme="dark"] button[style*="background:#6c757d"],
+  [data-theme="dark"] button[style*="background:#007bff"] {{
+    background: #3b82f6 !important;
+    color: #ffffff !important;
+  }}
+
+  [data-theme="dark"] button[style*="background:#6c757d"]:hover,
+  [data-theme="dark"] button[style*="background:#007bff"]:hover {{
+    background: #60a5fa !important;
+  }}
+
+  /* Pre blocks toggled by Show Full buttons */
+  [data-theme="dark"] pre[style*="background:#fff"],
+  [data-theme="dark"] pre[style*="background:#f8f9fa"] {{
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-color: #334155 !important;
   }}
 </style>
 <script>
@@ -990,10 +1536,52 @@ function applyFilters() {{
     row.style.display = show ? '' : 'none';
   }});
 }}
+
+// Dark mode toggle functionality
+function toggleDarkMode() {{
+  const html = document.documentElement;
+  const currentTheme = html.getAttribute('data-theme');
+  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+
+  html.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+
+  // Update button text
+  updateDarkModeButton(newTheme);
+}}
+
+function updateDarkModeButton(theme) {{
+  const button = document.getElementById('darkModeToggle');
+  if (button) {{
+    if (theme === 'dark') {{
+      button.textContent = 'Light Mode';
+    }} else {{
+      button.textContent = 'Dark Mode';
+    }}
+  }}
+}}
+
+// Initialize dark mode on page load
+function initDarkMode() {{
+  const savedTheme = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+
+  document.documentElement.setAttribute('data-theme', theme);
+  updateDarkModeButton(theme);
+}}
+
+// Run on page load
+document.addEventListener('DOMContentLoaded', initDarkMode);
 </script>
 </head>
 <body>
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; margin-bottom: 30px; color: white; box-shadow: 0 4px 20px rgba(0,0,0,0.15);">
+<!-- Dark Mode Toggle Button -->
+<button id="darkModeToggle" class="dark-mode-toggle" onclick="toggleDarkMode()">
+  Dark Mode
+</button>
+
+<div class="report-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px; margin-bottom: 30px; color: white; box-shadow: 0 4px 20px rgba(0,0,0,0.15);">
   <h1 style="color: white; border: none; margin: 0; padding: 0; font-size: 32px; margin-bottom: 20px;">Mobile Security Assessment Report</h1>
 
   <div style="background: rgba(255,255,255,0.15); border-radius: 8px; padding: 20px; backdrop-filter: blur(10px);">
@@ -1012,6 +1600,8 @@ function applyFilters() {{
       </div>
     </div>
 
+    {previous_scan_info}
+
     <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 15px; margin-top: 5px;">
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 13px;">
         <div>
@@ -1023,6 +1613,8 @@ function applyFilters() {{
       </div>
     </div>
   </div>
+
+  {library_changes_section}
 </div>
 
 {sections}
@@ -1409,9 +2001,24 @@ def is_likely_secret(value, key_name=""):
 # Security check functions
 
 def check_checksec(lib_dir):
-    out = run_cmd(f"checksec --dir={lib_dir}")
+    # Check if lib directory exists and has .so files
+    if not os.path.exists(lib_dir):
+        return True, "No native libraries found (lib directory does not exist)"
+
+    # Count .so files
+    so_count = 0
+    for root, _, files in os.walk(lib_dir):
+        so_count += sum(1 for f in files if f.endswith('.so'))
+
+    if so_count == 0:
+        return True, "No native libraries found (no .so files in lib directory)"
+
+    # Run checksec and suppress any warnings/errors
+    out = run_cmd(f"checksec --dir={lib_dir} 2>/dev/null")
     text = re.sub(r"\x1b\[[0-9;]*m", "", out)
     text = re.sub(r"[^\x20-\x7E\n]", "", text)
+    # Remove excessive blank lines
+    text = re.sub(r'\n\n+', '\n\n', text)
     return True, text
 
 # Other check_* implementations (unchanged)...
@@ -10375,8 +10982,6 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if file_writes:
         summary_lines.append(f"Direct shared_prefs file writes: {len(file_writes)}")
 
-    detail.append(mastg_ref)
-
     return TestResult(
         name="Dynamic SharedPreferences",
         status="INFO",
@@ -10716,6 +11321,7 @@ def check_frida_pending_intent(base, wait_secs=10):
     """
     manifest = os.path.join(base, 'AndroidManifest.xml')
     pkg_prefix = ET.parse(manifest).getroot().attrib.get('package', '')
+    pkg_name = pkg_prefix
 
     out = subprocess.check_output(['adb', 'shell', 'pm', 'list', 'packages', pkg_prefix], text=True)
     candidates = [l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('package:')]
@@ -10880,6 +11486,26 @@ def check_frida_pending_intent(base, wait_secs=10):
         detail.append("\n".join(logs[-400:]))
         detail.append("\n</pre></details>")
 
+    if pkg_name:
+        demo_cmd = (
+            f"adb shell am broadcast --receiver-include-background "
+            f"-a {pkg_name}.MUTABLE_APPROVAL "
+            f"-n {pkg_name}/.vulnerabilities.MutablePendingIntentReceiver "
+            f'--es transfer_amount \"9999.00\" '
+            f'--es recipient \"4444444444\" '
+            f'--es current_account \"1234567890\" '
+            f'--es note \"malicious override\" '
+            f'--es auth_token \"Bearer attacker-token\"'
+        )
+        detail.append(
+            "<div style='margin-top:8px'><strong>Reproduce via ADB (adjust extras as needed):</strong><br>"
+            f"<code>{html.escape(demo_cmd)}</code><br>"
+            "<em>If you can trigger the real notification, use "
+            "<code>adb shell dumpsys activity broadcasts</code> or "
+            "<code>adb shell dumpsys notification</code> to inspect the PendingIntent/intent payload and mirror the extras.</em>"
+            "</div>"
+        )
+
     summary_lines = [
         f"PendingIntents created: {len(events)}",
         f"Mutable or missing FLAG_IMMUTABLE: {len(missing_immutable)}",
@@ -10887,8 +11513,6 @@ def check_frida_pending_intent(base, wait_secs=10):
     ]
 
     status = 'FAIL' if missing_immutable else 'WARN'
-    detail.append(mastg_ref)
-
     return TestResult(
         name="Dynamic PendingIntent",
         status=status,
@@ -11737,12 +12361,15 @@ def check_dangerous_permissions(manifest):
         'READ_MEDIA_IMAGES': 'Media (Images)', 'READ_MEDIA_VIDEO': 'Media (Video)',
         'READ_CALENDAR': 'Calendar (Read)', 'WRITE_CALENDAR': 'Calendar (Write)',
         'BODY_SENSORS': 'Body Sensors', 'ACTIVITY_RECOGNITION': 'Activity Recognition',
-        'BLUETOOTH_SCAN': 'Bluetooth (Scan)', 'POST_NOTIFICATIONS': 'Notifications',
+        'BLUETOOTH_SCAN': 'Bluetooth (Scan)', 'BLUETOOTH_CONNECT': 'Bluetooth (Connect)',
+        'BLUETOOTH_ADVERTISE': 'Bluetooth (Advertise)', 'POST_NOTIFICATIONS': 'Notifications',
+        'ACCESS_WIFI_STATE': 'WiFi (State)', 'ACCESS_NETWORK_STATE': 'Network (State)',
+        'BLUETOOTH': 'Bluetooth (Legacy)', 'BLUETOOTH_ADMIN': 'Bluetooth (Admin)',
     }
 
     critical_permissions = {
-        'ACCESS_BACKGROUND_LOCATION', 'RECORD_AUDIO', 'CAMERA', 'READ_SMS',
-        'SEND_SMS', 'READ_CALL_LOG', 'WRITE_CALL_LOG',
+        'ACCESS_BACKGROUND_LOCATION', 'ACCESS_FINE_LOCATION', 'RECORD_AUDIO',
+        'CAMERA', 'READ_SMS', 'SEND_SMS', 'READ_CALL_LOG', 'WRITE_CALL_LOG',
     }
 
     try:
@@ -11752,13 +12379,18 @@ def check_dangerous_permissions(manifest):
         return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>"
 
     permissions = []
-    for perm in root.findall('.//{http://schemas.android.com/apk/res/android}uses-permission'):
+    # Find all uses-permission elements (tag is NOT in android namespace, only attributes are)
+    for perm in root.findall('.//uses-permission'):
         name = perm.get('{http://schemas.android.com/apk/res/android}name', '')
-        if name.startswith('android.permission.'):
+        if name and name.startswith('android.permission.'):
             permissions.append(name.replace('android.permission.', ''))
+        elif name:
+            # Also track non-android permissions (custom permissions)
+            permissions.append(name)
 
     if not permissions:
-        return 'PASS', "<div>No dangerous permissions requested</div>"
+        mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>"
+        return 'PASS', f"<div>No permissions declared in AndroidManifest.xml</div>{mastg_ref}"
 
     dangerous_found = []
     critical_found = []
@@ -11776,10 +12408,17 @@ def check_dangerous_permissions(manifest):
     lines = []
     status = 'PASS'
 
+    # Add summary at the top
+    total_dangerous = len(critical_found) + len(dangerous_found)
+    lines.append(f"<div><strong>Total permissions declared:</strong> {len(permissions)}</div>")
+    lines.append(f"<div><strong>Dangerous permissions:</strong> {total_dangerous}</div>")
+    if critical_found:
+        lines.append(f"<div><strong>Critical (High Privacy Risk):</strong> {len(critical_found)}</div>")
+
     if critical_found:
         status = 'WARN'
-        lines.append(f"<div><strong>WARNING: {len(critical_found)} CRITICAL permission(s) requested:</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
+        lines.append(f"<div style='margin-top:10px;'><strong>WARNING: {len(critical_found)} CRITICAL permission(s) requested:</strong></div>")
+        lines.append("<ul style='margin-left:20px; margin-top:5px;'>")
         for perm, desc in critical_found:
             lines.append(
                 f"<li><code>{perm}</code> - {desc} <span style='color:#d97706;'>[High Privacy Risk]</span></li>"
@@ -11790,28 +12429,28 @@ def check_dangerous_permissions(manifest):
     if dangerous_found:
         if status == 'PASS':
             status = 'WARN'
-        lines.append(f"<div><strong>{len(dangerous_found)} dangerous permission(s):</strong></div>")
-        lines.append("<ul style='margin-left:20px;'>")
+        lines.append(f"<div style='margin-top:10px;'><strong>{len(dangerous_found)} dangerous permission(s):</strong></div>")
+        lines.append("<ul style='margin-left:20px; margin-top:5px;'>")
         for perm, desc in dangerous_found:
             lines.append(f"<li><code>{perm}</code> - {desc}</li>")
         lines.append("</ul>")
 
     if normal_found:
-        lines.append(f"<div>{len(normal_found)} normal permission(s): {', '.join(['<code>' + p + '</code>' for p in normal_found[:5]])}")
+        lines.append(f"<div style='margin-top:10px;'>{len(normal_found)} normal permission(s): {', '.join(['<code>' + p + '</code>' for p in normal_found[:5]])}")
         if len(normal_found) > 5:
             lines.append(f" and {len(normal_found) - 5} more...")
         lines.append("</div>")
 
-    lines.append("<br><div><strong>MASTG Recommendations:</strong></div>")
-    lines.append("<ul style='margin-left:20px;'>")
+    lines.append("<div style='margin-top:15px;'><strong>MASTG Recommendations:</strong></div>")
+    lines.append("<ul style='margin-left:20px; margin-top:5px;'>")
     lines.append("<li>Request permissions at runtime, not installation</li>")
     lines.append("<li>Provide clear rationale before requesting</li>")
     lines.append("<li>Request only when needed</li>")
     lines.append("</ul>")
 
-    lines.append("<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>")
+    lines.append("<div style='margin-top:10px;'><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>")
 
-    return status, "<br>\n".join(lines)
+    return status, "\n".join(lines)
 
 
 def check_datastore_encryption(base):
@@ -12372,6 +13011,162 @@ def make_check(name: str, fn):
 def make_dynamic_check(name: str, fn):
     return (name, wrap_legacy_check(name, fn, html_special=True, summary_builder=SUMMARY_BUILDERS.get(name), is_dynamic=True))
 
+def parse_previous_report(package_name, reports_dir='.'):
+    """
+    Parse a previous report HTML file for the given package to extract metadata and lib paths.
+
+    Returns dict with keys:
+        - version: str (e.g. "1.2.3")
+        - version_code: str (e.g. "123")
+        - apk_size_mb: float
+        - apk_size_bytes: int (calculated from MB)
+        - scan_started_at: str
+        - scan_finished_at: str
+        - lib_paths: set of str (library paths from checksec output)
+
+    Returns None if no previous report found or parsing fails.
+    """
+    report_filename = os.path.join(reports_dir, f"{package_name}.report.html")
+
+    if not os.path.exists(report_filename):
+        return None
+
+    try:
+        with open(report_filename, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        # Extract metadata from the header section
+        # Look for patterns like:
+        # <div style="...">Version</div>
+        # <div style="...">1.2.3 (123)</div>
+        # Note: There may be wrapper divs between the label and value, so we use .*? to skip them
+
+        version_match = re.search(r'<div[^>]*>Version</div>.*?<div[^>]*>([^<(]+?)\s*\(([^)]+)\)</div>', html_content, re.DOTALL)
+        size_match = re.search(r'<div[^>]*>Size</div>.*?<div[^>]*>([0-9.]+)\s*MB</div>', html_content, re.DOTALL)
+        started_match = re.search(r'Started:</span>\s*<strong>([^<]+)</strong>', html_content)
+        finished_match = re.search(r'Finished:</span>\s*<strong>([^<]+)</strong>', html_content)
+
+        if not all([version_match, size_match, started_match, finished_match]):
+            return None
+
+        version_name = version_match.group(1).strip()
+        version_code = version_match.group(2).strip()
+        apk_size_mb = float(size_match.group(1))
+        apk_size_bytes = int(apk_size_mb * 1024 * 1024)
+        scan_started_at = started_match.group(1).strip()
+        scan_finished_at = finished_match.group(1).strip()
+
+        # Extract library paths from checksec output
+        # Look for lines like: "Full RELRO  Canary found  NX enabled  DSO  No RPATH  No RUNPATH  No Symbols  Yes  42  0  /path/to/lib.so"
+        lib_paths = set()
+        checksec_pattern = r'(?:Full|Partial|No)\s+RELRO.*?(/[^\s<]+\.so)'
+        for match in re.finditer(checksec_pattern, html_content):
+            lib_paths.add(match.group(1))
+
+        return {
+            'version': version_name,
+            'version_code': version_code,
+            'apk_size_mb': apk_size_mb,
+            'apk_size_bytes': apk_size_bytes,
+            'scan_started_at': scan_started_at,
+            'scan_finished_at': scan_finished_at,
+            'lib_paths': lib_paths,
+        }
+
+    except Exception as e:
+        print(f"[!] Warning: Could not parse previous report: {e}")
+        return None
+
+
+def extract_lib_paths_from_checksec_output(checksec_output):
+    """
+    Extract library paths from checksec command output.
+
+    Returns: set of library paths (str)
+    """
+    lib_paths = set()
+    # Pattern to match checksec output lines ending with .so paths
+    # Example: "Full RELRO  Canary found  NX enabled  DSO  No RPATH  No RUNPATH  No Symbols  Yes  42  0  /home/user/lib/arm64/libtest.so"
+    pattern = r'(?:Full|Partial|No)\s+RELRO.*?(/[^\s]+\.so)\s*$'
+
+    for line in checksec_output.splitlines():
+        match = re.search(pattern, line)
+        if match:
+            lib_paths.add(match.group(1))
+
+    return lib_paths
+
+
+def format_size_diff(current_bytes, previous_bytes):
+    """
+    Format size difference with sign and one decimal place.
+
+    Returns: str like "+1.2 MB" or "-0.5 MB" or "no change"
+    """
+    diff_bytes = current_bytes - previous_bytes
+
+    if diff_bytes == 0:
+        return "no change"
+
+    diff_mb = diff_bytes / (1024 * 1024)
+    sign = "+" if diff_mb > 0 else ""
+    return f"{sign}{diff_mb:.1f} MB"
+
+
+def generate_library_changes_section(current_lib_paths, previous_info):
+    """
+    Generate HTML for the Native Library Changes section (part of header block).
+
+    Args:
+        current_lib_paths: set of current library paths
+        previous_info: dict from parse_previous_report() or None
+
+    Returns: str (HTML)
+    """
+    if previous_info is None:
+        html = "<div style='margin-top:20px; padding:15px; background:rgba(255,255,255,0.15); border-radius:8px; backdrop-filter:blur(10px); color:white;'>"
+        html += "<div style='font-size:13px; opacity:0.9;'>No previous scan available for comparison.</div>"
+        html += "</div>\n"
+        return html
+
+    previous_libs = previous_info['lib_paths']
+    added_libs = sorted(current_lib_paths - previous_libs)
+    removed_libs = sorted(previous_libs - current_lib_paths)
+
+    if not added_libs and not removed_libs:
+        html = "<div style='margin-top:20px; padding:15px; background:rgba(255,255,255,0.15); border-radius:8px; backdrop-filter:blur(10px); color:white;'>"
+        html += "<div style='font-size:13px;'><strong>Native Library Changes:</strong> No changes detected since last scan</div>"
+        html += "</div>\n"
+        return html
+
+    # Show changes
+    html = "<div style='margin-top:20px; padding:15px; background:rgba(255,255,255,0.15); border-radius:8px; backdrop-filter:blur(10px); color:white;'>\n"
+    html += "<div style='font-size:14px; font-weight:600; margin-bottom:10px;'>Native Library Changes Since Last Scan</div>\n"
+
+    if added_libs:
+        html += "<div style='margin-bottom:10px;'>\n"
+        html += f"<div style='font-size:12px; margin-bottom:5px;'><strong>New Libraries ({len(added_libs)}):</strong></div>\n"
+        html += "<ul style='margin-left:20px; font-family:monospace; font-size:11px; margin-top:5px;'>\n"
+        for lib in added_libs[:10]:  # Limit to first 10 to avoid cluttering header
+            html += f"<li style='margin-bottom:3px;'><code style='background:rgba(34,197,94,0.2); padding:2px 6px; border-radius:3px; color:white;'>{escape(lib)}</code></li>\n"
+        if len(added_libs) > 10:
+            html += f"<li style='opacity:0.8;'>...and {len(added_libs) - 10} more</li>\n"
+        html += "</ul>\n</div>\n"
+
+    if removed_libs:
+        html += "<div style='margin-bottom:5px;'>\n"
+        html += f"<div style='font-size:12px; margin-bottom:5px;'><strong>Removed Libraries ({len(removed_libs)}):</strong></div>\n"
+        html += "<ul style='margin-left:20px; font-family:monospace; font-size:11px; margin-top:5px;'>\n"
+        for lib in removed_libs[:10]:  # Limit to first 10
+            html += f"<li style='margin-bottom:3px;'><code style='background:rgba(239,68,68,0.2); padding:2px 6px; border-radius:3px; color:white;'>{escape(lib)}</code></li>\n"
+        if len(removed_libs) > 10:
+            html += f"<li style='opacity:0.8;'>...and {len(removed_libs) - 10} more</li>\n"
+        html += "</ul>\n</div>\n"
+
+    html += "</div>\n"
+    return html
+
+
 def main():
     # Check for updates before running
     check_for_updates()
@@ -12584,6 +13379,9 @@ def main():
         f"<div style='overflow-x:auto;'>{render_checksec_table(css)}</div>"
         "</details>\n"
     )
+
+    # Extract current library paths from checksec output for comparison
+    current_lib_paths = extract_lib_paths_from_checksec_output(css)
 
     # 2) APK signature schemes
     if apk_path:
@@ -12892,6 +13690,44 @@ def main():
     manifest = os.path.join(base, 'AndroidManifest.xml')
     metadata = extract_apk_metadata(apk_path, manifest)
 
+    # 7.5) Parse previous report for comparison (if exists)
+    previous_info = None
+    if metadata['package']:
+        print("[*] Checking for previous scan report…")
+        previous_info = parse_previous_report(metadata['package'], reports_dir='.')
+        if previous_info:
+            print(f"[+] Found previous scan: version {previous_info['version']} ({previous_info['apk_size_mb']:.1f} MB)")
+        else:
+            print("[*] No previous scan found for this package")
+
+    # Generate HTML for previous scan comparison
+    previous_scan_info_html = ""
+    if previous_info:
+        size_diff = format_size_diff(
+            int(metadata['size_mb'] * 1024 * 1024),
+            previous_info['apk_size_bytes']
+        )
+        # Parse the scan started date to extract date and time separately
+        scan_datetime = previous_info['scan_started_at']
+        # Format: "December 10, 2025, 14:30:15" -> "Scanned on December 10, 2025 at 14:30:15"
+        if ', ' in scan_datetime:
+            date_part, time_part = scan_datetime.rsplit(', ', 1)
+            formatted_scan_time = f"Scanned on {date_part} at {time_part}"
+        else:
+            formatted_scan_time = f"Scanned on {scan_datetime}"
+
+        previous_scan_info_html = f'''
+    <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 15px; margin-top: 15px;">
+      <div style="font-size: 12px; opacity: 0.9;">
+        <strong>Previous scan:</strong> version {escape(previous_info['version'])} ({previous_info['apk_size_mb']:.1f} MB, {escape(size_diff)} since last scan)<br>
+        <span style="opacity: 0.8;">{escape(formatted_scan_time)}</span>
+      </div>
+    </div>
+'''
+
+    # Generate HTML for library changes section
+    library_changes_html = generate_library_changes_section(current_lib_paths, previous_info)
+
     # 8) Track finish time
     finish_timestamp = datetime.now()
     finish_time_str = finish_timestamp.strftime("%B %d, %Y, %H:%M:%S")
@@ -12921,6 +13757,8 @@ def main():
             size_mb=metadata['size_mb'],
             start_time=start_time_str,
             finish_time=finish_time_str,
+            previous_scan_info=previous_scan_info_html,
+            library_changes_section=library_changes_html,
             sections=sections
         ))
     print(f'[+] Report generated: {report_filename}')
