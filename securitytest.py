@@ -2731,7 +2731,7 @@ def check_file_provider(res_dir):
     Emits clickable file:// links with the XML filename and shows the actual insecure XML element.
     """
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
     findings = []
     xml_dir = os.path.join(res_dir, 'xml')
@@ -6018,7 +6018,7 @@ def check_external_storage(base):
         if results:
             permission_findings[desc] = results
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>MASTG-TEST-0200: Files Written to External Storage</a></div>"
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>MASTG-TEST-0200: Files Written to External Storage</a></div>"
 
     if not (risky_findings or safe_findings or permission_findings):
         return 'PASS', f"<div>No external storage usage detected in app code</div>{mastg_ref}"
@@ -6042,7 +6042,7 @@ def check_external_storage(base):
 
     # Show safe usage
     if safe_findings:
-        lines.append(f"<br><div><em>ℹ Scoped storage in app code (lower risk):</em></div>")
+        lines.append(f"<div><em>ℹ Scoped storage in app code (lower risk):</em></div>")
         for desc, hits in safe_findings.items():
             lines.append(f"<div>{desc}: {len(hits)} file(s)</div>")
             for rel in sorted(hits)[:5]:
@@ -6056,7 +6056,7 @@ def check_external_storage(base):
 
     # Show permissions
     if permission_findings:
-        lines.append(f"<br><div><em>Storage permissions in app code:</em></div>")
+        lines.append(f"<div><em>Storage permissions in app code:</em></div>")
         for desc, hits in permission_findings.items():
             for rel in sorted(hits)[:5]:
                 full = os.path.abspath(os.path.join(base, rel))
@@ -6071,11 +6071,11 @@ def check_external_storage(base):
 
     # Only FAIL if risky patterns found in app code
     if has_risk:
-        return 'FAIL', "<br>\n".join(lines)
+        return 'FAIL', "\n".join(lines)
     elif safe_findings or permission_findings:
-        return 'WARN', "<br>\n".join(lines)
+        return 'WARN', "\n".join(lines)
     else:
-        return 'PASS', "<br>\n".join(lines)
+        return 'PASS', "\n".join(lines)
 
 def check_hardcoded_keys(base):
     """
@@ -10708,6 +10708,197 @@ def check_frida_external_storage(base, wait_secs=10):
     )
 
 
+def check_frida_pending_intent(base, wait_secs=10):
+    """
+    Dynamic PendingIntent monitoring via Frida:
+    - Hooks all PendingIntent factory methods
+    - Flags missing FLAG_IMMUTABLE or explicit FLAG_MUTABLE/UPDATE_CURRENT usage
+    """
+    manifest = os.path.join(base, 'AndroidManifest.xml')
+    pkg_prefix = ET.parse(manifest).getroot().attrib.get('package', '')
+
+    out = subprocess.check_output(['adb', 'shell', 'pm', 'list', 'packages', pkg_prefix], text=True)
+    candidates = [l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('package:')]
+    if not candidates:
+        raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
+    spawn_name = candidates[0]
+
+    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    jscode = r"""
+    setImmediate(function install(){
+      if (!Java.available) return setTimeout(install, 100);
+      Java.perform(function(){
+        var PendingIntent = Java.use("android.app.PendingIntent");
+
+        var FLAG_IMMUTABLE = 0x04000000;
+        var FLAG_MUTABLE = 0x02000000;
+        var FLAG_UPDATE_CURRENT = 0x08000000;
+
+        function describeFlags(flags) {
+          var parts = [];
+          if ((flags & FLAG_IMMUTABLE) !== 0) parts.push("FLAG_IMMUTABLE");
+          if ((flags & FLAG_MUTABLE) !== 0) parts.push("FLAG_MUTABLE");
+          if ((flags & FLAG_UPDATE_CURRENT) !== 0) parts.push("FLAG_UPDATE_CURRENT");
+          if ((flags & 0x2000000) !== 0) parts.push("FLAG_ONE_SHOT");
+          if ((flags & 0x10000000) !== 0) parts.push("FLAG_CANCEL_CURRENT");
+          return parts.join(" | ") || "none";
+        }
+
+        function extractIntent(args) {
+          for (var i = 0; i < args.length; i++) {
+            try {
+              if (args[i] && args[i].getComponent) {
+                return args[i];
+              }
+            } catch(e) {}
+          }
+          return null;
+        }
+
+        function extractFlags(args) {
+          for (var i = args.length - 1; i >= 0; i--) {
+            if (typeof args[i] === "number") return args[i];
+          }
+          return 0;
+        }
+
+        function wrap(name) {
+          PendingIntent[name].overloads.forEach(function(ov) {
+            ov.implementation = function() {
+              var intent = extractIntent(arguments);
+              var flags = extractFlags(arguments);
+              var target = "";
+              try {
+                if (intent) {
+                  if (intent.getComponent() !== null) {
+                    target = intent.getComponent().flattenToShortString();
+                  } else if (intent.getAction() !== null) {
+                    target = intent.getAction();
+                  } else if (intent.getDataString() !== null) {
+                    target = intent.getDataString();
+                  }
+                }
+              } catch(e) {}
+              send({
+                type: "pending_intent",
+                method: name,
+                flags: flags,
+                flags_hex: "0x" + (flags >>> 0).toString(16),
+                flags_text: describeFlags(flags),
+                hasImmutable: (flags & FLAG_IMMUTABLE) !== 0,
+                hasMutable: (flags & (FLAG_MUTABLE | FLAG_UPDATE_CURRENT)) !== 0,
+                target: target
+              });
+              return ov.apply(this, arguments);
+            };
+          });
+        }
+
+        wrap("getActivity");
+        wrap("getBroadcast");
+        wrap("getService");
+        if (PendingIntent.getForegroundService) {
+          wrap("getForegroundService");
+        }
+
+        send({type: "ready", msg: "PendingIntent hooks installed"});
+      });
+    });
+    """
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
+    tmp.write(jscode.encode())
+    tmp.flush()
+    tmp.close()
+
+    proc = subprocess.Popen(
+        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+
+    instructions = [
+        f"App '{spawn_name}' is running with PendingIntent monitoring",
+        "Trigger notifications, widgets, or deep links that use PendingIntent",
+        "Look for mutable or missing FLAG_IMMUTABLE below"
+    ]
+    all_output = interactive_frida_monitor(proc, "PENDINGINTENT", instructions, send_exit_on_stop=True)
+
+    events = []
+    logs = []
+
+    for line in all_output:
+        logs.append(line)
+        if 'message:' in line:
+            try:
+                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
+                msg = ast.literal_eval(part)
+                if msg.get('type') == 'send':
+                    payload = msg.get('payload', {})
+                    if payload.get('type') == 'pending_intent':
+                        events.append(payload)
+            except Exception:
+                pass
+
+    proc.terminate()
+    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.unlink(tmp.name)
+
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/' target='_blank'>MASTG-TEST-0030: Testing for Vulnerable Implementation of PendingIntent</a></div>"
+
+    if not events:
+        return TestResult(
+            name="Dynamic PendingIntent",
+            status="INFO",
+            summary_lines=["No PendingIntent usage observed during runtime"],
+            mastg_ref_html=mastg_ref,
+            is_dynamic=True,
+        )
+
+    missing_immutable = [e for e in events if not e.get('hasImmutable')]
+    mutable_intents = [e for e in events if e.get('hasMutable')]
+
+    detail = []
+    detail.append("<div><strong>Observed PendingIntent creations:</strong></div>")
+    for ev in events[:30]:
+        target = html.escape(ev.get('target') or "unknown")
+        method = html.escape(ev.get('method') or "unknown")
+        flags_hex = html.escape(ev.get('flags_hex') or "0x0")
+        flags_text = html.escape(ev.get('flags_text') or "none")
+        detail.append(f"<div style='margin-left:15px'><code>{method}</code> → {target}</div>")
+        detail.append(f"<div style='margin-left:30px'>Flags: {flags_hex} ({flags_text})</div>")
+    if len(events) > 30:
+        detail.append(f"<div style='margin-left:15px'><em>...and {len(events) - 30} more</em></div>")
+
+    if logs:
+        detail.append(
+            "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+            "<pre style='white-space:pre-wrap; font-size:9px; max-height:250px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+        )
+        detail.append("\n".join(logs[-400:]))
+        detail.append("\n</pre></details>")
+
+    summary_lines = [
+        f"PendingIntents created: {len(events)}",
+        f"Mutable or missing FLAG_IMMUTABLE: {len(missing_immutable)}",
+        f"FLAG_MUTABLE/UPDATE_CURRENT seen: {len(mutable_intents)}",
+    ]
+
+    status = 'FAIL' if missing_immutable else 'WARN'
+    detail.append(mastg_ref)
+
+    return TestResult(
+        name="Dynamic PendingIntent",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        raw_html="".join(detail),
+        is_dynamic=True,
+    )
+
+
 def check_frida_crypto_keys(base, wait_secs=10):
     """
     Dynamic cryptographic key monitoring via Frida:
@@ -11257,7 +11448,7 @@ def check_storage_analysis(base, package_name):
     else:
         status = 'PASS'
 
-    return status, "<br>\n".join(detail) + mastg_ref
+    return status, "".join(detail) + mastg_ref
 
 
 def check_pending_intent_flags(base):
@@ -12581,6 +12772,7 @@ def main():
             # New dynamic verification checks
             make_dynamic_check("Dynamic SharedPreferences",    lambda: check_frida_sharedprefs(base)),
             make_dynamic_check("Dynamic External Storage",     lambda: check_frida_external_storage(base)),
+            make_dynamic_check("Dynamic PendingIntent",        lambda: check_frida_pending_intent(base)),
             make_dynamic_check("Dynamic Crypto Keys",          lambda: check_frida_crypto_keys(base)),
             make_dynamic_check("Dynamic Clipboard",            lambda: check_frida_clipboard(base)),
             make_dynamic_check("Storage Analysis",             run_storage_analysis),
@@ -12595,6 +12787,7 @@ def main():
          # Map new dynamic checks to their static equivalents
          "Dynamic SharedPreferences":     "SharedPreferences Encryption",
          "Dynamic External Storage":      "External Storage Usage",
+         "Dynamic PendingIntent":         "PendingIntent Flags",
          "Dynamic Crypto Keys":           "Hardcoded Keys",
          "Dynamic Clipboard":             "Clipboard Security",
         }
