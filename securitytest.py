@@ -33,7 +33,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "4.2.2"
+__version__ = "4.5.1"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 
 ## Add new test as def
@@ -328,10 +328,60 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 if send_exit_on_stop:
                     print("[*] Sending exit command to Frida...")
                     try:
+                        # First, drain any pending output to prevent blocking
+                        if is_windows:
+                            # Windows: quick non-blocking drain
+                            try:
+                                import queue
+                                import threading
+                                def drain_output(q):
+                                    try:
+                                        while True:
+                                            l = proc.stdout.readline()
+                                            if not l:
+                                                break
+                                            q.put(l)
+                                    except:
+                                        pass
+                                q = queue.Queue()
+                                t = threading.Thread(target=drain_output, args=(q,))
+                                t.daemon = True
+                                t.start()
+                                t.join(timeout=0.5)
+                                # Collect drained lines
+                                while not q.empty():
+                                    try:
+                                        line = q.get_nowait()
+                                        logs.append(line.rstrip())
+                                    except:
+                                        break
+                            except:
+                                pass
+                        else:
+                            # Unix: drain using select with short timeout
+                            try:
+                                fd = proc.stdout.fileno()
+                                while True:
+                                    r, _, _ = select.select([fd], [], [], 0.1)
+                                    if not r:
+                                        break
+                                    line = proc.stdout.readline()
+                                    if line:
+                                        logs.append(line.rstrip())
+                            except:
+                                pass
+
+                        # Now try to send exit command
                         proc.stdin.write('exit\n')
                         proc.stdin.flush()
-                    except:
-                        pass
+                    except BlockingIOError:
+                        # If write still blocks, just terminate the process
+                        print("[!] Cannot send exit command (buffer full), terminating process...")
+                        proc.terminate()
+                    except Exception as e:
+                        # Any other error, just terminate
+                        print(f"[!] Error sending exit command: {e}, terminating process...")
+                        proc.terminate()
                 break
 
             # Collect Frida output (platform-specific)
@@ -8873,7 +8923,8 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        bufsize=1024*1024  # 1MB buffer
     )
     try:
         proc.stdin.write('\n')
@@ -9236,7 +9287,7 @@ def check_frida_pinning(base, wait_secs=15):
 
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
-      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # 6) Interactive collection with user prompt
@@ -9402,7 +9453,7 @@ def check_frida_file_reads(base, wait_secs=7):
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
     proc = subprocess.Popen(
         ['frida','-l', tmp.name, '-U','-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # 6) interactive monitoring with user prompt
@@ -9538,7 +9589,8 @@ def check_frida_strict_mode(base, wait_secs=7):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        bufsize=1024*1024
     )
 
     # 5) wait up to 5s for our "hooks installed" banner
@@ -9788,13 +9840,14 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(jscode.encode()); tmp.flush(); tmp.close()
 
-    # 5) Launch Frida
+    # 5) Launch Frida with large buffer to handle high-volume output
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        bufsize=1024*1024  # 1MB buffer to handle large amounts of log output
     )
 
     # 6) Interactive collection with user prompt
@@ -10026,7 +10079,8 @@ def check_frida_task_hijack(base, manifest,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        bufsize=1024*1024
     )
 
     # ── 5) wait up to 5s for our "hooks installed" banner ──────────
@@ -10786,7 +10840,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # Interactive monitoring with user prompt
@@ -11187,7 +11241,7 @@ def check_frida_external_storage(base, wait_secs=10):
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # Interactive monitoring with user prompt
@@ -11439,7 +11493,7 @@ def check_frida_pending_intent(base, wait_secs=10):
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     instructions = [
@@ -11620,7 +11674,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # Interactive monitoring with user prompt
@@ -11765,7 +11819,7 @@ def check_frida_clipboard(base, wait_secs=10):
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
     # Interactive monitoring with user prompt
