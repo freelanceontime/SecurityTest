@@ -9655,20 +9655,34 @@ def check_frida_strict_mode(base, wait_secs=7):
         bufsize=1024*1024
     )
 
-    # 5) wait up to 5s for our "hooks installed" banner
+    # 5) wait up to 10s for our "hooks installed" banner (increased timeout)
     start_time = time.time()
+    collected_output = []
     while True:
         line = proc.stdout.readline()
+        if line:
+            collected_output.append(line.strip())
+            print(line.rstrip())  # Show output for debugging
+
         if not line:
-            proc.terminate()
-            os.unlink(tmp.name)
-            raise RuntimeError("Frida died before installing hooks")
+            # Check if process actually died
+            if proc.poll() is not None:
+                proc.terminate()
+                os.unlink(tmp.name)
+                error_output = '\n'.join(collected_output[-10:])  # Last 10 lines
+                raise RuntimeError(f"Frida died before installing hooks. Last output:\n{error_output}")
+            # Process still running but no output yet, continue waiting
+            time.sleep(0.1)
+            continue
+
         if "StrictMode hooks installed" in line:
             break
-        if time.time() - start_time > 5:
+
+        if time.time() - start_time > 10:
             proc.terminate()
             os.unlink(tmp.name)
-            raise RuntimeError("Timed out waiting for hooks installation")
+            error_output = '\n'.join(collected_output[-10:])
+            raise RuntimeError(f"Timed out waiting for hooks installation. Output:\n{error_output}")
 
     # 6) Interactive monitoring with user prompt
     # Note: Frida with -f automatically resumes the spawned app
