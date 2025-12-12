@@ -313,8 +313,8 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                     if key == '\r' or key == '\n':
                         user_pressed_enter = True
             else:
-                # Unix: Use select on stdin with longer timeout for better responsiveness
-                user_ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                # Unix: Use select on stdin with short timeout for fast output processing
+                user_ready, _, _ = select.select([sys.stdin], [], [], 0.01)
                 if user_ready:
                     try:
                         # Read and discard the input
@@ -404,7 +404,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                         t = threading.Thread(target=read_line, args=(q,))
                         t.daemon = True
                         t.start()
-                        t.join(timeout=0.1)
+                        t.join(timeout=0.01)  # Fast polling for responsive output
 
                         try:
                             line = q.get_nowait()
@@ -415,7 +415,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
             else:
                 # Unix: Use select on file descriptor
                 fd = proc.stdout.fileno()
-                r, _, _ = select.select([fd], [], [], 0.1)
+                r, _, _ = select.select([fd], [], [], 0.01)  # Fast polling for responsive output
                 if r:
                     try:
                         line = proc.stdout.readline()
@@ -428,9 +428,9 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 # Store log line
                 logs.append(line.rstrip())
 
-            # Small delay to prevent CPU spinning (only on Windows, Unix already has timeout in select)
+            # Small delay to prevent CPU spinning
             if is_windows:
-                time.sleep(0.05)
+                time.sleep(0.01)  # Reduced to 10ms for faster output
 
     except KeyboardInterrupt:
         print("\n[!] Test interrupted by user")
@@ -2658,6 +2658,9 @@ def check_kotlin_assert(base):
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -2891,6 +2894,17 @@ def check_logging(base):
         'io/reactivex/',               # RxJava
         'com/bumptech/glide',          # Glide
         'com/airbnb/lottie',           # Lottie
+        'net/sqlcipher',               # SQLCipher database library
+        'org/sqlite',                  # SQLite JDBC driver
+        'com/google/crypto/tink',      # Google Tink crypto library
+        'org/bouncycastle',            # Bouncy Castle crypto
+        'com/google/protobuf',         # Protocol Buffers
+        'io/grpc',                     # gRPC
+        'okhttp3/',                    # OkHttp (alternate package)
+        'okio/',                       # Okio (OkHttp dependency)
+        'retrofit2/',                  # Retrofit (alternate package)
+        'com/google/dagger',           # Dagger DI
+        'javax/',                      # Java extensions
     ]
 
     # Comprehensive sensitive keywords that indicate potentially sensitive data being logged
@@ -2969,8 +2983,8 @@ def check_logging(base):
     }
 
     # Collect stats and potentially sensitive findings
-    stats = {lvl: 0 for lvl in log_patterns}
-    sensitive_findings = []
+    stats = {lvl: 0 for lvl in log_patterns}  # Total logs (all code including libraries)
+    sensitive_findings = []  # Only app code
     scanned_files = 0
 
     for root, _, files in os.walk(base):
@@ -2981,26 +2995,32 @@ def check_logging(base):
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
 
-            # Skip third-party library code (not developer-controlled)
+            # Determine if this is library code
             rel_normalized = rel.replace('\\', '/')
-            if any(lib in rel_normalized for lib in library_packages):
+            is_library_code = any(lib in rel_normalized for lib in library_packages)
+            is_framework_code = any(fw in rel_normalized for fw in ['android/', 'java/', 'javax/', 'dalvik/', 'com/android/internal/'])
+
+            # Skip framework code entirely (Android internal classes)
+            if is_framework_code:
                 continue
 
-            # Skip Android framework code
-            if any(fw in rel_normalized for fw in ['android/', 'java/', 'javax/', 'dalvik/', 'com/android/internal/']):
-                continue
-
-            scanned_files += 1
+            # Count app code files
+            if not is_library_code:
+                scanned_files += 1
 
             try:
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
 
-                # Check for each log level
+                # Check for each log level - count ALL logs (library + app)
                 for lvl, pats in log_patterns.items():
                     for pat in pats:
                         for match in re.finditer(pat, content):
-                            stats[lvl] += 1
+                            stats[lvl] += 1  # Count ALL logs
+
+                            # Only add to findings if it's app code (not library)
+                            if is_library_code:
+                                continue  # Skip detailed analysis for library code
 
                             # Extract the line and surrounding context
                             line_num = content[:match.start()].count('\n')
@@ -3091,8 +3111,8 @@ def check_logging(base):
     summary = ", ".join(summary_parts)
 
     lines = []
-    lines.append(f"<div style='margin:10px 0'><strong>Total Logs:</strong> {total_logs} ({summary}) <span style='color:#6c757d; font-size:12px;'>(app code only, excluding third-party libraries)</span></div>")
-    lines.append(f"<div style='margin:10px 0'><strong>Potentially Sensitive Logs:</strong> {total_sensitive} (filtered by keywords & entropy)</div>")
+    lines.append(f"<div style='margin:10px 0'><strong>Total Logs:</strong> {total_logs} ({summary}) <span style='color:#6c757d; font-size:12px;'>(including third-party libraries)</span></div>")
+    lines.append(f"<div style='margin:10px 0'><strong>Potentially Sensitive Logs:</strong> {total_sensitive} <span style='color:#6c757d; font-size:12px;'>(app code only - filtered by keywords & entropy)</span></div>")
 
     if total_sensitive == 0:
         lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745;'><strong>✓ No sensitive data detected in logs</strong><br>All log statements appear to be non-sensitive.</div>")
@@ -5950,6 +5970,9 @@ def check_weak_crypto(base):
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -6019,6 +6042,9 @@ def check_kotlin_metadata(base):
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -7410,6 +7436,9 @@ def check_biometric_auth(base):
         '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -8733,6 +8762,44 @@ def check_tls_versions(base):
         mastg_ref_html=mastg_ref,
     )
 
+
+def extract_frida_message(line):
+    """
+    Robustly extract a Frida message dict from a log line.
+    Handles cases where console output is mixed with message output.
+
+    Returns: dict or None if parsing fails
+    """
+    if 'message:' not in line:
+        return None
+
+    try:
+        # Extract everything after 'message:'
+        after_message = line.split('message:', 1)[1]
+
+        # Find the dict by counting braces to handle mixed console output
+        brace_count = 0
+        dict_end = -1
+        for i, char in enumerate(after_message):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    dict_end = i + 1
+                    break
+
+        if dict_end > 0:
+            part = after_message[:dict_end].strip()
+        else:
+            # Fallback: take everything before 'data:'
+            part = after_message.split('data:', 1)[0].strip()
+
+        return ast.literal_eval(part)
+    except:
+        return None
+
+
 def check_frida_tls_negotiation(base, wait_secs=12):
     """
     Dynamic TLS negotiation monitoring via USB+Frida CLI.
@@ -9467,16 +9534,11 @@ def check_frida_file_reads(base, wait_secs=7):
     # Parse collected logs for file reads
     reads = []
     for line in logs:
-        if 'message:' in line:
-            try:
-                part = line.split('message:',1)[1].split('data:',1)[0].strip()
-                msg = ast.literal_eval(part)
-                if msg.get('type')=='send' and isinstance(msg.get('payload'),dict):
-                    p = msg['payload'].get('path')
-                    if p:
-                        reads.append(p)
-            except:
-                pass
+        msg = extract_frida_message(line)
+        if msg and msg.get('type') == 'send' and isinstance(msg.get('payload'), dict):
+            p = msg['payload'].get('path')
+            if p:
+                reads.append(p)
 
     # 7) cleanup
     proc.terminate()
@@ -9797,42 +9859,89 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    # 3) Frida script to hook all Log methods
+    # 2.5) Clear logcat buffer to reduce noise
+    subprocess.run(
+        ['adb','logcat','-c'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
+    # 3) Frida script to hook all Log methods with filtering
     jscode = r"""
     Java.perform(function(){
       var Log = Java.use("android.util.Log");
 
+      // System tags to filter out (reduce noise from Android framework)
+      var systemTags = [
+        "GraphicsEnvironment", "StrictMode", "OpenGLRenderer", "Choreographer",
+        "InputMethodManager", "ViewRootImpl", "WindowManager", "ActivityThread",
+        "Surface", "EGL_emulation", "libc", "HostConnection", "eglCodecCommon",
+        "Gralloc", "SurfaceFlinger", "mali", "hw-BpHwBinder", "HwBinder",
+        "chatty", "Perfetto", "HWUI", "BufferQueueProducer", "NetworkSecurityConfig",
+        "Compatibility", "dalvikvm", "art", "System", "zygote"
+      ];
+
+      // Check if tag should be filtered out
+      function shouldFilter(tag) {
+        if (!tag) return false;
+        for (var i = 0; i < systemTags.length; i++) {
+          if (tag.indexOf(systemTags[i]) === 0) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      // Truncate long messages (especially stack traces)
+      function truncateMsg(msg) {
+        if (!msg) return msg;
+        var maxLen = 500;  // Max 500 chars per log
+        if (msg.length > maxLen) {
+          return msg.substring(0, maxLen) + "... [truncated]";
+        }
+        return msg;
+      }
+
       // Hook Log.v (VERBOSE)
       Log.v.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
-        send({level:"VERBOSE", tag:tag, msg:msg});
+        if (!shouldFilter(tag)) {
+          send({level:"VERBOSE", tag:tag, msg:truncateMsg(msg)});
+        }
         return this.v(tag, msg);
       };
 
       // Hook Log.d (DEBUG)
       Log.d.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
-        send({level:"DEBUG", tag:tag, msg:msg});
+        if (!shouldFilter(tag)) {
+          send({level:"DEBUG", tag:tag, msg:truncateMsg(msg)});
+        }
         return this.d(tag, msg);
       };
 
       // Hook Log.i (INFO)
       Log.i.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
-        send({level:"INFO", tag:tag, msg:msg});
+        if (!shouldFilter(tag)) {
+          send({level:"INFO", tag:tag, msg:truncateMsg(msg)});
+        }
         return this.i(tag, msg);
       };
 
       // Hook Log.w (WARN)
       Log.w.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
-        send({level:"WARN", tag:tag, msg:msg});
+        if (!shouldFilter(tag)) {
+          send({level:"WARN", tag:tag, msg:truncateMsg(msg)});
+        }
         return this.w(tag, msg);
       };
 
       // Hook Log.e (ERROR)
       Log.e.overload('java.lang.String', 'java.lang.String').implementation = function(tag, msg) {
-        send({level:"ERROR", tag:tag, msg:msg});
+        if (!shouldFilter(tag)) {
+          send({level:"ERROR", tag:tag, msg:truncateMsg(msg)});
+        }
         return this.e(tag, msg);
       };
 
-      console.log("[*] Dynamic logging monitor active - all Log.* calls will be captured");
+      console.log("[*] Dynamic logging monitor active - filtering system logs, capturing app logs only");
     });
     """
 
@@ -9855,7 +9964,7 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         f"App '{spawn_name}' is running with dynamic logging monitor",
         "Navigate through the app and trigger features that might log data",
         "Login, authentication, API calls, data operations, etc.",
-        "All Log.v/d/i/w/e calls will be captured in real-time..."
+        "App Log.v/d/i/w/e calls will be captured (system logs filtered out)"
     ]
     logs = interactive_frida_monitor(proc, "DYNAMIC LOGGING", instructions, send_exit_on_stop=True)
 
@@ -10857,74 +10966,69 @@ def check_frida_sharedprefs(base, wait_secs=10):
     file_writes = {}  # {filename: {'timestamp': str, 'details': [...]}}
 
     for line in logs:
-        if 'message:' in line:
-            try:
-                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
-                msg = ast.literal_eval(part)
-                if msg.get('type') == 'send':
-                    payload = msg.get('payload', {})
+        msg = extract_frida_message(line)
+        if msg and msg.get('type') == 'send':
+            payload = msg.get('payload', {})
 
-                    if payload.get('type') == 'prefs_access':
-                        name = payload.get('name', 'unknown')
-                        encrypted = payload.get('encrypted', False)
-                        if name not in prefs_accessed:
-                            prefs_accessed[name] = {
-                                'encrypted': encrypted,
-                                'reads': [],
-                                'writes': []
-                            }
+            if payload.get('type') == 'prefs_access':
+                name = payload.get('name', 'unknown')
+                encrypted = payload.get('encrypted', False)
+                if name not in prefs_accessed:
+                    prefs_accessed[name] = {
+                        'encrypted': encrypted,
+                        'reads': [],
+                        'writes': []
+                    }
 
-                    elif payload.get('type') == 'datastore_write':
-                        key = payload.get('key', '')
-                        value = payload.get('value', '')
-                        sensitive = payload.get('sensitive', False)
-                        datastore_ops.append({
-                            'operation': 'WRITE',
-                            'key': key,
-                            'value': value,
-                            'sensitive': sensitive
-                        })
+            elif payload.get('type') == 'datastore_write':
+                key = payload.get('key', '')
+                value = payload.get('value', '')
+                sensitive = payload.get('sensitive', False)
+                datastore_ops.append({
+                    'operation': 'WRITE',
+                    'key': key,
+                    'value': value,
+                    'sensitive': sensitive
+                })
 
-                    elif payload.get('type') == 'file_write':
-                        filename = payload.get('filename', '')
-                        timestamp = payload.get('timestamp', 'unknown')
-                        if 'gms.measurement' not in filename and 'firebase' not in filename:
-                            if filename not in file_writes:
-                                file_writes[filename] = {
-                                    'timestamp': timestamp,
-                                    'details': []
-                                }
+            elif payload.get('type') == 'file_write':
+                filename = payload.get('filename', '')
+                timestamp = payload.get('timestamp', 'unknown')
+                if 'gms.measurement' not in filename and 'firebase' not in filename:
+                    if filename not in file_writes:
+                        file_writes[filename] = {
+                            'timestamp': timestamp,
+                            'details': []
+                        }
 
-                    elif payload.get('type') == 'file_write_detail':
-                        filename = payload.get('filename', '')
-                        timestamp = payload.get('timestamp', 'unknown')
-                        key = payload.get('key', '')
-                        value = payload.get('value', '')
+            elif payload.get('type') == 'file_write_detail':
+                filename = payload.get('filename', '')
+                timestamp = payload.get('timestamp', 'unknown')
+                key = payload.get('key', '')
+                value = payload.get('value', '')
 
-                        if filename in file_writes:
-                            file_writes[filename]['details'].append({
-                                'key': key,
-                                'value': value
-                            })
+                if filename in file_writes:
+                    file_writes[filename]['details'].append({
+                        'key': key,
+                        'value': value
+                    })
 
-                    elif payload.get('type') == 'prefs_write':
-                        # Track which prefs file was written to (we need to match context)
-                        key = payload.get('key', '')
-                        value = payload.get('value', '')
-                        method = payload.get('method', 'put')
-                        sensitive = payload.get('sensitive', False)
+            elif payload.get('type') == 'prefs_write':
+                # Track which prefs file was written to (we need to match context)
+                key = payload.get('key', '')
+                value = payload.get('value', '')
+                method = payload.get('method', 'put')
+                sensitive = payload.get('sensitive', False)
 
-                        # Add to most recent prefs access or create entry
-                        if prefs_accessed:
-                            last_prefs = list(prefs_accessed.keys())[-1]
-                            prefs_accessed[last_prefs]['writes'].append({
-                                'method': method,
-                                'key': key,
-                                'value': value,
-                                'sensitive': sensitive
-                            })
-            except:
-                pass
+                # Add to most recent prefs access or create entry
+                if prefs_accessed:
+                    last_prefs = list(prefs_accessed.keys())[-1]
+                    prefs_accessed[last_prefs]['writes'].append({
+                        'method': method,
+                        'key': key,
+                        'value': value,
+                        'sensitive': sensitive
+                    })
 
     proc.terminate()
     subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
@@ -11261,10 +11365,9 @@ def check_frida_external_storage(base, wait_secs=10):
     for line in all_output:
         logs.append(line)  # Collect all output for later display
 
-        if 'message:' in line:
+        msg = extract_frida_message(line)
+        if msg:
             try:
-                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
-                msg = ast.literal_eval(part)
                 if msg.get('type') == 'send':
                     payload = msg.get('payload', {})
                     if payload.get('type') == 'external_write':
@@ -11508,10 +11611,9 @@ def check_frida_pending_intent(base, wait_secs=10):
 
     for line in all_output:
         logs.append(line)
-        if 'message:' in line:
+        msg = extract_frida_message(line)
+        if msg:
             try:
-                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
-                msg = ast.literal_eval(part)
                 if msg.get('type') == 'send':
                     payload = msg.get('payload', {})
                     if payload.get('type') == 'pending_intent':
@@ -11689,10 +11791,9 @@ def check_frida_crypto_keys(base, wait_secs=10):
     findings = []
     weak_keys = []
     for line in logs:
-        if 'message:' in line:
+        msg = extract_frida_message(line)
+        if msg:
             try:
-                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
-                msg = ast.literal_eval(part)
                 if msg.get('type') == 'send':
                     payload = msg.get('payload', {})
                     if payload.get('type') == 'secret_key':
@@ -11836,10 +11937,9 @@ def check_frida_clipboard(base, wait_secs=10):
     clipboard_items = []  # Store individual clipboard operations with details
 
     for line in logs:
-        if 'message:' in line:
+        msg = extract_frida_message(line)
+        if msg:
             try:
-                part = line.split('message:', 1)[1].split('data:', 1)[0].strip()
-                msg = ast.literal_eval(part)
                 if msg.get('type') == 'send':
                     payload = msg.get('payload', {})
                     if payload.get('type') == 'clipboard':
@@ -12541,6 +12641,9 @@ def check_datastore_encryption(base):
         '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -12644,6 +12747,9 @@ def check_room_encryption(base):
         '/com/google/common/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
@@ -12825,7 +12931,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 4.2.2 – Automated Mobile App Security Test Script
+    AppSec 4.5.1 – Automated Mobile App Security Test Script
 
     Options:
       -f, --file       APK file to decompile into smali
