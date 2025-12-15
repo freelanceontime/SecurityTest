@@ -1043,15 +1043,15 @@ HTML_TEMPLATE = '''
     top: 20px;
     right: 20px;
     z-index: 1000;
-    background: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.9);
     backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    border: 1px solid rgba(0, 0, 0, 0.1);
     border-radius: 50px;
     padding: 10px 20px;
     cursor: pointer;
     font-size: 14px;
     font-weight: 600;
-    color: white;
+    color: #333;
     transition: all 0.3s ease;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     display: flex;
@@ -1060,7 +1060,7 @@ HTML_TEMPLATE = '''
   }}
 
   .dark-mode-toggle:hover {{
-    background: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 1);
     box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
     transform: translateY(-2px);
   }}
@@ -1072,6 +1072,16 @@ HTML_TEMPLATE = '''
   /* === DARK MODE STYLES === */
   [data-theme="dark"] {{
     /* Global dark mode colors */
+  }}
+
+  [data-theme="dark"] .dark-mode-toggle {{
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .dark-mode-toggle:hover {{
+    background: rgba(30, 41, 59, 1);
   }}
 
   [data-theme="dark"] body {{
@@ -1563,6 +1573,17 @@ HTML_TEMPLATE = '''
     background: #1e293b !important;
     color: #e2e8f0 !important;
     border-color: #334155 !important;
+  }}
+
+  /* Backup rules XML preview - ensure good contrast in dark mode */
+  [data-theme="dark"] pre.backup-rules-xml {{
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #334155 !important;
+  }}
+
+  [data-theme="dark"] details summary {{
+    color: inherit;
   }}
 </style>
 <script>
@@ -2168,7 +2189,8 @@ def check_s3_bucket_security(base):
 
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith(('.smali', '.xml', '.json', '.properties')):
+            # Include more file types: smali, xml, json, properties, txt, config files
+            if not fn.endswith(('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')):
                 continue
 
             path = os.path.join(root, fn)
@@ -2191,29 +2213,26 @@ def check_s3_bucket_security(base):
                 continue
 
     if not buckets_found:
-        return True, "<div>No S3 bucket references found in app code</div>"
+        note = "<div>No S3 bucket references found in static code analysis</div>"
+        note += "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:10px;'>"
+        note += "<strong>💡 Tip:</strong> Check the <strong>Dynamic Cert Pinning</strong> test results for runtime-discovered S3 buckets that may not appear in static code."
+        note += "</div>"
+        return True, note
 
     # Test discovered buckets
     import tempfile
     import subprocess
 
-    findings = []
+    finding_blocks = []
     test_content = b"security-test-file-safe-to-delete"
+    has_issues = False
 
     for bucket in sorted(buckets_found):
-        bucket_info = []
-        bucket_info.append(f"<div><strong>Bucket: {html.escape(bucket)}</strong></div>")
-
-        # Show where it was found
+        # Get locations where this bucket was found
         locations = bucket_locations.get(bucket, [])
-        bucket_info.append("<div style='margin-left:15px; font-size:10px; color:#666'>")
-        for loc in locations[:3]:
-            bucket_info.append(f"Found in: <code>{html.escape(loc)}</code><br>")
-        if len(locations) > 3:
-            bucket_info.append(f"...and {len(locations) - 3} more locations<br>")
-        bucket_info.append("</div>")
 
         # Test 1: Try to write a file
+        write_result = ""
         write_test_passed = False
         try:
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -2235,21 +2254,23 @@ def check_s3_bucket_security(base):
             http_code = result.stdout.strip()
 
             if http_code == '200':
-                bucket_info.append("<div style='margin-left:15px; color:#dc3545'><strong>WRITE ACCESS: Successfully uploaded test file!</strong></div>")
+                write_result = "🔴 WRITE ACCESS: Successfully uploaded test file!"
                 write_test_passed = True
+                has_issues = True
             elif http_code == '403':
-                bucket_info.append("<div style='margin-left:15px; color:#28a745'>Write access denied (expected)</div>")
+                write_result = "✓ Write access denied (expected)"
             elif http_code == '404':
-                bucket_info.append("<div style='margin-left:15px; color:#666'>Bucket does not exist or is private</div>")
+                write_result = "Bucket does not exist or is private"
             else:
-                bucket_info.append(f"<div style='margin-left:15px; color:#666'>Write test returned HTTP {html.escape(http_code)}</div>")
+                write_result = f"Write test returned HTTP {http_code}"
 
         except subprocess.TimeoutExpired:
-            bucket_info.append("<div style='margin-left:15px; color:#666'>Write test timed out</div>")
+            write_result = "Write test timed out"
         except Exception as e:
-            bucket_info.append(f"<div style='margin-left:15px; color:#666'>Write test failed: {html.escape(str(e)[:100])}</div>")
+            write_result = f"Write test failed: {str(e)[:100]}"
 
         # Test 2: Check for directory listing
+        list_result = ""
         try:
             list_url = f"https://{bucket}.s3.amazonaws.com/"
             result = subprocess.run(
@@ -2271,28 +2292,122 @@ def check_s3_bucket_security(base):
                 )
 
                 if '<ListBucketResult' in result.stdout:
-                    bucket_info.append("<div style='margin-left:15px; color:#dc3545'><strong>DIRECTORY LISTING ENABLED!</strong></div>")
+                    list_result = "🔴 DIRECTORY LISTING ENABLED!"
+                    has_issues = True
                 else:
-                    bucket_info.append("<div style='margin-left:15px; color:#28a745'>Directory listing disabled</div>")
+                    list_result = "✓ Directory listing disabled"
             else:
-                bucket_info.append("<div style='margin-left:15px; color:#28a745'>Directory listing disabled</div>")
+                list_result = "✓ Directory listing disabled"
 
         except subprocess.TimeoutExpired:
-            bucket_info.append("<div style='margin-left:15px; color:#666'>Directory listing test timed out</div>")
+            list_result = "Directory listing test timed out"
         except Exception as e:
-            bucket_info.append(f"<div style='margin-left:15px; color:#666'>Directory listing test failed: {html.escape(str(e)[:100])}</div>")
+            list_result = f"Directory listing test failed: {str(e)[:100]}"
 
-        findings.append("".join(bucket_info))
+        # Create finding blocks for each location where bucket was found
+        for loc in locations[:5]:  # Limit to 5 locations per bucket
+            # Parse location string (format: "file/path.smali:123")
+            parts = loc.rsplit(':', 1)
+            if len(parts) == 2:
+                rel_path, line_str = parts
+                try:
+                    line_num = int(line_str)
+                    full_path = os.path.join(base, rel_path)
 
-    if not findings:
-        return True, "<div>No S3 buckets found to test</div>"
+                    # Read file and extract code context + S3 URL
+                    s3_url = ""
+                    try:
+                        with open(full_path, errors='ignore') as f:
+                            lines = f.readlines()
 
-    detail = "<div><strong>Found {0} S3 bucket reference(s):</strong></div><br>".format(len(buckets_found)) + "<br>".join(findings)
-    detail += "<br><div style='margin-top:10px; font-size:10px; color:#666'><em>Note: These tests only check for misconfigurations. No data was exfiltrated.</em></div>"
+                        # Extract S3 URL from the target line
+                        if line_num <= len(lines):
+                            target_line = lines[line_num - 1]
+                            # Look for S3 URLs in the line
+                            for pattern in bucket_patterns:
+                                matches = re.finditer(pattern, target_line, re.IGNORECASE)
+                                for match in matches:
+                                    # Extract full URL context if available
+                                    if 'http' in target_line or 's3://' in target_line:
+                                        url_match = re.search(r'(https?://[^\s"\']+|s3://[^\s"\']+)', target_line)
+                                        if url_match:
+                                            s3_url = url_match.group(1)
+                                            break
+                                    if not s3_url:
+                                        # Reconstruct URL from bucket name
+                                        if bucket in target_line:
+                                            s3_url = f"https://{bucket}.s3.amazonaws.com/"
+                                if s3_url:
+                                    break
 
-    # Return FAIL if any security issues found
-    has_issues = any('WRITE ACCESS' in f or 'DIRECTORY LISTING ENABLED' in f for f in findings)
-    return (False if has_issues else True, detail)
+                        # Extract context (3 lines before, target line, 2 after)
+                        start = max(0, line_num - 4)
+                        end = min(len(lines), line_num + 2)
+                        context_lines = []
+                        for j in range(start, end):
+                            prefix = "→ " if j == line_num - 1 else "  "
+                            context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+                        code_snippet = "\n".join(context_lines)
+                    except:
+                        code_snippet = f"Could not read code at line {line_num}"
+                        s3_url = f"https://{bucket}.s3.amazonaws.com/"
+
+                    # Determine language
+                    lang = "smali" if rel_path.endswith(".smali") else "java" if rel_path.endswith(".java") else "xml"
+
+                    # Build custom HTML for this finding
+                    finding_html = []
+
+                    # S3 bucket URL (linked to actual bucket)
+                    finding_html.append(f"<div style='margin:15px 0 10px 0; font-size:14px;'><strong>S3 bucket found:</strong> <a href='{html.escape(s3_url)}' target='_blank' style='color:#0066cc;'>{html.escape(s3_url)}</a></div>")
+
+                    # File location (clickable, line number NOT part of link)
+                    file_url = f"file://{html.escape(os.path.abspath(full_path))}:{line_num}"
+                    finding_html.append(f"<div style='margin:10px 0;'><a href='{file_url}' style='color:#0066cc; text-decoration:none;'>{html.escape(rel_path)}</a>:<span style='color:#666;'>{line_num}</span></div>")
+
+                    # Expandable code block (matching FindingBlock style)
+                    escaped_code = html.escape(code_snippet)
+                    finding_html.append("<details style='margin:10px 0;' open>")
+                    finding_html.append("<summary style='cursor:pointer; padding:8px; background:#e9ecef; border-left:4px solid #495057; font-weight:600; font-size:11px; color:#495057;'>▼ Show Code</summary>")
+                    finding_html.append(f"<pre style='background:#f8f9fa; padding:12px; margin:8px 0; overflow-x:auto; border:1px solid #dee2e6; font-size:12px; line-height:1.5;'><code class='language-{lang}'>{escaped_code}</code></pre>")
+                    finding_html.append("</details>")
+
+                    # Test results section
+                    finding_html.append("<div style='margin:10px 0; padding:10px; background:#f8f9fa; border-left:3px solid #6c757d;'>")
+                    finding_html.append("<div style='font-weight:bold; margin-bottom:8px;'>Bucket test results:</div>")
+                    finding_html.append(f"<div style='margin-left:10px;'>{html.escape(write_result)}</div>")
+                    finding_html.append(f"<div style='margin-left:10px;'>{html.escape(list_result)}</div>")
+                    finding_html.append("</div>")
+
+                    finding_blocks.append("\n".join(finding_html))
+                except:
+                    pass
+
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: S3 Bucket Security</a></div>"
+
+    if not finding_blocks:
+        return TestResult(
+            name="S3 Bucket Security",
+            status="PASS",
+            summary_lines=["No S3 buckets found to test"],
+            mastg_ref_html=mastg_ref,
+        )
+
+    summary_lines = [
+        f"Found {len(buckets_found)} S3 bucket reference(s) in static code"
+    ]
+
+    # Build raw HTML with all findings
+    raw_html = "<br>".join(finding_blocks)
+
+    # Return TestResult with raw HTML
+    return TestResult(
+        name="S3 Bucket Security",
+        status="FAIL" if has_issues else "PASS",
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        raw_html=raw_html,
+    )
 
 
 def check_x509(base):
@@ -3265,26 +3380,40 @@ def check_updates(base):
     custom_found = {}
     file_count = 0
 
-    # Scan all code files
+    # Scan all code files and track line numbers for found patterns
     for root, _, files in os.walk(base):
         for f in files:
             if f.endswith(('.smali', '.java')):
                 file_count += 1
                 file_path = os.path.join(root, f)
                 try:
-                    content = open(file_path, errors='ignore').read()
+                    with open(file_path, errors='ignore') as fp:
+                        lines = fp.readlines()
+                        content = ''.join(lines)
 
                     # Check for Google Play patterns
                     for pattern, description in google_play_patterns.items():
                         if pattern in content and pattern not in google_found:
                             rel_path = os.path.relpath(file_path, base)
-                            google_found[pattern] = (description, rel_path)
+                            # Find line number
+                            line_num = 0
+                            for i, line in enumerate(lines, 1):
+                                if pattern in line:
+                                    line_num = i
+                                    break
+                            google_found[pattern] = (description, rel_path, file_path, line_num, lines)
 
                     # Check for custom update patterns
                     for pattern, description in custom_update_patterns.items():
                         if pattern in content and pattern not in custom_found:
                             rel_path = os.path.relpath(file_path, base)
-                            custom_found[pattern] = (description, rel_path)
+                            # Find line number
+                            line_num = 0
+                            for i, line in enumerate(lines, 1):
+                                if pattern in line:
+                                    line_num = i
+                                    break
+                            custom_found[pattern] = (description, rel_path, file_path, line_num, lines)
                 except:
                     continue
 
@@ -3301,38 +3430,56 @@ def check_updates(base):
         f"Custom update patterns: {len(custom_found)}/{len(custom_update_patterns)}",
     ]
 
-    google_lines = []
+    # Add checkmarks/X's to summary
+    summary_lines.append("")  # Blank line
     for pattern, desc in google_play_patterns.items():
         if pattern in google_found:
-            _, path = google_found[pattern]
-            google_lines.append(f"✓ {pattern} ({desc}) in {path}")
+            summary_lines.append(f"✓ {pattern} ({desc})")
         else:
-            google_lines.append(f"✗ {pattern} ({desc})")
+            summary_lines.append(f"✗ {pattern} ({desc})")
 
-    custom_lines = []
+    summary_lines.append("")  # Blank line
     for pattern, desc in custom_update_patterns.items():
         if pattern in custom_found:
-            _, path = custom_found[pattern]
-            custom_lines.append(f"✓ {pattern} ({desc}) in {path}")
+            summary_lines.append(f"✓ {pattern} ({desc})")
         else:
-            custom_lines.append(f"✗ {pattern} ({desc})")
+            summary_lines.append(f"✗ {pattern} ({desc})")
 
-    findings = [
-        FindingBlock(
-            title="Google Play In-App Updates",
-            subtitle="Complete" if google_play_ok else "Missing components",
-            code="\n".join(google_lines),
-            code_language="text",
-            open_by_default=not google_play_ok,
-        ),
-        FindingBlock(
-            title="Custom server-side updates",
-            subtitle="Detected" if custom_ok else "Missing components",
-            code="\n".join(custom_lines),
-            code_language="text",
-            open_by_default=not custom_ok,
-        )
-    ]
+    # Build FindingBlocks only for FOUND patterns with code snippets
+    findings = []
+
+    # Add findings for found custom patterns (these are more interesting)
+    if custom_found:
+        summary_lines.append("")
+        summary_lines.append("Custom server-side updates")
+
+        for pattern, data in custom_found.items():
+            desc, rel_path, file_path, line_num, lines = data
+
+            # Extract code context
+            if line_num > 0:
+                start = max(0, line_num - 4)
+                end = min(len(lines), line_num + 2)
+                context_lines = []
+                for j in range(start, end):
+                    prefix = "→ " if j == line_num - 1 else "  "
+                    context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+                code_snippet = "\n".join(context_lines)
+            else:
+                code_snippet = "Pattern found but line number unavailable"
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=rel_path,
+                    subtitle=f"{pattern} ({desc}) · Line {line_num}",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=True,
+                )
+            )
 
     return TestResult(
         name="In-App Updates",
@@ -3384,14 +3531,17 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
         pass
 
     # 2) Fallback: use `aapt dump badging` on the original APK
-    if apk_path:
+    if apk_path and os.path.exists(apk_path):
         try:
             out = subprocess.check_output(
                 ['aapt', 'dump', 'badging', apk_path],
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
                 universal_newlines=True
             )
-            m = re.search(r"sdkVersion:'(\d+)'", out)
+            # Look for both minSdkVersion and sdkVersion patterns
+            m = re.search(r"minSdkVersion:'(\d+)'", out)
+            if not m:
+                m = re.search(r"sdkVersion:'(\d+)'", out)
             if m:
                 v = int(m.group(1))
                 min_value = v if min_value is None else min_value
@@ -3576,6 +3726,7 @@ def check_serialize(base):
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/org/chromium/', '/io/reactivex/',
+        '/io/sentry/',
         '/lib/', '/jetified-'
     )
 
@@ -4377,6 +4528,7 @@ def check_http_uris(base):
     """
 
     findings = []
+    found_urls = []  # Track the actual URLs found
     http_re = re.compile(r'http://[^\s"\'<>]+')
 
     ignore_prefixes = (
@@ -4394,6 +4546,9 @@ def check_http_uris(base):
         "http://xml.org",
         "http://www.android.com",
         "http://jsoup.org",
+        "http://java.sun.com",  # Java/XML namespace URLs
+        "http://sqlite.org",     # SQLite documentation URLs
+        "http://www.sqlite.org", # SQLite documentation URLs
         "http://localhost",
         "http://127.0.0.1",
         "http://0.0.0.0",
@@ -4430,6 +4585,9 @@ def check_http_uris(base):
                     if false_positive_re.search(line):
                         continue
 
+                    # Track the URL
+                    found_urls.append(m)
+
                     start = max(0, lineno - 3)
                     end = min(len(lines), lineno + 2)
                     context = []
@@ -4458,11 +4616,19 @@ def check_http_uris(base):
             mastg_ref_html=mastg_ref,
         )
 
+    # Build HTML section showing the list of URLs
+    url_list_html = "<div style='margin:15px 0; padding:12px; background:#fff3cd; border-left:4px solid #ffc107;'>"
+    url_list_html += "<div style='font-weight:bold; margin-bottom:8px;'>HTTP URLs:</div>"
+    for url in found_urls:
+        url_list_html += f"<div style='margin-left:10px; font-family:monospace; font-size:12px;'>{html.escape(url)}</div>"
+    url_list_html += "</div>"
+
     return TestResult(
         name="Insecure HTTP URIs",
         status="FAIL",
         summary_lines=[f"HTTP URI usages: {len(findings)}"],
         mastg_ref_html=mastg_ref,
+        raw_html=url_list_html,
         findings=findings,
     )
 
@@ -4611,22 +4777,283 @@ def check_root_detection(manifest, base):
     lines.append(mastg_ref)
     return True, "\n".join(lines)
 
-def check_allow_backup(manifest):
+def check_allow_backup(manifest, base):
     """
-    Check if app has properly disabled backup functionality for security.
-    PASS if android:allowBackup="false" (backups disabled - secure).
-    FAIL if android:allowBackup="true" or missing (backups enabled - insecure).
+    Check if app has properly configured backup rules according to MASTG-TEST-0262.
+
+    PASS if:
+      • android:allowBackup="false" (backups disabled), OR
+      • android:allowBackup="true" but has proper backup rules:
+        - fullBackupContent="@xml/backup_rules" (Android ≤11) OR
+        - dataExtractionRules="@xml/data_extraction_rules" (Android ≥12)
+        - AND the XML file exists and excludes sensitive data
+
+    FAIL if:
+      • allowBackup="true" (or missing, defaults to true) AND
+      • No fullBackupContent/dataExtractionRules attributes AND
+      • No backup rules XML files exist
+
+    Reference: MASTG-TEST-0262
     """
     txt = open(manifest, errors='ignore').read()
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0009/' target='_blank'>MASTG-TEST-0009: Testing Backups for Sensitive Data</a></div>"
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0262/' target='_blank'>MASTG-TEST-0262: Testing Backups for Sensitive Data</a></div>"
 
-    m = re.search(r'<application\b[^>]*\bandroid:allowBackup="(true|false)"', txt)
-    if not m:
-        return False, f"android:allowBackup is missing (defaults to true - backups enabled). Set to false to prevent backup extraction.{mastg_ref}"
-    if m.group(1).lower() != 'false':
-        return False, f"android:allowBackup=\"{m.group(1)}\" - backups are enabled. Change to false to prevent data extraction via adb backup.{mastg_ref}"
-    return True, f"android:allowBackup=\"false\" - backups properly disabled{mastg_ref}"
+    # Step 1: Check allowBackup attribute
+    allow_backup_match = re.search(r'<application\b[^>]*\bandroid:allowBackup="(true|false)"', txt)
+    allow_backup = allow_backup_match.group(1).lower() if allow_backup_match else "true"  # Default is true
+
+    # If allowBackup is false, we're good - backups are completely disabled
+    if allow_backup == "false":
+        return True, f"✓ android:allowBackup=\"false\" - backups completely disabled (most secure){mastg_ref}"
+
+    # Step 2: allowBackup is true (or missing), check for backup rules
+    report_lines = []
+    report_lines.append(f"<div style='margin:10px 0'><strong>allowBackup:</strong> {allow_backup} (backups enabled)</div>")
+
+    # Step 3: Check for fullBackupContent (Android ≤11)
+    full_backup_match = re.search(r'<application\b[^>]*\bandroid:fullBackupContent="([^"]+)"', txt)
+    full_backup_content = full_backup_match.group(1) if full_backup_match else None
+
+    # Step 4: Check for dataExtractionRules (Android ≥12)
+    data_extraction_match = re.search(r'<application\b[^>]*\bandroid:dataExtractionRules="([^"]+)"', txt)
+    data_extraction_rules = data_extraction_match.group(1) if data_extraction_match else None
+
+    # Show what backup rules exist
+    if full_backup_content:
+        report_lines.append(f"<div style='margin:10px 0'><strong>fullBackupContent:</strong> {html.escape(full_backup_content)}</div>")
+    if data_extraction_rules:
+        report_lines.append(f"<div style='margin:10px 0'><strong>dataExtractionRules:</strong> {html.escape(data_extraction_rules)}</div>")
+
+    # Try to find and parse the XML files
+    has_backup_rules = False
+    rules_content = None
+
+    for attr_value in [full_backup_content, data_extraction_rules]:
+        if attr_value and attr_value.startswith("@xml/"):
+            xml_name = attr_value.replace("@xml/", "") + ".xml"
+            xml_paths = [
+                os.path.join(base, "res", "xml", xml_name),
+                os.path.join(base, "res", "xml-v*", xml_name),
+            ]
+
+            import glob
+            for xml_path_pattern in xml_paths:
+                for xml_path in glob.glob(xml_path_pattern):
+                    if os.path.exists(xml_path):
+                        try:
+                            rules_content = open(xml_path, errors='ignore').read()
+                            has_backup_rules = True
+                            break
+                        except:
+                            pass
+                if has_backup_rules:
+                    break
+        if has_backup_rules:
+            break
+
+    # Show XML content if found
+    if has_backup_rules and rules_content:
+        report_lines.append("<details style='margin:10px 0;'>")
+        report_lines.append("<summary style='cursor:pointer; font-weight:600;'>Backup Rules XML</summary>")
+        report_lines.append(f"<pre class='backup-rules-xml' style='background:#f8f9fa; padding:10px; border:1px solid #ddd; margin-top:10px; overflow:auto;'>{html.escape(rules_content)}</pre>")
+        report_lines.append("</details>")
+
+        # Check if rules actually exclude data
+        has_exclude_tags = "<exclude" in rules_content
+        if has_exclude_tags:
+            exclude_count = rules_content.count("<exclude")
+            return "WARN", "\n".join(report_lines) + f"<br><strong>Note:</strong> Found {exclude_count} exclusion rule(s). Verify via <code>adb backup</code> that sensitive data is excluded." + mastg_ref
+        else:
+            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> No <code>&lt;exclude&gt;</code> tags found - all app data will be backed up" + mastg_ref
+    else:
+        # No backup rules configured
+        if not full_backup_content and not data_extraction_rules:
+            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> No backup rules configured - all app data will be backed up" + mastg_ref
+        else:
+            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> Backup rules XML file not found" + mastg_ref
     
+def check_notification_sensitive_data(manifest, base):
+    """
+    Check if app uses notifications that may contain sensitive data.
+    Detects usage of setContentTitle() and setContentText() APIs.
+
+    WARN if notification APIs are used (manual verification required).
+    INFO if no notification usage detected.
+
+    Reference: MASTG-DEMO-0078
+    """
+    mastg_ref_html = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/demos/android/MASVS-PLATFORM/MASTG-DEMO-0078/' target='_blank'>MASTG-DEMO-0078: Sensitive Data in Notifications</a></div>"
+
+    # Check if POST_NOTIFICATIONS permission is declared
+    has_post_notifications = False
+    try:
+        manifest_content = open(manifest, errors='ignore').read()
+        has_post_notifications = 'POST_NOTIFICATIONS' in manifest_content
+    except:
+        pass
+
+    # Library paths to exclude
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/okhttp3/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
+
+    # Search for notification API usage in smali files
+    # Patterns for Notification.Builder and NotificationCompat.Builder methods
+    # In smali, these appear as invoke-virtual calls
+    patterns = {
+        'setContentTitle': [
+            r'Landroid/app/Notification\$Builder;->setContentTitle\(',
+            r'Landroidx/core/app/NotificationCompat\$Builder;->setContentTitle\(',
+        ],
+        'setContentText': [
+            r'Landroid/app/Notification\$Builder;->setContentText\(',
+            r'Landroidx/core/app/NotificationCompat\$Builder;->setContentText\(',
+        ],
+    }
+
+    # Kotlin/Java source fallbacks (for scans that run on source trees instead of smali)
+    source_patterns = {
+        'setContentTitle': 'setContentTitle(',
+        'setContentText': 'setContentText(',
+    }
+
+    findings = []
+
+    def build_snippet(lines, idx):
+        start = max(idx - 2, 0)
+        end = min(len(lines), idx + 1)
+        snippet_lines = []
+        for i in range(start, end):
+            prefix = "→ " if i == idx else "  "
+            snippet_lines.append(f"{prefix}{i+1:4d} | {lines[i]}")
+        return "\n".join(snippet_lines)
+
+    def add_finding(rel_path, lineno, api_name, code_line, snippet):
+        findings.append({
+            'file': rel_path,
+            'line': lineno,
+            'api': api_name,
+            'code': code_line.strip(),
+            'snippet': snippet.strip() if snippet else ""
+        })
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+
+            # Scan decompiled smali
+            if fn.endswith('.smali'):
+                # Skip library code
+                if is_library_path(rel):
+                    continue
+
+                try:
+                    lines = open(path, errors='ignore').read().splitlines()
+                except:
+                    continue
+
+                for lineno, line in enumerate(lines, 1):
+                    for api_name, pattern_list in patterns.items():
+                        for pattern in pattern_list:
+                            if re.search(pattern, line):
+                                snippet = build_snippet(lines, lineno - 1)
+                                add_finding(rel, lineno, api_name, line, snippet)
+
+            # Fallback: scan Kotlin/Java source trees when no smali is present
+            elif fn.endswith(('.kt', '.java')):
+                if is_library_path(rel):
+                    continue
+
+                try:
+                    lines = open(path, errors='ignore').read().splitlines()
+                except:
+                    continue
+
+                for lineno, line in enumerate(lines, 1):
+                    for api_name, needle in source_patterns.items():
+                        if needle in line:
+                            snippet = build_snippet(lines, lineno - 1)
+                            add_finding(rel, lineno, api_name, line, snippet)
+
+    if not findings:
+        return TestResult(
+            name="Notification Sensitive Data",
+            status="INFO",
+            summary_lines=["No notification API usage detected"],
+            mastg_ref_html=mastg_ref_html,
+        )
+
+    # Group findings by API
+    set_title_count = sum(1 for f in findings if f['api'] == 'setContentTitle')
+    set_text_count = sum(1 for f in findings if f['api'] == 'setContentText')
+
+    summary_lines = [
+        f"Notification API usage: {len(findings)} occurrence(s)",
+        f"setContentTitle(): {set_title_count} | setContentText(): {set_text_count}",
+    ]
+    summary_lines.append(
+        "POST_NOTIFICATIONS permission declared" if has_post_notifications
+        else "POST_NOTIFICATIONS permission not declared"
+    )
+
+    max_findings = 25
+    finding_blocks = []
+    for finding in findings[:max_findings]:
+        rel_path = finding['file']
+        full_path = os.path.join(base, rel_path)
+        lang = 'smali' if rel_path.endswith('.smali') else ('kotlin' if rel_path.endswith('.kt') else 'java')
+        finding_blocks.append(
+            FindingBlock(
+                title=rel_path,
+                subtitle=f"{finding['api']}() at line {finding['line']}",
+                link=f"file://{os.path.abspath(full_path)}:{finding['line']}",
+                code=finding['snippet'] or f"{finding['line']}: {finding['code']}",
+                code_language=lang,
+                is_collapsible=True,
+                open_by_default=False,
+            )
+        )
+
+    extra_note = ""
+    if len(findings) > max_findings:
+        extra_note = f"<div style='margin-top:6px;'>Showing first {max_findings} of {len(findings)} locations.</div>"
+
+    manual_html = (
+        "<div style='margin-top:10px;'>"
+        "<div><strong>Manual verification</strong></div>"
+        "<ul style='margin:6px 0 0 18px; padding:0; line-height:1.5;'>"
+        "<li>Review notification payloads for PII, credentials, or financial data.</li>"
+        "<li>Truncate or omit sensitive values before building notifications.</li>"
+        "<li>Use notification channels/privacy settings to minimize lock-screen exposure.</li>"
+        "</ul>"
+        "</div>"
+    )
+
+    raw_html = (extra_note + manual_html) if extra_note else manual_html
+
+    return TestResult(
+        name="Notification Sensitive Data",
+        status="WARN",
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref_html,
+        findings=finding_blocks,
+        raw_html=raw_html,
+    )
+
+
 def check_safe_browsing(manifest, base):
     """
     PASS if:
@@ -5959,7 +6386,7 @@ def check_weak_crypto(base):
     FAIL if any use of weak crypto is detected:
       • Any literal "MD5" | "SHA-1" | "SHA1" | "HmacMD5" | "HmacSHA1"
       • Any Cipher.getInstance(...DES...) or (...ECB...)
-    Emits clickable file:// links with line numbers and the matching snippet.
+    Returns TestResult with findings grouped by algorithm type.
     Filters out library code to show only app code issues.
     """
     # Library paths to exclude (same pattern as other checks)
@@ -5969,6 +6396,7 @@ def check_weak_crypto(base):
         '/com/google/common/', '/com/google/crypto/', '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/io/reactivex/', '/rx/', '/dagger/',
+        '/io/sentry/',  # Sentry error tracking library
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
@@ -5981,15 +6409,17 @@ def check_weak_crypto(base):
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
-    # single big regex that covers:
-    #  - any of those algorithm names in quotes (smali or Java)
-    #  - Cipher.getInstance DES/ECB
-    combined = re.compile(
-        r'("MD5"|"SHA-1"|"SHA1"|"HmacMD5"|"HmacSHA1")'
-        r'|Cipher->getInstance\(\s*"[^"]*(DES|ECB)[^"]*"\s*\)'
-    )
+    # Define patterns for different weak algorithms
+    algorithm_patterns = {
+        'MD5': re.compile(r'"MD5"|"HmacMD5"'),
+        'SHA1 or SHA-1': re.compile(r'"SHA-?1"|"HmacSHA1"'),
+        'DES': re.compile(r'Cipher->getInstance\(\s*"[^"]*DES[^"]*"\s*\)'),
+        'ECB mode': re.compile(r'Cipher->getInstance\(\s*"[^"]*ECB[^"]*"\s*\)'),
+    }
 
-    issues = []
+    # Store findings by algorithm type
+    findings_by_algo = {algo: [] for algo in algorithm_patterns.keys()}
+
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith(('.smali', '.java')):
@@ -6002,28 +6432,69 @@ def check_weak_crypto(base):
                 continue
 
             try:
-                lines = open(path, errors='ignore').read().splitlines()
+                with open(path, errors='ignore') as f:
+                    lines = f.readlines()
             except:
                 continue
 
             for lineno, line in enumerate(lines, 1):
-                m = combined.search(line)
-                if not m:
-                    continue
-                snippet = html.escape(line.strip())
-                link = (
-                    f'<a href="file://{html.escape(path)}">'
-                    f'{html.escape(rel)}:{lineno}</a>'
-                )
-                issues.append(f"{link} – <code>{snippet}</code>")
-                break  # one hit per file
+                for algo_name, pattern in algorithm_patterns.items():
+                    if pattern.search(line):
+                        # Extract context (3 lines before, target line, 2 after)
+                        start = max(0, lineno - 4)
+                        end = min(len(lines), lineno + 2)
+                        context_lines = []
+                        for j in range(start, end):
+                            prefix = "→ " if j == lineno - 1 else "  "
+                            context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+                        code_snippet = "\n".join(context_lines)
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0221/' target='_blank'>MASTG-TEST-0221: Broken Symmetric Encryption Algorithms</a></div>"
+                        lang = "smali" if fn.endswith(".smali") else "java"
 
-    if not issues:
-        return True, f"None{mastg_ref}"
+                        findings_by_algo[algo_name].append(
+                            FindingBlock(
+                                title=rel,
+                                subtitle=f"Line {lineno}",
+                                link=f"file://{os.path.abspath(path)}:{lineno}",
+                                code=code_snippet,
+                                code_language=lang,
+                                open_by_default=True,
+                            )
+                        )
+                        break  # Only first match per line
 
-    return False, "<br>\n".join(issues) + mastg_ref
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0221/' target='_blank'>MASTG-TEST-0221: Broken Symmetric Encryption Algorithms</a></div>"
+
+    # Count total findings
+    total_findings = sum(len(findings) for findings in findings_by_algo.values())
+
+    if total_findings == 0:
+        return TestResult(
+            name="Weak Crypto Algorithms",
+            status="PASS",
+            summary_lines=["No weak cryptographic algorithms detected"],
+            mastg_ref_html=mastg_ref,
+        )
+
+    # Build summary lines
+    summary_lines = []
+    for algo_name, findings in findings_by_algo.items():
+        if findings:
+            summary_lines.append(f"{len(findings)} result(s) found of {algo_name}")
+
+    # Flatten all findings into a single list
+    all_findings = []
+    for algo_name, findings in findings_by_algo.items():
+        if findings:
+            all_findings.extend(findings)
+
+    return TestResult(
+        name="Weak Crypto Algorithms",
+        status="FAIL",
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=all_findings,
+    )
 
     
 def check_kotlin_metadata(base):
@@ -6542,8 +7013,20 @@ def check_sharedprefs_encryption(base):
         files_with_unencrypted[file_path].append(finding)
 
     finding_blocks = []
-    # Encrypted usage details (if present)
+
+    # Encrypted usage details (if present) - shown first as good examples
     if encrypted_count > 0:
+        # Add section header for encrypted usage
+        finding_blocks.append(
+            FindingBlock(
+                title="✓ ENCRYPTED SharedPreferences Usage (Secure)",
+                subtitle=f"Found {encrypted_count} instance(s) using EncryptedSharedPreferences",
+                code="These are properly secured and do not pose a risk.",
+                code_language="",
+                open_by_default=False,
+            )
+        )
+
         files_with_encrypted = {}
         for finding in findings['encrypted']:
             file_path = finding['file']
@@ -6561,14 +7044,25 @@ def check_sharedprefs_encryption(base):
 
             finding_blocks.append(
                 FindingBlock(
-                    title=file_path,
-                    subtitle=f"Encrypted usage: {len(file_findings)}",
+                    title=f"  ↳ {file_path}",
+                    subtitle=f"{len(file_findings)} encrypted call(s)",
                     link=f"file://{full}",
                     code="\n".join(code_lines).rstrip(),
                     code_language="smali",
                     open_by_default=False,
                 )
             )
+
+    # Add section header for unencrypted usage (security issues)
+    finding_blocks.append(
+        FindingBlock(
+            title="⚠ UNENCRYPTED SharedPreferences Usage (Insecure)",
+            subtitle=f"Found {unencrypted_count} instance(s) - REQUIRES ATTENTION",
+            code="These store data in plaintext and should be migrated to EncryptedSharedPreferences.",
+            code_language="",
+            open_by_default=True,
+        )
+    )
 
     for file_path in sorted(files_with_unencrypted.keys()):
         full = os.path.abspath(os.path.join(base, file_path))
@@ -6585,8 +7079,8 @@ def check_sharedprefs_encryption(base):
 
         finding_blocks.append(
             FindingBlock(
-                title=file_path,
-                subtitle=f"Unencrypted calls: {len(file_findings)}",
+                title=f"  ↳ {file_path}",
+                subtitle=f"{len(file_findings)} unencrypted call(s)",
                 link=f"file://{full}",
                 code="\n".join(code_lines).rstrip(),
             )
@@ -8338,6 +8832,7 @@ def check_insecure_randomness(base):
     lib_paths = (
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/com/google/android/material/',  # Material Design Components library
         '/com/google/common/', '/com/google/crypto/tink/',  # Google Tink cryptographic library
         '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
@@ -8457,6 +8952,7 @@ def check_insecure_fingerprint_api(base):
     # even in third-party libraries since it affects the app's security posture
     lib_paths = (
         '/androidx/biometric/',  # Modern biometric library (safe)
+        '/androidx/core/hardware/fingerprint/',  # FingerprintManagerCompat library implementation (not app usage)
         '/org/conscrypt/', '/lib/arm', '/lib/x86',  # Native libraries
     )
 
@@ -9837,12 +10333,12 @@ def check_frida_strict_mode(base, wait_secs=7):
         return 'FAIL', severity_note + detail
     elif library_strictmode_calls:
         # Library StrictMode is present but not from app - WARN instead of FAIL
-        info_note = "<div style='background:#e3f2fd; padding:10px; border-left:3px solid #2196F3; font-size:11px'>"
+        info_note = "<div style='background:#d1ecf1; padding:12px; border-left:4px solid #0c5460; font-size:11px; color:#0c5460; margin:10px 0;'>"
         info_note += "<strong>ℹ Information:</strong><br>"
         info_note += "StrictMode calls detected in library/framework code only (Google Play Services, Firebase, Android Framework).<br>"
         info_note += "These are managed by the library vendor and are generally not a security concern.<br>"
         info_note += "<strong>Optional:</strong> If you want to suppress these, configure ProGuard/R8:<br>"
-        info_note += "<code>-assumenosideeffects class android.os.StrictMode { *; }</code><br>"
+        info_note += "<code style='background:#b8daff; padding:2px 4px; border-radius:3px; color:#004085;'>-assumenosideeffects class android.os.StrictMode { *; }</code><br>"
         info_note += "</div><br>"
 
         return 'WARN', info_note + detail
@@ -12426,7 +12922,7 @@ def check_webview_ssl_error_handling(base):
 
     Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0284/
     """
-    vulnerable_files = []
+    finding_blocks = []
 
     for root, _, files in os.walk(base):
         for fn in files:
@@ -12447,9 +12943,24 @@ def check_webview_ssl_error_handling(base):
 
                     if in_ssl_error_method:
                         if 'invoke-' in line and 'proceed' in line and 'SslErrorHandler' in line:
-                            snippet = html.escape(lines[i-1].strip()[:100])
-                            link = f'<a href="file://{html.escape(full)}#L{i}">{html.escape(rel)}:{i}</a>'
-                            vulnerable_files.append(f"{link} ⟶ <code>{snippet}</code>")
+                            # Extract context (3 lines before, target line, 2 lines after)
+                            start = max(0, i - 4)
+                            end = min(len(lines), i + 2)
+                            context_lines = []
+                            for j in range(start, end):
+                                prefix = "→ " if j == i - 1 else "  "
+                                context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+
+                            finding_blocks.append(
+                                FindingBlock(
+                                    title=rel,
+                                    subtitle=f"Line {i}",
+                                    link=f"file://{os.path.abspath(full)}:{i}",
+                                    code="\n".join(context_lines),
+                                    code_language="smali" if fn.endswith(".smali") else "java",
+                                    open_by_default=True,
+                                )
+                            )
                             in_ssl_error_method = False
                             break
 
@@ -12458,20 +12969,29 @@ def check_webview_ssl_error_handling(base):
             except Exception:
                 pass
 
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0284/' target='_blank'>MASTG-TEST-0284: Incorrect SSL Error Handling in WebViews</a></div>"
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0284/' target='_blank'>MASTG-TEST-0284: Incorrect SSL Error Handling in WebViews</a></div>"
 
-    if not vulnerable_files:
-        return 'PASS', f"No insecure SSL error handling detected in WebViews{mastg_ref}"
+    if not finding_blocks:
+        return TestResult(
+            name="WebView SSL Error Handling",
+            status="PASS",
+            summary_lines=["No insecure SSL error handling detected in WebViews"],
+            mastg_ref_html=mastg_ref,
+        )
 
-    result = [
-        f"<div><strong>CRITICAL: {len(vulnerable_files)} SSL error handler(s) bypass certificate validation</strong></div>",
-        "<div>WebViewClient.onReceivedSslError() calls proceed(), accepting all certificates.</div>",
-        "<div>This allows man-in-the-middle attacks. Use cancel() instead.</div>",
-        "<br>".join(vulnerable_files[:20]),
-        mastg_ref
+    summary_lines = [
+        f"CRITICAL: {len(finding_blocks)} SSL error handler(s) bypass certificate validation",
+        "WebViewClient.onReceivedSslError() calls proceed(), accepting all certificates",
+        "This allows man-in-the-middle attacks. Use cancel() instead"
     ]
 
-    return 'FAIL', "<br>\n".join(result)
+    return TestResult(
+        name="WebView SSL Error Handling",
+        status="FAIL",
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=finding_blocks[:20],  # Limit to 20 findings
+    )
 
 
 def check_recent_screenshot_disabled(base):
@@ -13413,6 +13933,187 @@ def generate_library_changes_section(current_lib_paths, previous_info):
     return html
 
 
+def run_preflight_checks(check_device=False):
+    """
+    Run pre-flight checks before starting tests.
+    Returns: (success: bool, errors: list)
+    """
+    print("\n[*] Running pre-flight checks...")
+    errors = []
+    warnings = []
+
+    # Check required tools (always needed)
+    required_tools = {
+        'apktool': 'APK decompilation',
+        'aapt': 'APK analysis',
+    }
+
+    # Tools only needed for dynamic tests with -u flag
+    dynamic_tools = {
+        'adb': 'Device communication',
+        'frida': 'Dynamic instrumentation',
+    }
+
+    # Optional tools (some tests will be skipped if missing)
+    optional_tools = {
+        'checksec': 'Native library security analysis',
+        'readelf': 'Debug info detection in libraries',
+        'apksigner': 'APK signature verification',
+        'curl': 'S3 bucket security tests',
+    }
+
+    for tool, purpose in required_tools.items():
+        try:
+            result = subprocess.run(
+                [tool, '--version'] if tool != 'aapt' else ['aapt', 'version'],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                print(f"  ✓ {tool} found ({purpose})")
+            else:
+                errors.append(f"{tool} not working properly")
+                print(f"  ✗ {tool} not working properly")
+        except FileNotFoundError:
+            errors.append(f"{tool} not found in PATH")
+            print(f"  ✗ {tool} not found - required for: {purpose}")
+        except Exception as e:
+            warnings.append(f"{tool} check failed: {e}")
+            print(f"  ⚠ {tool} check failed: {e}")
+
+    # Check dynamic tools only if -u flag is used
+    if check_device:
+        for tool, purpose in dynamic_tools.items():
+            try:
+                if tool == 'frida':
+                    result = subprocess.run(['frida', '--version'], capture_output=True, timeout=5)
+                elif tool == 'adb':
+                    result = subprocess.run(['adb', 'version'], capture_output=True, timeout=5)
+                else:
+                    result = subprocess.run([tool, '--version'], capture_output=True, timeout=5)
+
+                if result.returncode == 0:
+                    print(f"  ✓ {tool} found ({purpose})")
+                else:
+                    errors.append(f"{tool} not available")
+                    print(f"  ✗ {tool} not available - required for dynamic tests")
+            except FileNotFoundError:
+                errors.append(f"{tool} not found in PATH")
+                print(f"  ✗ {tool} not found - required for: {purpose}")
+            except Exception as e:
+                errors.append(f"{tool} check failed: {e}")
+                print(f"  ✗ {tool} check failed: {e}")
+
+    # Check optional tools (warnings only)
+    for tool, purpose in optional_tools.items():
+        try:
+            # Different tools use different version flags
+            if tool == 'checksec':
+                result = subprocess.run(['checksec', '--version'], capture_output=True, timeout=5)
+            elif tool == 'readelf':
+                result = subprocess.run(['readelf', '--version'], capture_output=True, timeout=5)
+            elif tool == 'apksigner':
+                # apksigner might not have --version, try --help
+                result = subprocess.run(['apksigner', 'version'], capture_output=True, timeout=5)
+                if result.returncode != 0:
+                    # Try alternative command
+                    result = subprocess.run(['apksigner'], capture_output=True, timeout=5)
+            else:
+                result = subprocess.run([tool, '--version'], capture_output=True, timeout=5)
+
+            if result.returncode == 0 or (tool == 'apksigner' and result.returncode == 1):
+                print(f"  ✓ {tool} found ({purpose})")
+            else:
+                warnings.append(f"{tool} not available - {purpose}")
+                print(f"  ⚠ {tool} not available - {purpose}")
+        except FileNotFoundError:
+            warnings.append(f"{tool} not found - {purpose}")
+            print(f"  ⚠ {tool} not found - {purpose}")
+        except Exception as e:
+            warnings.append(f"{tool} check failed - {purpose}")
+            print(f"  ⚠ {tool} check failed - {purpose}")
+
+    # Check device connection if requested
+    if check_device:
+        print("\n[*] Checking device connection...")
+        try:
+            result = subprocess.run(
+                ['adb', 'devices'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            devices = [line for line in result.stdout.split('\n') if '\tdevice' in line]
+
+            if devices:
+                print(f"  ✓ {len(devices)} device(s) detected")
+                for dev in devices:
+                    print(f"    • {dev.split()[0]}")
+            else:
+                errors.append("No Android devices detected via ADB")
+                print("  ✗ No devices detected")
+                print("    Run 'adb devices' to check connection")
+        except FileNotFoundError:
+            errors.append("adb not found - cannot check device")
+            print("  ✗ adb not found - cannot check device")
+        except Exception as e:
+            warnings.append(f"Device check failed: {e}")
+            print(f"  ⚠ Device check failed: {e}")
+
+        # Check Frida server if device is connected
+        if not errors:
+            print("\n[*] Checking Frida server...")
+            try:
+                result = subprocess.run(
+                    ['frida-ps', '-U'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                if result.returncode == 0 and 'PID' in result.stdout:
+                    print("  ✓ Frida server responding")
+                else:
+                    errors.append("Frida server not responding")
+                    print("  ✗ Frida server not responding")
+                    print("    Make sure frida-server is running on the device")
+            except FileNotFoundError:
+                errors.append("frida-ps not found")
+                print("  ✗ frida-ps not found - install with: pip install frida-tools")
+            except subprocess.TimeoutExpired:
+                errors.append("Frida connection timed out")
+                print("  ✗ Frida connection timed out")
+            except Exception as e:
+                warnings.append(f"Frida check failed: {e}")
+                print(f"  ⚠ Frida check failed: {e}")
+
+    # Summary
+    print("\n" + "="*60)
+    if errors:
+        print(f"[!] Pre-flight checks FAILED with {len(errors)} error(s):")
+        for err in errors:
+            print(f"    • {err}")
+        if warnings:
+            print(f"\n[!] Additional warnings ({len(warnings)}):")
+            for warn in warnings:
+                print(f"    • {warn}")
+        print("\n[!] Cannot continue - please install missing required tools")
+        print("="*60)
+        return False, errors
+    elif warnings:
+        print(f"[*] Pre-flight checks passed with {len(warnings)} warning(s)")
+        print(f"    Some tests may be skipped due to missing optional tools:")
+        for warn in warnings:
+            print(f"    • {warn}")
+        print("\n[*] Continuing with available tools...")
+        print("="*60)
+        return True, []
+    else:
+        print("[✓] All pre-flight checks passed!")
+        print("="*60)
+        return True, []
+
+
 def main():
     # Check for updates before running
     check_for_updates()
@@ -13425,6 +14126,13 @@ def main():
     parser.add_argument('-u','--usb', action='store_true', help='Run dynamic Frida USB pinning presence check')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     args = parser.parse_args()
+
+    # Run pre-flight checks
+    success, errors = run_preflight_checks(check_device=args.usb)
+    if not success:
+        print("\n[!] Cannot continue due to missing requirements.")
+        print("[!] Please install missing tools and try again.")
+        sys.exit(1)
 
     # Track start time
     start_timestamp = datetime.now()
@@ -13559,15 +14267,16 @@ def main():
                 "Exported Components",
                 "Min SDK Version",
                 "In-App Updates",
-                "Allow Backup",
-                "StrictMode APIs",
-                "FLAG_SECURE Usage",
-                "Recent Screenshot Protection",
-                "WebView JavaScript Bridges",
-                "Clipboard Security",
-                "PendingIntent Flags",
-            ]
-        },
+            "Allow Backup",
+            "StrictMode APIs",
+            "FLAG_SECURE Usage",
+            "Recent Screenshot Protection",
+            "WebView JavaScript Bridges",
+            "Clipboard Security",
+            "Notification Sensitive Data",
+            "PendingIntent Flags",
+        ]
+    },
         "MASVS-CODE": {
             "title": "Code Quality",
             "url":   "https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0002/",
@@ -13676,7 +14385,7 @@ def main():
         make_check("Debug Symbols",           lambda: check_debug_symbols(os.path.join(base,'lib'))),
         make_check("StrictMode APIs",         lambda: check_strict_mode(base)),
         make_check("Debuggable APK",          lambda: check_debuggable(manifest, base)),
-        make_check("Allow Backup",            lambda: check_allow_backup(manifest)),
+        make_check("Allow Backup",            lambda: check_allow_backup(manifest, base)),
         make_check("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",lambda: check_x509(base)),
         make_check("Certificate Pinning",     lambda: check_certificate_pinning(base)),
         make_check("Network Security Config", lambda: check_network_security_config(base)),
@@ -13712,6 +14421,7 @@ def main():
         make_check("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
         make_check("WebView JavaScript Bridges", lambda: check_webview_javascript_bridge(base)),
         make_check("Clipboard Security",      lambda: check_clipboard_security(base)),
+        make_check("Notification Sensitive Data", lambda: check_notification_sensitive_data(manifest, base)),
         make_check("Keyboard Cache",          lambda: check_keyboard_cache(base, manifest)),
         make_check("Raw SQL Queries",         lambda: check_raw_sql_queries(base)),
         make_check("Insecure Package Context", lambda: check_package_context(base)),
