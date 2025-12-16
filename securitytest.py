@@ -2440,7 +2440,10 @@ def check_x509(base):
 
     # Patterns for TrustManager
     tm_method_re = re.compile(r'\.method\s+[^\n]*\b(checkServerTrusted|checkClientTrusted)\b')
-    cert_exc_re = re.compile(r'throw-new.*CertificateException')
+    # Match both throw-new and new-instance + throw patterns for CertificateException
+    cert_exc_throw_new_re = re.compile(r'throw-new.*CertificateException')
+    cert_exc_new_instance_re = re.compile(r'new-instance.*Ljava/security/cert/CertificateException;')
+    throw_re = re.compile(r'\bthrow\s+v\d+')
     validity_re = re.compile(r'\.checkValidity\(')
     verify_re = re.compile(r'(->verify\(|\.verify\()')
     verify_remote_re = re.compile(r'verifyRemoteCertificate')
@@ -2456,7 +2459,8 @@ def check_x509(base):
     # Patterns for certificate pinning
     cert_pinner_re = re.compile(r'(Lokhttp3/CertificatePinner|certificatePinner|pinning)')
 
-    inst_re = re.compile(r'^(?!\.(?:locals|line|annotation))\s*\S+')
+    # Match actual instructions (not directives like .locals, .line, .annotation)
+    inst_re = re.compile(r'^\s+(?!\.(?:locals|line|annotation|end|prologue|param))\S+')
 
     for root, _, files in os.walk(base):
         for fn in files:
@@ -2496,6 +2500,9 @@ def check_x509(base):
                     if key not in seen:
                         seen.add(key)
 
+                        # Check for Xamarin/Mono TrustManager (known vulnerable - CVE-like issue)
+                        is_xamarin = 'xamarin' in rel.lower() or 'mono/android' in rel.lower()
+
                         is_native_delegate = any(
 			    'invoke-direct' in l and (
 			    '->n_checkClientTrusted' in l or
@@ -2504,30 +2511,56 @@ def check_x509(base):
 			    for l in body
 			)
 
+                        # Xamarin TrustManagers are known to be vulnerable even with native delegates
+                        if is_xamarin:
+                            is_native_delegate = False
+
+                        # Check if CertificateException is actually thrown (not just instantiated)
+                        has_cert_exception = (
+                            cert_exc_throw_new_re.search(text_body) or
+                            (cert_exc_new_instance_re.search(text_body) and throw_re.search(text_body))
+                        )
+
                         if not (
-                            cert_exc_re.search(text_body)
+                            has_cert_exception
                             or validity_re.search(text_body)
                             or verify_re.search(text_body)
                             or verify_remote_re.search(text_body)
                             or is_native_delegate
                         ):
+                            # Extract meaningful code snippet (actual instructions, not directives)
                             snippet = []
-                            for b in body:
-                                if inst_re.match(b):
-                                    idx = body.index(b)
-                                    snippet = body[idx:idx+3]
-                                    break
+                            instructions = [b for b in body if inst_re.match(b)]
+
+                            if is_xamarin and instructions:
+                                # For Xamarin, show all instructions to demonstrate the vulnerability
+                                snippet = instructions[:5]  # Show up to 5 instructions
+                            else:
+                                # For other cases, show first 3-5 instructions
+                                snippet = instructions[:3] if instructions else body[:5]
+
                             if not snippet:
-                                snippet = body[:3]
+                                snippet = [b for b in body if b.strip()][:5]
+
                             snippet_html = html.escape("\n".join(snippet))
                             link = (
                                 f'<a href="file://{html.escape(path)}">'
                                 f'{html.escape(rel)}:{start+1}</a>'
                             )
-                            issues.append(
-                                f"{link} – <strong>{name}()</strong> missing validation<br>"
-                                f"<pre>{snippet_html}</pre>"
-                            )
+
+                            # Add specific warning for Xamarin TrustManagers
+                            if is_xamarin:
+                                issues.append(
+                                    f"{link} – <strong style='color:#dc2626;'>{name}()</strong> Xamarin TrustManager vulnerability<br>"
+                                    f"<em>⚠️ Method never throws CertificateException - accepts ANY certificate (self-signed, expired, etc.)</em><br>"
+                                    f"<em>Risk: Man-in-the-middle attacks can intercept HTTPS traffic</em><br>"
+                                    f"<pre>{snippet_html}</pre>"
+                                )
+                            else:
+                                issues.append(
+                                    f"{link} – <strong>{name}()</strong> missing validation<br>"
+                                    f"<pre>{snippet_html}</pre>"
+                                )
                     i = j
 
                 # -- HostnameVerifier stubs --
@@ -13967,7 +14000,7 @@ def run_preflight_checks(check_device=False):
             result = subprocess.run(
                 [tool, '--version'] if tool != 'aapt' else ['aapt', 'version'],
                 capture_output=True,
-                timeout=5
+                timeout=15
             )
             if result.returncode == 0:
                 print(f"  ✓ {tool} found ({purpose})")
@@ -13986,11 +14019,11 @@ def run_preflight_checks(check_device=False):
         for tool, purpose in dynamic_tools.items():
             try:
                 if tool == 'frida':
-                    result = subprocess.run(['frida', '--version'], capture_output=True, timeout=5)
+                    result = subprocess.run(['frida', '--version'], capture_output=True, timeout=15)
                 elif tool == 'adb':
-                    result = subprocess.run(['adb', 'version'], capture_output=True, timeout=5)
+                    result = subprocess.run(['adb', 'version'], capture_output=True, timeout=15)
                 else:
-                    result = subprocess.run([tool, '--version'], capture_output=True, timeout=5)
+                    result = subprocess.run([tool, '--version'], capture_output=True, timeout=15)
 
                 if result.returncode == 0:
                     print(f"  ✓ {tool} found ({purpose})")
@@ -14009,17 +14042,17 @@ def run_preflight_checks(check_device=False):
         try:
             # Different tools use different version flags
             if tool == 'checksec':
-                result = subprocess.run(['checksec', '--version'], capture_output=True, timeout=5)
+                result = subprocess.run(['checksec', '--version'], capture_output=True, timeout=15)
             elif tool == 'readelf':
-                result = subprocess.run(['readelf', '--version'], capture_output=True, timeout=5)
+                result = subprocess.run(['readelf', '--version'], capture_output=True, timeout=15)
             elif tool == 'apksigner':
                 # apksigner might not have --version, try --help
-                result = subprocess.run(['apksigner', 'version'], capture_output=True, timeout=5)
+                result = subprocess.run(['apksigner', 'version'], capture_output=True, timeout=15)
                 if result.returncode != 0:
                     # Try alternative command
-                    result = subprocess.run(['apksigner'], capture_output=True, timeout=5)
+                    result = subprocess.run(['apksigner'], capture_output=True, timeout=15)
             else:
-                result = subprocess.run([tool, '--version'], capture_output=True, timeout=5)
+                result = subprocess.run([tool, '--version'], capture_output=True, timeout=15)
 
             if result.returncode == 0 or (tool == 'apksigner' and result.returncode == 1):
                 print(f"  ✓ {tool} found ({purpose})")
@@ -14041,7 +14074,7 @@ def run_preflight_checks(check_device=False):
                 ['adb', 'devices'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=15
             )
             devices = [line for line in result.stdout.split('\n') if '\tdevice' in line]
 
