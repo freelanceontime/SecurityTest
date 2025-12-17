@@ -3395,6 +3395,21 @@ def check_updates(base):
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0036/' target='_blank'>MASTG-TEST-0036: Testing Enforced Updating</a></div>"
 
+    def is_library_path(rel_path):
+        """Check if the file path is from a library (not app code)"""
+        library_indicators = [
+            'com/google/android/gms/',
+            'com/google/android/play/',
+            'androidx/',
+            'android/support/',
+            'com/android/',
+            'kotlin/',
+            'kotlinx/',
+        ]
+        # Normalize path separators
+        normalized = rel_path.replace('\\', '/')
+        return any(indicator in normalized for indicator in library_indicators)
+
     # Search patterns for Google Play In-App Updates API
     google_play_patterns = {
         'AppUpdateManager': 'Google Play Core library usage',
@@ -3411,6 +3426,8 @@ def check_updates(base):
 
     google_found = {}
     custom_found = {}
+    google_found_library = {}  # Track library detections separately
+    custom_found_library = {}
     file_count = 0
 
     # Scan all code files and track line numbers for found patterns
@@ -3424,43 +3441,67 @@ def check_updates(base):
                         lines = fp.readlines()
                         content = ''.join(lines)
 
+                    rel_path = os.path.relpath(file_path, base)
+                    is_library = is_library_path(rel_path)
+
                     # Check for Google Play patterns
                     for pattern, description in google_play_patterns.items():
-                        if pattern in content and pattern not in google_found:
-                            rel_path = os.path.relpath(file_path, base)
-                            # Find line number
-                            line_num = 0
-                            for i, line in enumerate(lines, 1):
-                                if pattern in line:
-                                    line_num = i
-                                    break
-                            google_found[pattern] = (description, rel_path, file_path, line_num, lines)
+                        if pattern in content:
+                            if pattern not in google_found and pattern not in google_found_library:
+                                # Find line number
+                                line_num = 0
+                                for i, line in enumerate(lines, 1):
+                                    if pattern in line:
+                                        line_num = i
+                                        break
+                                data = (description, rel_path, file_path, line_num, lines)
+                                if is_library:
+                                    google_found_library[pattern] = data
+                                else:
+                                    google_found[pattern] = data
 
                     # Check for custom update patterns
                     for pattern, description in custom_update_patterns.items():
-                        if pattern in content and pattern not in custom_found:
-                            rel_path = os.path.relpath(file_path, base)
-                            # Find line number
-                            line_num = 0
-                            for i, line in enumerate(lines, 1):
-                                if pattern in line:
-                                    line_num = i
-                                    break
-                            custom_found[pattern] = (description, rel_path, file_path, line_num, lines)
+                        if pattern in content:
+                            if pattern not in custom_found and pattern not in custom_found_library:
+                                # Find line number
+                                line_num = 0
+                                for i, line in enumerate(lines, 1):
+                                    if pattern in line:
+                                        line_num = i
+                                        break
+                                data = (description, rel_path, file_path, line_num, lines)
+                                if is_library:
+                                    custom_found_library[pattern] = data
+                                else:
+                                    custom_found[pattern] = data
                 except:
                     continue
 
-    # Check if either method is implemented
+    # Check if either method is implemented (in app code, not library code)
     google_play_ok = len(google_found) == len(google_play_patterns)
     custom_ok = len(custom_found) >= 2  # At least 2 of 3 custom patterns
 
+    # Determine status:
+    # - PASS: Clear evidence of update mechanism in app code
+    # - WARN: Only library references or weak/single indicators
+    # - FAIL: No update mechanism detected
     ok = google_play_ok or custom_ok
 
-    status = "PASS" if ok else "FAIL"
+    # Check if we only found library references or only weak custom patterns
+    has_library_only = (len(google_found_library) > 0 or len(custom_found_library) > 0) and not ok
+    has_weak_custom = len(custom_found) == 1 and not google_play_ok  # Only 1 custom pattern
+
+    if ok:
+        status = "PASS"
+    elif has_library_only or has_weak_custom:
+        status = "WARN"
+    else:
+        status = "FAIL"
     summary_lines = [
         f"Searched code files: {file_count}",
-        f"Google Play API patterns: {len(google_found)}/{len(google_play_patterns)}",
-        f"Custom update patterns: {len(custom_found)}/{len(custom_update_patterns)}",
+        f"Google Play API patterns (app code): {len(google_found)}/{len(google_play_patterns)}",
+        f"Custom update patterns (app code): {len(custom_found)}/{len(custom_update_patterns)}",
     ]
 
     # Add checkmarks/X's to summary
@@ -3478,13 +3519,34 @@ def check_updates(base):
         else:
             summary_lines.append(f"✗ {pattern} ({desc})")
 
+    # Show library-only detections if present
+    if google_found_library or custom_found_library:
+        summary_lines.append("")
+        summary_lines.append("⚠ Library code detections (excluded from app analysis):")
+        for pattern in google_found_library:
+            desc = google_play_patterns[pattern]
+            summary_lines.append(f"  • {pattern} ({desc}) - found in library")
+        for pattern in custom_found_library:
+            desc = custom_update_patterns[pattern]
+            summary_lines.append(f"  • {pattern} ({desc}) - found in library")
+
+    # Add status explanation
+    if status == "WARN":
+        summary_lines.append("")
+        if has_library_only:
+            summary_lines.append("⚠ WARNING: Update patterns found only in library code, not in app implementation.")
+            summary_lines.append("  Investigate: The app may be using these libraries but not implementing updates.")
+        elif has_weak_custom:
+            summary_lines.append("⚠ WARNING: Only partial custom update implementation detected.")
+            summary_lines.append("  Investigate: Verify if this is a complete update mechanism.")
+
     # Build FindingBlocks only for FOUND patterns with code snippets
     findings = []
 
     # Add findings for found custom patterns (these are more interesting)
     if custom_found:
         summary_lines.append("")
-        summary_lines.append("Custom server-side updates")
+        summary_lines.append("App code detections - Custom server-side updates:")
 
         for pattern, data in custom_found.items():
             desc, rel_path, file_path, line_num, lines = data
@@ -3511,6 +3573,37 @@ def check_updates(base):
                     code=code_snippet,
                     code_language=lang,
                     open_by_default=True,
+                )
+            )
+
+    # Add findings for library detections (for investigation)
+    if custom_found_library or google_found_library:
+        all_library = {**google_found_library, **custom_found_library}
+        for pattern, data in all_library.items():
+            desc, rel_path, file_path, line_num, lines = data
+
+            # Extract code context
+            if line_num > 0:
+                start = max(0, line_num - 4)
+                end = min(len(lines), line_num + 2)
+                context_lines = []
+                for j in range(start, end):
+                    prefix = "→ " if j == line_num - 1 else "  "
+                    context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+                code_snippet = "\n".join(context_lines)
+            else:
+                code_snippet = "Pattern found but line number unavailable"
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=f"⚠ Library: {rel_path}",
+                    subtitle=f"{pattern} ({desc}) · Line {line_num} [Library code - not app implementation]",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=False,
                 )
             )
 
