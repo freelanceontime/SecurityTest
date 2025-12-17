@@ -8219,6 +8219,21 @@ def check_flag_secure(base, manifest):
     Check if FLAG_SECURE is used to prevent screenshots on sensitive screens.
     Also detects if FLAG_SECURE is explicitly disabled or cleared.
     """
+    def is_library_path(rel_path):
+        """Check if the file path is from a library (not app code)"""
+        library_indicators = [
+            'com/google/android/gms/',
+            'com/google/android/play/',
+            'androidx/',
+            'android/support/',
+            'com/android/',
+            'kotlin/',
+            'kotlinx/',
+        ]
+        # Normalize path separators
+        normalized = rel_path.replace('\\', '/')
+        return any(indicator in normalized for indicator in library_indicators)
+
     flag_secure_patterns = [
         r'FLAG_SECURE',
         r'addFlags\s*\(\s*WindowManager\.LayoutParams\.FLAG_SECURE',
@@ -8234,8 +8249,11 @@ def check_flag_secure(base, manifest):
     ]
 
     # Collect detailed findings with line numbers and code context
-    hits_details = []  # List of (rel_path, file_path, line_num, lines, matched_pattern)
-    disabled_details = []
+    # Separate app code from library code
+    app_hits = []  # List of (rel_path, file_path, line_num, lines, matched_pattern)
+    library_hits = []
+    app_disabled = []
+    library_disabled = []
 
     # Scan all code files for FLAG_SECURE patterns
     for root, _, files in os.walk(base):
@@ -8243,6 +8261,7 @@ def check_flag_secure(base, manifest):
             if f.endswith(('.smali', '.java')):
                 file_path = os.path.join(root, f)
                 rel_path = os.path.relpath(file_path, base)
+                is_library = is_library_path(rel_path)
 
                 try:
                     with open(file_path, errors='ignore') as fp:
@@ -8254,16 +8273,26 @@ def check_flag_secure(base, manifest):
                         for pat in flag_secure_patterns:
                             if re.search(pat, line):
                                 # Only add if we haven't already recorded this file
-                                if not any(d[0] == rel_path for d in hits_details):
-                                    hits_details.append((rel_path, file_path, i, lines, pat))
+                                data = (rel_path, file_path, i, lines, pat)
+                                if is_library:
+                                    if not any(d[0] == rel_path for d in library_hits):
+                                        library_hits.append(data)
+                                else:
+                                    if not any(d[0] == rel_path for d in app_hits):
+                                        app_hits.append(data)
                                 break
 
                         # Check for disabled FLAG_SECURE
                         for pat in disabled_patterns:
                             if re.search(pat, line):
                                 # Only add if we haven't already recorded this file
-                                if not any(d[0] == rel_path for d in disabled_details):
-                                    disabled_details.append((rel_path, file_path, i, lines, pat))
+                                data = (rel_path, file_path, i, lines, pat)
+                                if is_library:
+                                    if not any(d[0] == rel_path for d in library_disabled):
+                                        library_disabled.append(data)
+                                else:
+                                    if not any(d[0] == rel_path for d in app_disabled):
+                                        app_disabled.append(data)
                                 break
                 except:
                     continue
@@ -8282,17 +8311,20 @@ def check_flag_secure(base, manifest):
     findings = []
     summary_lines = []
 
-    # Check if FLAG_SECURE is being disabled
-    if disabled_details:
+    # Determine status based on app code (not library code)
+    # Priority: FAIL if disabled in app > PASS if used in app > WARN if only library or nothing
+
+    # Check if FLAG_SECURE is being disabled in app code
+    if app_disabled:
         status = "FAIL"
         summary_lines = [
-            f"⚠ FLAG_SECURE is being DISABLED/CLEARED in {len(disabled_details)} file(s)",
+            f"⚠ FLAG_SECURE is being DISABLED/CLEARED in {len(app_disabled)} app file(s)",
             "Risk: Explicitly disabling FLAG_SECURE allows screenshots and screen recording of sensitive data.",
             ""
         ]
 
-        # Create findings for disabled FLAG_SECURE
-        for rel_path, file_path, line_num, lines, pattern in disabled_details[:15]:
+        # Create findings for disabled FLAG_SECURE in app code
+        for rel_path, file_path, line_num, lines, pattern in app_disabled[:15]:
             # Extract code context
             start = max(0, line_num - 4)
             end = min(len(lines), line_num + 3)
@@ -8307,7 +8339,7 @@ def check_flag_secure(base, manifest):
             findings.append(
                 FindingBlock(
                     title=rel_path,
-                    subtitle=f"FLAG_SECURE disabled · Line {line_num}",
+                    subtitle=f"FLAG_SECURE disabled in app code · Line {line_num}",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
                     code_language=lang,
@@ -8315,15 +8347,15 @@ def check_flag_secure(base, manifest):
                 )
             )
 
-    # Normal FLAG_SECURE usage detected
-    elif hits_details:
+    # Normal FLAG_SECURE usage detected in app code
+    elif app_hits:
         status = "PASS"
         summary_lines = [
-            f"✓ FLAG_SECURE usage detected in {len(hits_details)} file(s)"
+            f"✓ FLAG_SECURE usage detected in {len(app_hits)} app file(s)"
         ]
 
-        # Create findings for FLAG_SECURE usage
-        for rel_path, file_path, line_num, lines, pattern in hits_details[:15]:
+        # Create findings for FLAG_SECURE usage in app code
+        for rel_path, file_path, line_num, lines, pattern in app_hits[:15]:
             # Extract code context
             start = max(0, line_num - 4)
             end = min(len(lines), line_num + 3)
@@ -8338,7 +8370,7 @@ def check_flag_secure(base, manifest):
             findings.append(
                 FindingBlock(
                     title=rel_path,
-                    subtitle=f"FLAG_SECURE usage · Line {line_num}",
+                    subtitle=f"FLAG_SECURE usage in app code · Line {line_num}",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
                     code_language=lang,
@@ -8346,16 +8378,76 @@ def check_flag_secure(base, manifest):
                 )
             )
 
-    # No FLAG_SECURE usage at all
+    # Only library detections or no FLAG_SECURE usage at all
     else:
         status = "WARN"
-        summary_lines = [
-            "No FLAG_SECURE usage detected",
-            f"Total activities: {activity_count}",
-            "",
-            "Recommendation: Consider using FLAG_SECURE for activities that display sensitive data",
-            "(payment info, credentials, personal data) to prevent screenshots and screen recording."
-        ]
+        if library_hits:
+            summary_lines = [
+                f"FLAG_SECURE found in {len(library_hits)} library file(s) only (not in app code)",
+                f"Total activities: {activity_count}",
+                "",
+                "⚠ WARNING: FLAG_SECURE detected only in library code, not in app implementation.",
+                "Recommendation: Implement FLAG_SECURE in your app's activities that display sensitive data",
+                "(payment info, credentials, personal data) to prevent screenshots and screen recording."
+            ]
+        else:
+            summary_lines = [
+                "No FLAG_SECURE usage detected",
+                f"Total activities: {activity_count}",
+                "",
+                "Recommendation: Consider using FLAG_SECURE for activities that display sensitive data",
+                "(payment info, credentials, personal data) to prevent screenshots and screen recording."
+            ]
+
+    # Add library detections as informational findings (collapsed by default)
+    if library_hits:
+        for rel_path, file_path, line_num, lines, pattern in library_hits[:15]:
+            # Extract code context
+            start = max(0, line_num - 4)
+            end = min(len(lines), line_num + 3)
+            context_lines = []
+            for j in range(start, end):
+                prefix = "→ " if j == line_num - 1 else "  "
+                context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+            code_snippet = "\n".join(context_lines)
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=f"⚠ Library: {rel_path}",
+                    subtitle=f"FLAG_SECURE in library code · Line {line_num} [Not app implementation]",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=False,
+                )
+            )
+
+    # Add library disabled detections if any
+    if library_disabled:
+        for rel_path, file_path, line_num, lines, pattern in library_disabled[:15]:
+            # Extract code context
+            start = max(0, line_num - 4)
+            end = min(len(lines), line_num + 3)
+            context_lines = []
+            for j in range(start, end):
+                prefix = "→ " if j == line_num - 1 else "  "
+                context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+            code_snippet = "\n".join(context_lines)
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=f"⚠ Library: {rel_path}",
+                    subtitle=f"FLAG_SECURE disabled in library · Line {line_num} [Library code]",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=False,
+                )
+            )
 
     return TestResult(
         name="FLAG_SECURE Usage",
