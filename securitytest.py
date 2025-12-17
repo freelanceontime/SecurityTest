@@ -8233,14 +8233,40 @@ def check_flag_secure(base, manifest):
         r'setFlags\s*\(\s*0\s*,\s*[^)]*FLAG_SECURE',  # setFlags(0, FLAG_SECURE) clears it
     ]
 
-    hits = set()
-    disabled_hits = set()
+    # Collect detailed findings with line numbers and code context
+    hits_details = []  # List of (rel_path, file_path, line_num, lines, matched_pattern)
+    disabled_details = []
 
-    for pat in flag_secure_patterns:
-        hits.update(grep_code(base, pat))
+    # Scan all code files for FLAG_SECURE patterns
+    for root, _, files in os.walk(base):
+        for f in files:
+            if f.endswith(('.smali', '.java')):
+                file_path = os.path.join(root, f)
+                rel_path = os.path.relpath(file_path, base)
 
-    for pat in disabled_patterns:
-        disabled_hits.update(grep_code(base, pat))
+                try:
+                    with open(file_path, errors='ignore') as fp:
+                        lines = fp.readlines()
+
+                    # Check each line for patterns
+                    for i, line in enumerate(lines, 1):
+                        # Check for normal FLAG_SECURE usage
+                        for pat in flag_secure_patterns:
+                            if re.search(pat, line):
+                                # Only add if we haven't already recorded this file
+                                if not any(d[0] == rel_path for d in hits_details):
+                                    hits_details.append((rel_path, file_path, i, lines, pat))
+                                break
+
+                        # Check for disabled FLAG_SECURE
+                        for pat in disabled_patterns:
+                            if re.search(pat, line):
+                                # Only add if we haven't already recorded this file
+                                if not any(d[0] == rel_path for d in disabled_details):
+                                    disabled_details.append((rel_path, file_path, i, lines, pat))
+                                break
+                except:
+                    continue
 
     # Count activities in manifest
     try:
@@ -8253,44 +8279,91 @@ def check_flag_secure(base, manifest):
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0010/' target='_blank'>MASTG-TEST-0010: Finding Sensitive Information in Auto-Generated Screenshots</a></div>"
 
-    # Check if FLAG_SECURE is being disabled
-    if disabled_hits:
-        lines = [
-            f"<div style='color:#dc3545'><strong>⚠ FLAG_SECURE is being DISABLED/CLEARED in {len(disabled_hits)} file(s)</strong></div>",
-            "<div><strong>Risk:</strong> Explicitly disabling FLAG_SECURE allows screenshots and screen recording of sensitive data.</div>",
-            "<div style='margin-top:8px;'><strong>Files:</strong></div>"
-        ]
-        for rel in sorted(disabled_hits)[:15]:
-            full = os.path.abspath(os.path.join(base, rel))
-            # Try to extract the code snippet
-            try:
-                path = os.path.join(base, rel)
-                with open(path, 'r', errors='ignore') as f:
-                    txt = f.read()
-                    for i, line in enumerate(txt.splitlines(), 1):
-                        if any(re.search(pat, line) for pat in disabled_patterns):
-                            lines.append(f'<div style="margin-top:5px;"><a href="file://{html.escape(full)}:{i}">{html.escape(rel)}:{i}</a>')
-                            lines.append(f'<pre style="background:#f8f9fa; padding:6px; margin-top:2px; font-size:10px; color:#212529; border-left:3px solid #dc3545;">→ {html.escape(line.strip())}</pre></div>')
-                            break
-            except:
-                lines.append(f'<div><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
+    findings = []
+    summary_lines = []
 
-        lines.append(mastg_ref)
-        return 'FAIL', "<br>\n".join(lines)
+    # Check if FLAG_SECURE is being disabled
+    if disabled_details:
+        status = "FAIL"
+        summary_lines = [
+            f"⚠ FLAG_SECURE is being DISABLED/CLEARED in {len(disabled_details)} file(s)",
+            "Risk: Explicitly disabling FLAG_SECURE allows screenshots and screen recording of sensitive data.",
+            ""
+        ]
+
+        # Create findings for disabled FLAG_SECURE
+        for rel_path, file_path, line_num, lines, pattern in disabled_details[:15]:
+            # Extract code context
+            start = max(0, line_num - 4)
+            end = min(len(lines), line_num + 3)
+            context_lines = []
+            for j in range(start, end):
+                prefix = "→ " if j == line_num - 1 else "  "
+                context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+            code_snippet = "\n".join(context_lines)
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=rel_path,
+                    subtitle=f"FLAG_SECURE disabled · Line {line_num}",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=True,
+                )
+            )
 
     # Normal FLAG_SECURE usage detected
-    if hits:
-        lines = [
-            f"<div>✓ FLAG_SECURE usage detected in {len(hits)} file(s)</div>"
+    elif hits_details:
+        status = "PASS"
+        summary_lines = [
+            f"✓ FLAG_SECURE usage detected in {len(hits_details)} file(s)"
         ]
-        for rel in sorted(hits)[:15]:
-            full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<div><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
-        lines.append(mastg_ref)
-        return 'PASS', "<br>\n".join(lines)
+
+        # Create findings for FLAG_SECURE usage
+        for rel_path, file_path, line_num, lines, pattern in hits_details[:15]:
+            # Extract code context
+            start = max(0, line_num - 4)
+            end = min(len(lines), line_num + 3)
+            context_lines = []
+            for j in range(start, end):
+                prefix = "→ " if j == line_num - 1 else "  "
+                context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
+            code_snippet = "\n".join(context_lines)
+
+            lang = "smali" if file_path.endswith(".smali") else "java"
+
+            findings.append(
+                FindingBlock(
+                    title=rel_path,
+                    subtitle=f"FLAG_SECURE usage · Line {line_num}",
+                    link=f"file://{os.path.abspath(file_path)}:{line_num}",
+                    code=code_snippet,
+                    code_language=lang,
+                    open_by_default=True,
+                )
+            )
 
     # No FLAG_SECURE usage at all
-    return 'WARN', f"<div>No FLAG_SECURE usage detected</div><div>Total activities: {activity_count}</div><div class='info-box'><em>Recommendation: Consider using FLAG_SECURE for activities that display sensitive data (payment info, credentials, personal data) to prevent screenshots and screen recording.</em></div>{mastg_ref}"
+    else:
+        status = "WARN"
+        summary_lines = [
+            "No FLAG_SECURE usage detected",
+            f"Total activities: {activity_count}",
+            "",
+            "Recommendation: Consider using FLAG_SECURE for activities that display sensitive data",
+            "(payment info, credentials, personal data) to prevent screenshots and screen recording."
+        ]
+
+    return TestResult(
+        name="FLAG_SECURE Usage",
+        status=status,
+        summary_lines=summary_lines,
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
 
 def check_webview_javascript_bridge(base):
     """
