@@ -33,8 +33,24 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "5.0.2"
+__version__ = "5.1.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
+INCLUDE_LIBS = False
+LIB_PATHS = (
+    '/androidx/', '/android/support/',
+    '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+    '/okhttp3/', '/retrofit2/', '/com/squareup/',
+    '/com/facebook/', '/kotlin/', '/kotlinx/',
+    '/io/reactivex/', '/rx/', '/dagger/',
+    '/net/sqlcipher/', '/org/sqlite/',
+    '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+    '/org/apache/', '/javax/',
+    '/lib/', '/jetified-'
+)
+
+def is_library_path(path):
+    normalized = '/' + path.replace('\\', '/')
+    return any(lib in normalized for lib in LIB_PATHS)
 
 ## Add new test as def
 ## Add to Tests
@@ -1801,6 +1817,28 @@ def grep_code(base, pattern):
                     pass
     return hits
 
+def grep_code_filtered(base, pattern, exts=('.smali', '.xml', '.java')):
+    hits = []
+    rx = pattern if hasattr(pattern, 'search') else re.compile(pattern)
+    for root, _, files in os.walk(base):
+        for f in files:
+            if not f.endswith(exts):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), base)
+            if (
+                not INCLUDE_LIBS
+                and f.endswith(('.smali', '.java'))
+                and is_library_path(rel)
+            ):
+                continue
+            try:
+                txt = open(os.path.join(root, f), errors='ignore').read()
+                if rx.search(txt):
+                    hits.append(rel)
+            except:
+                pass
+    return hits
+
 # Progress tracking helper
 class ScanProgress:
     """Helper class for showing scan progress on a single console line.
@@ -2262,21 +2300,6 @@ def check_s3_bucket_security(base):
     bucket_locations = {}
 
     scan_exts = ('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')
-    lib_paths = (
-        '/androidx/', '/android/support/',
-        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
-        '/okhttp3/', '/retrofit2/', '/com/squareup/',
-        '/com/facebook/', '/kotlin/', '/kotlinx/',
-        '/io/reactivex/', '/rx/', '/dagger/',
-        '/net/sqlcipher/', '/org/sqlite/',
-        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
-        '/org/apache/', '/javax/',
-        '/lib/', '/jetified-'
-    )
-
-    def is_library_path(path):
-        normalized = '/' + path.replace('\\', '/')
-        return any(lib in normalized for lib in lib_paths)
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
@@ -2285,7 +2308,7 @@ def check_s3_bucket_security(base):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
-            if fn.endswith('.smali') and is_library_path(rel):
+            if fn.endswith('.smali') and not INCLUDE_LIBS and is_library_path(rel):
                 continue
             files_to_scan.append((path, rel))
 
@@ -2923,6 +2946,8 @@ def check_kotlin_assert(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -4841,6 +4866,12 @@ def check_http_uris(base):
             if fn.endswith(('.smali', '.java', '.xml')):
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, base)
+                if (
+                    not INCLUDE_LIBS
+                    and fn.endswith(('.smali', '.java'))
+                    and is_library_path(rel)
+                ):
+                    continue
                 files_to_scan.append((full, rel, fn))
 
     with ScanProgress("Insecure HTTP URIs", len(files_to_scan)) as scan_progress:
@@ -4930,7 +4961,7 @@ def check_debuggable(manifest, base):
     }
     # check code patterns and report file:line links for matches
     for pat, msg in patterns.items():
-        hits = grep_code(base, pat)
+        hits = grep_code_filtered(base, pat)
         if hits:
             # find first occurrence with line number
             rel = hits[0]
@@ -5392,7 +5423,14 @@ def check_safe_browsing(manifest, base):
         for fn in files:
             if fn.endswith(('.smali', '.xml', '.java')):
                 full_path = os.path.join(root, fn)
-                files_to_scan.append(os.path.relpath(full_path, base))
+                rel_path = os.path.relpath(full_path, base)
+                if (
+                    not INCLUDE_LIBS
+                    and fn.endswith(('.smali', '.java'))
+                    and is_library_path(rel_path)
+                ):
+                    continue
+                files_to_scan.append(rel_path)
 
     is_react_native = False
     webview_found = False
@@ -5458,7 +5496,7 @@ def check_safe_browsing(manifest, base):
 
             if ('onSafeBrowsingHit' in txt) and (proceed_smali_re.search(txt) or proceed_java_re.search(txt)):
                 normalized_rel = '/' + rel.replace('\\', '/')
-                if any(ns in normalized_rel for ns in lib_ns):
+                if not INCLUDE_LIBS and any(ns in normalized_rel for ns in lib_ns):
                     continue
 
                 lines = txt.splitlines()
@@ -6241,8 +6279,13 @@ def check_insecure_webview(base):
     smali_files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if fn.endswith('.smali'):
-                smali_files_to_scan.append(os.path.join(root, fn))
+            if not fn.endswith('.smali'):
+                continue
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+            if not INCLUDE_LIBS and is_library_path(rel):
+                continue
+            smali_files_to_scan.append(path)
 
     with ScanProgress("Insecure WebView Usage", len(smali_files_to_scan)) as scan_progress:
         for path in smali_files_to_scan:
@@ -6917,7 +6960,7 @@ def check_file_permissions(base):
 
     hits = set()
     for pat in patterns:
-        for rel in grep_code(base, pat):
+        for rel in grep_code_filtered(base, pat):
             hits.add(rel)
     if not hits:
         return True, "None" + mastg_ref
@@ -8254,7 +8297,7 @@ def check_key_sizes(base):
     # SMALI patterns for RSA key generation
     # Matches: Ljava/security/KeyPairGenerator;->getInstance
     rsa_pattern = r'Ljava/security/KeyPairGenerator;->getInstance'
-    rsa_files = grep_code(base, rsa_pattern)
+    rsa_files = grep_code_filtered(base, rsa_pattern, exts=('.smali',))
 
     for rel in rsa_files:
         full = os.path.join(base, rel)
@@ -8281,7 +8324,7 @@ def check_key_sizes(base):
     # SMALI patterns for AES key generation
     # Matches: Ljavax/crypto/KeyGenerator;->getInstance
     aes_pattern = r'Ljavax/crypto/KeyGenerator;->getInstance'
-    aes_files = grep_code(base, aes_pattern)
+    aes_files = grep_code_filtered(base, aes_pattern, exts=('.smali',))
 
     for rel in aes_files:
         full = os.path.join(base, rel)
@@ -8788,8 +8831,17 @@ def check_webview_javascript_bridge(base):
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if fn.endswith(('.smali', '.xml', '.java')):
-                files_to_scan.append(os.path.join(root, fn))
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
+            full_path = os.path.join(root, fn)
+            rel = os.path.relpath(full_path, base)
+            if (
+                not INCLUDE_LIBS
+                and fn.endswith(('.smali', '.java'))
+                and is_library_path(rel)
+            ):
+                continue
+            files_to_scan.append(full_path)
 
     remote_loading_patterns = [
         r'loadUrl.*"https?://',             # loadUrl("http://...")
@@ -9297,8 +9349,13 @@ def check_pii_wifi_info(base):
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if fn.endswith(('.smali', '.java')):
-                files_to_scan.append(os.path.join(root, fn))
+            if not fn.endswith(('.smali', '.java')):
+                continue
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+            if not INCLUDE_LIBS and is_library_path(rel):
+                continue
+            files_to_scan.append(path)
 
     with ScanProgress("PII via Ble Wi-Fi Info", len(files_to_scan)) as scan_progress:
         for path in files_to_scan:
@@ -13573,6 +13630,8 @@ def check_webview_ssl_error_handling(base):
                 continue
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, base)
+            if not INCLUDE_LIBS and is_library_path(rel):
+                continue
             files_to_scan.append((full, rel, fn))
 
     with ScanProgress("WebView SSL Error Handling", len(files_to_scan)) as scan_progress:
@@ -14162,13 +14221,14 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.0.2 – Automated Mobile App Security Test Script
+    AppSec 5.1.2 – Automated Mobile App Security Test Script
 
     Options:
-      -f, --file       APK file to decompile into smali
-      -d, --dir        Decompiled directory containing smali
-      -u, --usb        Run dynamic Frida USB checks
-      -a, --all-tests  Run all tests without interactive selection
+      -f, --file          APK file to decompile into smali
+      -d, --dir           Decompiled directory containing smali
+      -u, --usb           Run dynamic Frida USB checks
+      -i, --include-libs  Include third-party/library code in scans
+      -a, --all-tests     Run all tests without interactive selection
 
     Notes:
      ensure adb devices identifes the connected devices 
@@ -14821,8 +14881,12 @@ def main():
     group.add_argument('-f', '--file', help='APK to decompile')
     group.add_argument('-d', '--dir',  help='Decompiled directory')
     parser.add_argument('-u','--usb', action='store_true', help='Run dynamic Frida USB pinning presence check')
+    parser.add_argument('-i','--include-libs', action='store_true', help='Include third-party/library code in scans')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     args = parser.parse_args()
+
+    global INCLUDE_LIBS
+    INCLUDE_LIBS = args.include_libs
 
     # Run pre-flight checks
     success, errors = run_preflight_checks(check_device=args.usb)
