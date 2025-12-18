@@ -1801,6 +1801,77 @@ def grep_code(base, pattern):
                     pass
     return hits
 
+# Progress tracking helper
+class ScanProgress:
+    """Helper class for showing scan progress on a single console line.
+
+    The progress line is ephemeral: it is cleared when the scan completes so
+    completed tests don't leave extra console output.
+    """
+
+    def __init__(self, test_name, total_files):
+        self.test_name = test_name
+        self.total_files = total_files
+        self.current = 0
+        self.last_percent = -1
+        self._last_line_len = 0
+
+        if total_files > 0:
+            self._write_line(f"[{test_name}] Scanning {total_files} files...")
+        else:
+            self._write_line(f"[{test_name}] 100%")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.complete()
+        return False
+
+    def _write_line(self, msg):
+        # Overwrite previous content on the line to avoid leftover characters.
+        pad = max(0, self._last_line_len - len(msg))
+        print("\r" + msg + (" " * pad), end="", flush=True)
+        self._last_line_len = len(msg) + pad
+
+    def update(self, increment=1):
+        """Update progress counter"""
+        self.current += increment
+        if self.total_files <= 0:
+            return
+
+        # Always show 100% on the final update, otherwise throttle output.
+        should_render = (
+            self.current >= self.total_files
+            or self.current % max(1, self.total_files // 20) == 0
+            or self.current % 100 == 0
+        )
+        if not should_render:
+            return
+
+        progress = int((self.current / self.total_files) * 100)
+        progress = 100 if self.current >= self.total_files else progress
+
+        if progress != self.last_percent:
+            self._write_line(
+                f"[{self.test_name}] Scanning... {progress}% ({self.current}/{self.total_files})"
+            )
+            self.last_percent = progress
+
+    def complete(self):
+        """Clear the progress line so it doesn't remain in console output."""
+        if self._last_line_len > 0:
+            print("\r" + (" " * self._last_line_len) + "\r", end="", flush=True)
+            self._last_line_len = 0
+
+def show_progress_quick(test_name):
+    """No-op for quick tests.
+
+    The main runner already prints the test name; avoid extra console lines so
+    completed tests look consistent.
+    """
+    return
+
 # Entropy calculation for detecting high-entropy secrets
 def calculate_entropy(data):
     """
@@ -2091,6 +2162,7 @@ def is_likely_secret(value, key_name=""):
 
 def check_checksec(lib_dir):
     # Check if lib directory exists and has .so files
+    show_progress_quick('Checksec')
     if not os.path.exists(lib_dir):
         return True, "No native libraries found (lib directory does not exist)"
 
@@ -2119,6 +2191,7 @@ def check_debug_symbols(lib_dir):
     and if any debug sections are found, include the command and output.
     """
 
+    show_progress_quick('Debug Symbols')
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0040/' target='_blank'>MASTG-TEST-0040: Testing for Debugging Symbols</a></div>"
 
     findings = []
@@ -2183,32 +2256,38 @@ def check_s3_bucket_security(base):
         r's3\.amazonaws\.com/([a-zA-Z0-9.\-]+)',  # s3.amazonaws.com/bucket-name
         r'([a-zA-Z0-9.\-]+)\.s3-([a-z0-9\-]+)\.amazonaws\.com',  # bucket-name.s3-region.amazonaws.com
     ]
+    bucket_regexes = [re.compile(pat, re.IGNORECASE) for pat in bucket_patterns]
 
     buckets_found = set()
     bucket_locations = {}
 
+    scan_exts = ('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             # Include more file types: smali, xml, json, properties, txt, config files
-            if not fn.endswith(('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')):
+            if not fn.endswith(scan_exts):
                 continue
-
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
+            files_to_scan.append((path, rel))
 
+    with ScanProgress("S3 Bucket Security", len(files_to_scan)) as scan_progress:
+        for path, rel in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(path, errors='ignore').read()
-
-                for pattern in bucket_patterns:
-                    for match in re.finditer(pattern, content, re.IGNORECASE):
+                for rx in bucket_regexes:
+                    for match in rx.finditer(content):
                         bucket_name = match.group(1)
                         # Filter out obvious false positives
                         if bucket_name and not bucket_name.startswith('.') and len(bucket_name) > 3:
                             buckets_found.add(bucket_name)
                             if bucket_name not in bucket_locations:
                                 bucket_locations[bucket_name] = []
-                            bucket_locations[bucket_name].append(f"{rel}:{content[:match.start()].count(chr(10)) + 1}")
-
+                            bucket_locations[bucket_name].append(
+                                f"{rel}:{content[:match.start()].count(chr(10)) + 1}"
+                            )
             except Exception:
                 continue
 
@@ -2462,23 +2541,32 @@ def check_x509(base):
     # Match actual instructions (not directives like .locals, .line, .annotation)
     inst_re = re.compile(r'^\s+(?!\.(?:locals|line|annotation|end|prologue|param))\S+')
 
+    # Skip well-known library code that properly handles SSL/TLS
+    library_paths = [
+        'androidx/', 'android/support/', 'com/google/',
+        'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
+        'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/'
+    ]
+
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
-
-            # Skip well-known library code that properly handles SSL/TLS
-            library_paths = [
-                'androidx/', 'android/support/', 'com/google/',
-                'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
-                'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/'
-            ]
             if any(lib in rel.replace('\\', '/') for lib in library_paths):
                 continue
+            files_to_scan.append((path, rel))
 
-            lines = open(path, errors='ignore').read().splitlines()
+    with ScanProgress("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)", len(files_to_scan)) as scan_progress:
+        for path, rel in files_to_scan:
+            scan_progress.update()
+
+            try:
+                lines = open(path, errors='ignore').read().splitlines()
+            except Exception:
+                continue
             i = 0
 
             while i < len(lines):
@@ -2676,21 +2764,25 @@ def check_strict_mode(base):
     }
 
     findings = []
-    scanned_files = 0
+    library_indicators = ('androidx/', 'android/support/', 'com/google/')
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith('.smali'):
                 continue
-
             full_path = os.path.join(root, f)
             rel_path = os.path.relpath(full_path, base)
-
-            # Skip library files
-            if any(lib in rel_path for lib in ['androidx/', 'android/support/', 'com/google/']):
+            rel_norm = rel_path.replace('\\', '/')
+            if any(lib in rel_norm for lib in library_indicators):
                 continue
+            files_to_scan.append((full_path, rel_path))
 
-            scanned_files += 1
+    scanned_files = len(files_to_scan)
+
+    with ScanProgress("StrictMode APIs", scanned_files) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
 
             try:
                 with open(full_path, errors='ignore') as file:
@@ -2822,9 +2914,11 @@ def check_kotlin_assert(base):
         r'checkNotNullExpressionValue\([^)]*\)',
     ]
     hits = []
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
-            if not f.endswith(('.smali','.java')): continue
+            if not f.endswith(('.smali', '.java')):
+                continue
             full = os.path.join(root, f)
             rel = os.path.relpath(full, base)
 
@@ -2832,6 +2926,11 @@ def check_kotlin_assert(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("Kotlin Assertions", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
             try:
                 for line in open(full, errors='ignore'):
                     for pat in patterns:
@@ -3135,28 +3234,33 @@ def check_logging(base):
     sensitive_findings = []  # Only app code
     scanned_files = 0
 
+    # Collect all files first for progress tracking
+    all_files = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith(('.smali', '.java')):
+            if fn.endswith(('.smali', '.java')):
+                all_files.append((os.path.join(root, fn), fn))
+
+    scan_progress = ScanProgress("Logging Statements", len(all_files))
+
+    for path, fn in all_files:
+        scan_progress.update()
+        rel = os.path.relpath(path, base)
+
+        # Determine if this is library code
+        rel_normalized = rel.replace('\\', '/')
+        is_library_code = any(lib in rel_normalized for lib in library_packages)
+        is_framework_code = any(fw in rel_normalized for fw in ['android/', 'java/', 'javax/', 'dalvik/', 'com/android/internal/'])
+
+        # Skip framework code entirely (Android internal classes)
+        if is_framework_code:
                 continue
 
-            path = os.path.join(root, fn)
-            rel = os.path.relpath(path, base)
-
-            # Determine if this is library code
-            rel_normalized = rel.replace('\\', '/')
-            is_library_code = any(lib in rel_normalized for lib in library_packages)
-            is_framework_code = any(fw in rel_normalized for fw in ['android/', 'java/', 'javax/', 'dalvik/', 'com/android/internal/'])
-
-            # Skip framework code entirely (Android internal classes)
-            if is_framework_code:
-                continue
-
-            # Count app code files
-            if not is_library_code:
+        # Count app code files
+        if not is_library_code:
                 scanned_files += 1
 
-            try:
+        try:
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
 
@@ -3242,8 +3346,11 @@ def check_logging(base):
                                 if dup_key not in [(f['file'], f['line']) for f in sensitive_findings]:
                                     sensitive_findings.append(finding)
 
-            except Exception:
+        except Exception:
                 continue
+
+    # Ensure progress line never leaks into subsequent test output
+    scan_progress.complete()
 
     # Build response
     total_logs = sum(stats.values())
@@ -3275,13 +3382,13 @@ def check_logging(base):
 <div style="margin:15px 0; padding:12px; background:#f8f9fa; border-radius:4px;">
     <div style="display:flex; gap:15px; align-items:center; flex-wrap:wrap;">
         <div style="display:flex; gap:8px; align-items:center;">
-            <label style="font-weight:600; margin-right:5px;">Filter by Severity:</label>
-            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_high" checked onchange="filterLogTable_{table_id}()"> <span style="color:#dc3545; font-weight:600;">High</span></label>
-            <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_medium" checked onchange="filterLogTable_{table_id}()"> <span style="color:#ffc107; font-weight:600;">Medium</span></label>
+        <label style="font-weight:600; margin-right:5px;">Filter by Severity:</label>
+        <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_high" checked onchange="filterLogTable_{table_id}()"> <span style="color:#dc3545; font-weight:600;">High</span></label>
+        <label style="cursor:pointer;"><input type="checkbox" id="{table_id}_filter_medium" checked onchange="filterLogTable_{table_id}()"> <span style="color:#ffc107; font-weight:600;">Medium</span></label>
         </div>
         <div style="display:flex; gap:8px; align-items:center; flex-grow:1;">
-            <label style="font-weight:600;">Search:</label>
-            <input type="text" id="{table_id}_search" placeholder="Search file, level, or reason..."
+        <label style="font-weight:600;">Search:</label>
+        <input type="text" id="{table_id}_search" placeholder="Search file, level, or reason..."
                    style="flex-grow:1; max-width:400px; padding:6px 10px; border:1px solid #ced4da; border-radius:4px;"
                    onkeyup="filterLogTable_{table_id}()">
         </div>
@@ -3295,12 +3402,12 @@ def check_logging(base):
 <table id="{table_id}" style="width:100%; min-width:900px; border-collapse:collapse; font-size:13px; background:white;">
     <thead>
         <tr style="background:#343a40; color:white; text-align:left;">
-            <th style="padding:10px; width:40px; border:1px solid #dee2e6;">#</th>
-            <th style="padding:10px; min-width:200px; border:1px solid #dee2e6;">Location</th>
-            <th style="padding:10px; width:80px; border:1px solid #dee2e6;">Level</th>
-            <th style="padding:10px; width:100px; border:1px solid #dee2e6;">Severity</th>
-            <th style="padding:10px; min-width:300px; border:1px solid #dee2e6;">Reason</th>
-            <th style="padding:10px; width:100px; text-align:center; border:1px solid #dee2e6;">Code</th>
+        <th style="padding:10px; width:40px; border:1px solid #dee2e6;">#</th>
+        <th style="padding:10px; min-width:200px; border:1px solid #dee2e6;">Location</th>
+        <th style="padding:10px; width:80px; border:1px solid #dee2e6;">Level</th>
+        <th style="padding:10px; width:100px; border:1px solid #dee2e6;">Severity</th>
+        <th style="padding:10px; min-width:300px; border:1px solid #dee2e6;">Reason</th>
+        <th style="padding:10px; width:100px; text-align:center; border:1px solid #dee2e6;">Code</th>
         </tr>
     </thead>
     <tbody>
@@ -3310,8 +3417,8 @@ def check_logging(base):
     for idx, finding in enumerate(sensitive_findings, 1):
         severity_color = '#dc3545' if finding['severity'] == 'High' else '#ffc107'
         level_badge_color = {
-            'VERBOSE': '#6c757d', 'DEBUG': '#17a2b8', 'INFO': '#28a745',
-            'WARN': '#ffc107', 'ERROR': '#dc3545', 'PRINTLN': '#fd7e14', 'STACKTRACE': '#dc3545'
+        'VERBOSE': '#6c757d', 'DEBUG': '#17a2b8', 'INFO': '#28a745',
+        'WARN': '#ffc107', 'ERROR': '#dc3545', 'PRINTLN': '#fd7e14', 'STACKTRACE': '#dc3545'
         }.get(finding['level'], '#6c757d')
 
         file_path = os.path.abspath(os.path.join(base, finding['file']))
@@ -3320,30 +3427,30 @@ def check_logging(base):
 
         lines.append(f'''
         <tr class="log-row" data-severity="{finding['severity'].lower()}" data-searchtext="{html.escape(finding['file'])} {finding['level']} {html.escape(finding['reason'])}">
-            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">{idx}</td>
-            <td style="padding:8px; border:1px solid #dee2e6;">
+        <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">{idx}</td>
+        <td style="padding:8px; border:1px solid #dee2e6;">
                 <a href="file://{html.escape(file_path)}" style="color:#007bff; text-decoration:none;">
                     {html.escape(finding['file'])}:{finding['line']}
                 </a>
-            </td>
-            <td style="padding:8px; border:1px solid #dee2e6;">
+        </td>
+        <td style="padding:8px; border:1px solid #dee2e6;">
                 <span style="background:{level_badge_color}; color:white; padding:3px 8px; border-radius:3px; font-size:11px; font-weight:600;">
                     {finding['level']}
                 </span>
-            </td>
-            <td style="padding:8px; border:1px solid #dee2e6;">
+        </td>
+        <td style="padding:8px; border:1px solid #dee2e6;">
                 <span style="color:{severity_color}; font-weight:600;">{finding['severity']}</span>
-            </td>
-            <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
+        </td>
+        <td style="padding:8px; border:1px solid #dee2e6; font-size:12px;">
                 {html.escape(finding['reason'])}
-            </td>
-            <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">
+        </td>
+        <td style="padding:8px; border:1px solid #dee2e6; text-align:center;">
                 <button onclick="document.getElementById('{code_id}').style.display = document.getElementById('{code_id}').style.display === 'none' ? 'block' : 'none';"
                         style="padding:4px 10px; background:#007bff; color:white; border:none; border-radius:3px; cursor:pointer; font-size:11px;">
                     View
                 </button>
                 <pre id="{code_id}" style="display:none; margin-top:8px; padding:8px; background:#f8f9fa; border:1px solid #dee2e6; border-radius:3px; text-align:left; font-size:11px; white-space:pre-wrap; max-width:500px; color:#212529;">{context_html}</pre>
-            </td>
+        </td>
         </tr>
 ''')
 
@@ -3428,55 +3535,64 @@ def check_updates(base):
     custom_found = {}
     google_found_library = {}  # Track library detections separately
     custom_found_library = {}
-    file_count = 0
 
-    # Scan all code files and track line numbers for found patterns
+    # First, collect all files to scan
+    all_files = []
     for root, _, files in os.walk(base):
         for f in files:
             if f.endswith(('.smali', '.java')):
-                file_count += 1
-                file_path = os.path.join(root, f)
-                try:
-                    with open(file_path, errors='ignore') as fp:
-                        lines = fp.readlines()
-                        content = ''.join(lines)
+                all_files.append(os.path.join(root, f))
 
-                    rel_path = os.path.relpath(file_path, base)
-                    is_library = is_library_path(rel_path)
+    file_count = len(all_files)
+    progress = ScanProgress("In-App Updates", len(all_files))
 
-                    # Check for Google Play patterns
-                    for pattern, description in google_play_patterns.items():
-                        if pattern in content:
-                            if pattern not in google_found and pattern not in google_found_library:
-                                # Find line number
-                                line_num = 0
-                                for i, line in enumerate(lines, 1):
-                                    if pattern in line:
-                                        line_num = i
-                                        break
-                                data = (description, rel_path, file_path, line_num, lines)
-                                if is_library:
-                                    google_found_library[pattern] = data
-                                else:
-                                    google_found[pattern] = data
+    # Scan all code files and track line numbers for found patterns
+    for file_path in all_files:
+        progress.update()
 
-                    # Check for custom update patterns
-                    for pattern, description in custom_update_patterns.items():
-                        if pattern in content:
-                            if pattern not in custom_found and pattern not in custom_found_library:
-                                # Find line number
-                                line_num = 0
-                                for i, line in enumerate(lines, 1):
-                                    if pattern in line:
-                                        line_num = i
-                                        break
-                                data = (description, rel_path, file_path, line_num, lines)
-                                if is_library:
-                                    custom_found_library[pattern] = data
-                                else:
-                                    custom_found[pattern] = data
-                except:
-                    continue
+        try:
+            with open(file_path, errors='ignore') as fp:
+                lines = fp.readlines()
+                content = ''.join(lines)
+
+            rel_path = os.path.relpath(file_path, base)
+            is_library = is_library_path(rel_path)
+
+            # Check for Google Play patterns
+            for pattern, description in google_play_patterns.items():
+                if pattern in content:
+                    if pattern not in google_found and pattern not in google_found_library:
+                        # Find line number
+                        line_num = 0
+                        for i, line in enumerate(lines, 1):
+                            if pattern in line:
+                                line_num = i
+                                break
+                        data = (description, rel_path, file_path, line_num, lines)
+                        if is_library:
+                            google_found_library[pattern] = data
+                        else:
+                            google_found[pattern] = data
+
+            # Check for custom update patterns
+            for pattern, description in custom_update_patterns.items():
+                if pattern in content:
+                    if pattern not in custom_found and pattern not in custom_found_library:
+                        # Find line number
+                        line_num = 0
+                        for i, line in enumerate(lines, 1):
+                            if pattern in line:
+                                line_num = i
+                                break
+                        data = (description, rel_path, file_path, line_num, lines)
+                        if is_library:
+                            custom_found_library[pattern] = data
+                        else:
+                            custom_found[pattern] = data
+        except:
+            continue
+
+    progress.complete()
 
     # Check if either method is implemented (in app code, not library code)
     google_play_ok = len(google_found) == len(google_play_patterns)
@@ -3617,6 +3733,7 @@ def check_updates(base):
 
 def check_memtag(manifest):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0044/' target='_blank'>MASTG-TEST-0044: Make Sure That Free Security Features Are Activated</a></div>"
+    show_progress_quick('Memtag')
     txt = open(manifest, errors='ignore').read()
     m = re.search(r'memtagMode="(async|sync)"', txt)
     ok = bool(m)
@@ -3642,6 +3759,7 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
     min_value = None
 
     # 1) Try decompiled XML
+    show_progress_quick('Min Sdk')
     try:
         tree = ET.parse(manifest)
         root = tree.getroot()
@@ -3873,6 +3991,7 @@ def check_serialize(base):
 
     hits = []
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -3883,6 +4002,12 @@ def check_serialize(base):
             rel_path = os.path.relpath(path, base)
             if is_library_path(rel_path):
                 continue
+
+            files_to_scan.append((path, rel_path))
+
+    with ScanProgress("Insecure Serialize API", len(files_to_scan)) as scan_progress:
+        for path, rel_path in files_to_scan:
+            scan_progress.update()
 
             try:
                 with open(path, errors='ignore') as f:
@@ -4693,12 +4818,17 @@ def check_http_uris(base):
 
     ext_lang = {'.smali': 'smali', '.java': 'java', '.xml': 'xml'}
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith(('.smali', '.java', '.xml')):
-                continue
-            full = os.path.join(root, fn)
-            rel  = os.path.relpath(full, base)
+            if fn.endswith(('.smali', '.java', '.xml')):
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, base)
+                files_to_scan.append((full, rel, fn))
+
+    with ScanProgress("Insecure HTTP URIs", len(files_to_scan)) as scan_progress:
+        for full, rel, fn in files_to_scan:
+            scan_progress.update()
             try:
                 lines = open(full, errors='ignore').read().splitlines()
             except:
@@ -4765,6 +4895,7 @@ def check_debuggable(manifest, base):
       - code contains debug-enabling calls including BuildConfig DEBUG field set true.
     PASS otherwise.
     """
+    show_progress_quick('Debuggable')
     txt = open(manifest, errors='ignore').read()
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0039/' target='_blank'>MASTG-TEST-0039: Testing whether the App is Debuggable</a></div>"
 
@@ -4830,12 +4961,30 @@ def check_root_detection(manifest, base):
         r'Build\.TAGS\s*\.contains\(\s*"test-keys"\)': 'Build.TAGS test-keys check',
     }
 
-    findings = {}
+    compiled_patterns = [(pat, msg, re.compile(pat)) for pat, msg in patterns.items()]
 
-    for pat, msg in patterns.items():
-        hits = grep_code(base, pat)
-        if hits:
-            findings[msg] = hits
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if fn.endswith(('.smali', '.xml', '.java')):
+                path = os.path.join(root, fn)
+                rel_path = os.path.relpath(path, base)
+                files_to_scan.append((path, rel_path))
+
+    hits_by_desc = {msg: [] for msg in patterns.values()}
+    with ScanProgress("Root Detection", len(files_to_scan)) as scan_progress:
+        for path, rel_path in files_to_scan:
+            scan_progress.update()
+            try:
+                txt = open(path, errors='ignore').read()
+            except Exception:
+                continue
+
+            for _, msg, rx in compiled_patterns:
+                if rx.search(txt):
+                    hits_by_desc[msg].append(rel_path)
+
+    findings = {msg: hits for msg, hits in hits_by_desc.items() if hits}
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0045/' target='_blank'>MASTG-TEST-0045: Testing Root Detection</a></div>"
 
@@ -4922,6 +5071,7 @@ def check_allow_backup(manifest, base):
     Reference: MASTG-TEST-0262
     """
     txt = open(manifest, errors='ignore').read()
+    show_progress_quick('Allow Backup')
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0262/' target='_blank'>MASTG-TEST-0262: Testing Backups for Sensitive Data</a></div>"
 
     # Step 1: Check allowBackup attribute
@@ -5075,17 +5225,26 @@ def check_notification_sensitive_data(manifest, base):
             'snippet': snippet.strip() if snippet else ""
         })
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
+            if not fn.endswith(('.smali', '.kt', '.java')):
+                continue
+
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
 
-            # Scan decompiled smali
-            if fn.endswith('.smali'):
-                # Skip library code
-                if is_library_path(rel):
-                    continue
+            if is_library_path(rel):
+                continue
 
+            files_to_scan.append((path, rel))
+
+    with ScanProgress("Notification Sensitive Data", len(files_to_scan)) as scan_progress:
+        for path, rel in files_to_scan:
+            scan_progress.update()
+
+            # Scan decompiled smali
+            if rel.endswith('.smali'):
                 try:
                     lines = open(path, errors='ignore').read().splitlines()
                 except:
@@ -5099,10 +5258,7 @@ def check_notification_sensitive_data(manifest, base):
                                 add_finding(rel, lineno, api_name, line, snippet)
 
             # Fallback: scan Kotlin/Java source trees when no smali is present
-            elif fn.endswith(('.kt', '.java')):
-                if is_library_path(rel):
-                    continue
-
+            elif rel.endswith(('.kt', '.java')):
                 try:
                     lines = open(path, errors='ignore').read().splitlines()
                 except:
@@ -5212,15 +5368,100 @@ def check_safe_browsing(manifest, base):
         r'com/reactnativecommunity/webview',
         r'RNCWebView',
     ]
-    rn_hits = []
-    for pat in rn_patterns:
-        rn_hits += grep_code(base, pat)
-    is_react_native = bool(rn_hits)
 
-    webview_hits = []
-    for pat in webview_patterns:
-        webview_hits += grep_code(base, pat)
-    if not webview_hits:
+    # Scan codebase once (with progress) instead of multiple grep_code() passes.
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if fn.endswith(('.smali', '.xml', '.java')):
+                full_path = os.path.join(root, fn)
+                files_to_scan.append(os.path.relpath(full_path, base))
+
+    is_react_native = False
+    webview_found = False
+    enable_hits = []
+    disable_hits = []
+    real_suppress = []
+
+    rn_regexes = [re.compile(p) for p in rn_patterns]
+    webview_regexes = [re.compile(p) for p in webview_patterns]
+
+    enable_source_re = re.compile(r'\.setSafeBrowsingEnabled\s*\(\s*true\s*\)')
+    disable_source_re = re.compile(r'\.setSafeBrowsingEnabled\s*\(\s*false\s*\)')
+    enable_compat_re = re.compile(r'WebSettingsCompat\.setSafeBrowsingEnabled\([^,]+,\s*true\s*\)')
+    disable_compat_re = re.compile(r'WebSettingsCompat\.setSafeBrowsingEnabled\([^,]+,\s*false\s*\)')
+
+    const_false_re = re.compile(r'const/(4|16)\s+[vp]\d+,\s*0x0\b')
+    const_true_re = re.compile(r'const/(4|16)\s+[vp]\d+,\s*0x1\b')
+
+    proceed_smali_re = re.compile(r'Landroid/webkit/SafeBrowsingResponse;->proceed\(Z\)V')
+    proceed_java_re = re.compile(r'\bSafeBrowsingResponse\.proceed\s*\(')
+
+    # Ignore library namespaces for onSafeBrowsingHit() suppression detection.
+    lib_ns = (
+        '/androidx/', '/org/chromium/', '/com/google/', '/com/facebook/',
+        '/com/reactnativecommunity/', '/kotlin/', '/kotlinx/', '/okhttp3/', '/retrofit2/'
+    )
+
+    with ScanProgress("Safe Browsing Enabled", len(files_to_scan)) as scan_progress:
+        for rel in files_to_scan:
+            scan_progress.update()
+            path = os.path.join(base, rel)
+            try:
+                txt = open(path, errors='ignore').read()
+            except Exception:
+                continue
+
+            if (not is_react_native) and any(rx.search(txt) for rx in rn_regexes):
+                is_react_native = True
+
+            if (not webview_found) and any(rx.search(txt) for rx in webview_regexes):
+                webview_found = True
+
+            if enable_source_re.search(txt):
+                enable_hits.append(rel)
+            if disable_source_re.search(txt):
+                disable_hits.append(rel)
+
+            if enable_compat_re.search(txt):
+                enable_hits.append(rel)
+            if disable_compat_re.search(txt):
+                disable_hits.append(rel)
+
+            if '->setSafeBrowsingEnabled(Z)V' in txt:
+                lines = txt.splitlines()
+                for i, line in enumerate(lines, 1):
+                    if '->setSafeBrowsingEnabled(Z)V' not in line:
+                        continue
+                    window = "\n".join(lines[max(0, i-8):i+1])
+                    if const_false_re.search(window):
+                        disable_hits.append(f"{rel}:{i}")
+                    elif const_true_re.search(window):
+                        enable_hits.append(f"{rel}:{i}")
+
+            if ('onSafeBrowsingHit' in txt) and (proceed_smali_re.search(txt) or proceed_java_re.search(txt)):
+                normalized_rel = '/' + rel.replace('\\', '/')
+                if any(ns in normalized_rel for ns in lib_ns):
+                    continue
+
+                lines = txt.splitlines()
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    if line.startswith('.method') and 'onSafeBrowsingHit' in line:
+                        j = i + 1
+                        body = []
+                        while j < len(lines) and not lines[j].startswith('.end method'):
+                            body.append(lines[j])
+                            j += 1
+                        body_text = "\n".join(body)
+                        if ('SafeBrowsingResponse;->proceed' in body_text) or proceed_java_re.search(body_text):
+                            real_suppress.append((rel, i + 1))
+                        i = j
+                    else:
+                        i += 1
+
+    if not webview_found:
         return True, "No WebView usage detected" + mastg_ref
 
     # --- manifest explicit opt-out? ---
@@ -5243,35 +5484,6 @@ def check_safe_browsing(manifest, base):
         return (int(ms.group(1)) if ms else None,
                 int(ts.group(1)) if ts else None)
     min_sdk, target_sdk = _sdk(manifest_txt)
-
-    # --- code explicit enable/disable (Java/Kotlin & smali) ---
-    enable_hits = []
-    disable_hits = []
-
-    # direct framework API in source
-    enable_hits += grep_code(base, r'\.setSafeBrowsingEnabled\s*\(\s*true\s*\)')
-    disable_hits += grep_code(base, r'\.setSafeBrowsingEnabled\s*\(\s*false\s*\)')
-
-    # AndroidX compat helper
-    enable_hits += grep_code(base, r'WebSettingsCompat\.setSafeBrowsingEnabled\([^,]+,\s*true\s*\)')
-    disable_hits += grep_code(base, r'WebSettingsCompat\.setSafeBrowsingEnabled\([^,]+,\s*false\s*\)')
-
-    # smali boundary calls -> look back for const 0x0 / 0x1 near the call
-    call_files = grep_code(base, r'->setSafeBrowsingEnabled\(Z\)V')
-    for rel in call_files:
-        path = os.path.join(base, rel)
-        try:
-            lines = open(path, errors='ignore').read().splitlines()
-        except Exception:
-            continue
-        for i, line in enumerate(lines, 1):
-            if '->setSafeBrowsingEnabled(Z)V' not in line:
-                continue
-            window = "\n".join(lines[max(0, i-8):i+1])
-            if re.search(r'const/(4|16)\s+[vp]\d+,\s*0x0\b', window):
-                disable_hits.append(f"{rel}:{i}")
-            elif re.search(r'const/(4|16)\s+[vp]\d+,\s*0x1\b', window):
-                enable_hits.append(f"{rel}:{i}")
 
     # --- helper to build file:// anchors with line numbers ---
     def _first_anchor(rel, pat):
@@ -5332,45 +5544,6 @@ def check_safe_browsing(manifest, base):
             "<div style='margin-bottom:10px;'><strong>Safe Browsing disabled at runtime via code:</strong></div>"
             + "".join(links) + mastg_ref
         )
-
-    # 3) Suppressing the interstitial? Only if proceed() is called from the app's onSafeBrowsingHit(...)
-    #    Ignore library namespaces to avoid false positives (androidx, chromium, RN, etc.)
-    lib_ns = (
-        '/androidx/', '/org/chromium/', '/com/google/', '/com/facebook/',
-        '/com/reactnativecommunity/', '/kotlin/', '/kotlinx/', '/okhttp3/', '/retrofit2/'
-    )
-
-    # files that reference SafeBrowsingResponse.proceed(...)
-    proceed_files = set()
-    proceed_files.update(grep_code(base, r'Landroid/webkit/SafeBrowsingResponse;->proceed\(Z\)V'))
-    proceed_files.update(grep_code(base, r'\bSafeBrowsingResponse\.proceed\s*\('))
-
-    # drop library files
-    proceed_files = {rel for rel in proceed_files if not any(ns in rel for ns in lib_ns)}
-
-    # confirm proceed() is inside an onSafeBrowsingHit(...) method *in the same file*
-    real_suppress = []
-    for rel in sorted(proceed_files):
-        path = os.path.join(base, rel)
-        try:
-            lines = open(path, errors='ignore').read().splitlines()
-        except Exception:
-            continue
-
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith('.method') and 'onSafeBrowsingHit' in line:
-                j = i + 1
-                body = []
-                while j < len(lines) and not lines[j].startswith('.end method'):
-                    body.append(lines[j]); j += 1
-                body_text = "\n".join(body)
-                if ('SafeBrowsingResponse;->proceed' in body_text) or re.search(r'\bSafeBrowsingResponse\.proceed\s*\(', body_text):
-                    real_suppress.append((rel, i + 1))
-                i = j
-            else:
-                i += 1
 
     if real_suppress:
         links = []
@@ -5788,8 +5961,7 @@ def check_raw_sql_queries(base):
         'rawQueryWithFactory': r'Landroid/database/sqlite/SQLiteDatabase;->rawQueryWithFactory',
     }
 
-    scanned_files = 0
-
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith('.smali'):
@@ -5797,13 +5969,19 @@ def check_raw_sql_queries(base):
 
             full_path = os.path.join(root, f)
             rel_path = os.path.relpath(full_path, base)
+            rel_path_normalized = rel_path.replace('\\', '/')
 
             # Skip library files
-            if any(lib in rel_path for lib in ['androidx/', 'android/support/', 'com/google/']):
+            if any(lib in rel_path_normalized for lib in ['androidx/', 'android/support/', 'com/google/']):
                 continue
 
-            scanned_files += 1
+            files_to_scan.append((full_path, rel_path))
 
+    scanned_files = len(files_to_scan)
+
+    with ScanProgress("Raw SQL Queries", scanned_files) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 with open(full_path, errors='ignore') as file:
                     lines = file.readlines()
@@ -6016,8 +6194,6 @@ def check_insecure_webview(base):
            MASTG-TEST-0033, MASTG-TEST-0037, MASTG-TEST-0250-253, MASTG-TEST-0284
     """
 
-    hits = []
-
     # WebView configuration patterns to check
     patterns = {
         "setJavaScriptEnabled(true)": r'Landroid/webkit/WebSettings;->setJavaScriptEnabled\(Z\)V',
@@ -6035,46 +6211,80 @@ def check_insecure_webview(base):
         "setSaveFormData(true)": r'Landroid/webkit/WebSettings;->setSaveFormData\(Z\)V',
     }
 
-    for desc, pat in patterns.items():
-        for rel in grep_code(base, pat):
-            hits.append(f"<code>{rel}</code> {desc}")
+    override_re = re.compile(r'\.method.*onReceivedSslError')
+    proceed_re = re.compile(r'\bproceed\(')
+    protocol_re = re.compile(r'\.method.*(shouldOverrideUrlLoading|shouldInterceptRequest)')
 
     # XSS Risks: loadUrl/loadData/evaluateJavascript with user input
     xss_files = []
+    ssl_bypass_hits = []
+    protocol_hits = []
+    pattern_hits = {desc: [] for desc in patterns}
+
+    smali_files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith('.smali'):
-                continue
-            path = os.path.join(root, fn)
+            if fn.endswith('.smali'):
+                smali_files_to_scan.append(os.path.join(root, fn))
+
+    with ScanProgress("Insecure WebView Usage", len(smali_files_to_scan)) as scan_progress:
+        for path in smali_files_to_scan:
+            scan_progress.update()
+            rel = os.path.relpath(path, base)
+
             try:
                 content = open(path, errors='ignore').read()
-                # Check for WebView loading methods
-                has_load_method = any(method in content for method in [
-                    'WebView;->loadUrl',
-                    'WebView;->loadData',
-                    'WebView;->loadDataWithBaseURL',
-                    'WebView;->evaluateJavascript'
-                ])
-
-                if has_load_method:
-                    # Check for user input sources in same file
-                    user_input_patterns = [
-                        'getText()',           # EditText user input
-                        'getStringExtra',      # Intent extras
-                        'getQueryParameter',   # URI parameters
-                        'getExtras',           # Bundle data
-                        'getDataString',       # Intent data
-                        'getAction',           # Intent action
-                        'readLine',            # File/stream input
-                        'receive',             # Broadcast/network input
-                    ]
-                    has_user_input = any(pattern in content for pattern in user_input_patterns)
-
-                    if has_user_input:
-                        rel = os.path.relpath(path, base)
-                        xss_files.append(rel)
+                lines = content.splitlines()
             except:
                 continue
+
+            # 1) Configuration patterns (grouped by pattern like the old grep_code approach)
+            for desc, pat in patterns.items():
+                if re.search(pat, content):
+                    pattern_hits[desc].append(rel)
+
+            # 2) XSS risk: loadUrl/loadData/evaluateJavascript with user input (file-level)
+            has_load_method = any(method in content for method in [
+                'WebView;->loadUrl',
+                'WebView;->loadData',
+                'WebView;->loadDataWithBaseURL',
+                'WebView;->evaluateJavascript'
+            ])
+            if has_load_method:
+                user_input_patterns = [
+                    'getText()',           # EditText user input
+                    'getStringExtra',      # Intent extras
+                    'getQueryParameter',   # URI parameters
+                    'getExtras',           # Bundle data
+                    'getDataString',       # Intent data
+                    'getAction',           # Intent action
+                    'readLine',            # File/stream input
+                    'receive',             # Broadcast/network input
+                ]
+                has_user_input = any(pattern in content for pattern in user_input_patterns)
+                if has_user_input:
+                    xss_files.append(rel)
+
+            # 3) SSL/TLS Error Bypassing (onReceivedSslError with proceed())
+            for i, line in enumerate(lines):
+                if override_re.search(line):
+                    for j in range(i, min(i + 30, len(lines))):
+                        if proceed_re.search(lines[j]):
+                            ssl_bypass_hits.append(f"<code>{rel}:{j+1}</code> onReceivedSslError calls proceed()")
+                            break
+
+            # 4) Protocol Handler Issues (shouldOverrideUrlLoading)
+            if protocol_re.search(content):
+                unsafe_schemes = ['intent://', 'file://', 'javascript:', 'data:', 'content://']
+                has_unsafe_scheme = any(scheme in content.lower() for scheme in unsafe_schemes)
+                has_validation = bool(re.search(r'(startsWith|contains|matches|whitelist|allow)', content, re.IGNORECASE))
+                if has_unsafe_scheme and not has_validation:
+                    protocol_hits.append(f"<code>{rel}</code> Custom protocol handler without URL validation")
+
+    hits = []
+    for desc in patterns:
+        for rel in pattern_hits.get(desc, []):
+            hits.append(f"<code>{rel}</code> {desc}")
 
     if xss_files:
         hits.append(f"<strong>{len(xss_files)} file(s) load WebView content from user input (XSS risk):</strong>")
@@ -6083,53 +6293,8 @@ def check_insecure_webview(base):
         if len(xss_files) > 10:
             hits.append(f"<span style='margin-left:20px;'>...and {len(xss_files) - 10} more</span>")
 
-    # SSL/TLS Error Bypassing (onReceivedSslError with proceed())
-    ssl_bypass_files = []
-    override_re = re.compile(r'\.method.*onReceivedSslError')
-    proceed_re = re.compile(r'\bproceed\(')
-
-    for root, _, files in os.walk(base):
-        for fn in files:
-            if not fn.endswith('.smali'):
-                continue
-            path = os.path.join(root, fn)
-            try:
-                lines = open(path, errors='ignore').read().splitlines()
-                for i, line in enumerate(lines):
-                    if override_re.search(line):
-                        # Check next 30 lines for proceed() call
-                        for j in range(i, min(i + 30, len(lines))):
-                            if proceed_re.search(lines[j]):
-                                rel = os.path.relpath(path, base)
-                                hits.append(f"<code>{rel}:{j+1}</code> onReceivedSslError calls proceed()")
-                                break
-            except:
-                pass
-
-    # Protocol Handler Issues (shouldOverrideUrlLoading)
-    protocol_handlers = []
-    protocol_re = re.compile(r'\.method.*(shouldOverrideUrlLoading|shouldInterceptRequest)')
-
-    for root, _, files in os.walk(base):
-        for fn in files:
-            if not fn.endswith('.smali'):
-                continue
-            path = os.path.join(root, fn)
-            try:
-                content = open(path, errors='ignore').read()
-                if protocol_re.search(content):
-                    # Check for unsafe URL handling (intent://, file://, javascript:, etc.)
-                    unsafe_schemes = ['intent://', 'file://', 'javascript:', 'data:', 'content://']
-                    has_unsafe_scheme = any(scheme in content.lower() for scheme in unsafe_schemes)
-
-                    # Check for URL validation
-                    has_validation = bool(re.search(r'(startsWith|contains|matches|whitelist|allow)', content, re.IGNORECASE))
-
-                    if has_unsafe_scheme and not has_validation:
-                        rel = os.path.relpath(path, base)
-                        hits.append(f"<code>{rel}</code> Custom protocol handler without URL validation")
-            except:
-                pass
+    hits.extend(ssl_bypass_hits)
+    hits.extend(protocol_hits)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0031/' target='_blank'>MASTG-TEST-0031: Testing JavaScript Execution in WebViews</a></div>"
 
@@ -6208,7 +6373,7 @@ def check_keyboard_cache(base, manifest):
         normalized = path.replace('\\', '/')
         return any(lib in normalized for lib in lib_layout_patterns)
 
-    # Walk through all layout XML files
+    files_to_scan = []
     for root_dir, _, files in os.walk(os.path.join(base, 'res')):
         for fn in files:
             if not fn.endswith('.xml'):
@@ -6223,6 +6388,11 @@ def check_keyboard_cache(base, manifest):
             if is_library_layout(rel_path):
                 continue
 
+            files_to_scan.append((xml_path, rel_path))
+
+    with ScanProgress("Keyboard Cache", len(files_to_scan)) as scan_progress:
+        for xml_path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 xml_tree = ET.parse(xml_path)
                 xml_root = xml_tree.getroot()
@@ -6391,6 +6561,7 @@ def check_os_command_injection(base):
         r'Ljava/lang/ProcessBuilder;-><init>\(',
     ]
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -6402,6 +6573,11 @@ def check_os_command_injection(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((path, rel, fn))
+
+    with ScanProgress("OS Command Injection", len(files_to_scan)) as scan_progress:
+        for path, rel, fn in files_to_scan:
+            scan_progress.update()
             try:
                 lines = open(path, errors='ignore').read()
 
@@ -6546,6 +6722,7 @@ def check_weak_crypto(base):
     # Store findings by algorithm type
     findings_by_algo = {algo: [] for algo in algorithm_patterns.keys()}
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith(('.smali', '.java')):
@@ -6557,6 +6734,11 @@ def check_weak_crypto(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((path, rel, fn))
+
+    with ScanProgress("Weak Crypto Algorithms", len(files_to_scan)) as scan_progress:
+        for path, rel, fn in files_to_scan:
+            scan_progress.update()
             try:
                 with open(path, errors='ignore') as f:
                     lines = f.readlines()
@@ -6652,6 +6834,7 @@ def check_kotlin_metadata(base):
 
     pattern = r"Lkotlin/Metadata;"
     hits = []
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith(('.smali', '.java')):
@@ -6663,6 +6846,11 @@ def check_kotlin_metadata(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("Kotlin Metadata", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
             try:
                 for line in open(full, errors='ignore'):
                     if re.search(pattern, line):
@@ -6751,20 +6939,35 @@ def check_package_context(base):
 
     # SMALI pattern for createPackageContext call
     create_context_pattern = r'Landroid/content/Context;->createPackageContext'
-    candidate_files = grep_code(base, create_context_pattern)
+    create_context_re = re.compile(create_context_pattern)
 
-    # Filter out library code
-    candidate_files = [f for f in candidate_files if not is_library_path(f)]
-
-    if not candidate_files:
-        return ('PASS', "No createPackageContext usage detected" + mastg_ref)
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for f in files:
+            if not f.endswith(('.smali', '.xml', '.java')):
+                continue
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, base)
+            if is_library_path(rel_path):
+                continue
+            files_to_scan.append((full_path, rel_path))
 
     # Check each file for insecure flag combination (value 3 = CONTEXT_INCLUDE_CODE | CONTEXT_IGNORE_SECURITY)
+    candidate_files = []
     hits = []
-    for rel in candidate_files:
-        path = os.path.join(base, rel)
-        try:
-            lines = open(path, errors='ignore').read().splitlines()
+    with ScanProgress("Insecure Package Context", len(files_to_scan)) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full_path, errors='ignore').read()
+            except:
+                continue
+
+            if not create_context_re.search(content):
+                continue
+
+            candidate_files.append(rel_path)
+            lines = content.splitlines()
             for i, line in enumerate(lines):
                 if 'createPackageContext' in line:
                     # Check previous 5 lines for const/4 or const/16 with value 3 or 0x3
@@ -6772,10 +6975,11 @@ def check_package_context(base):
                     context = '\n'.join(lines[context_start:i+1])
                     # Look for const/4 vX, 0x3 or const/4 vX, 3
                     if re.search(r'const/4\s+v\d+,\s*(?:0x3|3)\b', context):
-                        hits.append((rel, i+1))
+                        hits.append((rel_path, i+1))
                         break
-        except:
-            pass
+
+    if not candidate_files:
+        return ('PASS', "No createPackageContext usage detected" + mastg_ref)
 
     if not hits:
         return ('PASS', f"createPackageContext usage found in {len(candidate_files)} file(s), but no insecure flag combinations detected" + mastg_ref)
@@ -6837,19 +7041,9 @@ def check_certificate_pinning(base):
         r'network_security_config',
     ]
     lib_hits = set()
-    for pat in lib_patterns:
-        lib_hits.update(grep_code(base, pat))
 
     # Check Network Security Config XML for <pin-set>
     network_config_path = os.path.join(base, 'res', 'xml', 'network_security_config.xml')
-    if os.path.exists(network_config_path):
-        try:
-            with open(network_config_path, errors='ignore') as f:
-                config_content = f.read()
-                if '<pin-set>' in config_content or 'pin-set' in config_content:
-                    lib_hits.add('res/xml/network_security_config.xml')
-        except Exception:
-            pass
 
     # 2) Manual/resource patterns
     manual_patterns = [
@@ -6889,8 +7083,6 @@ def check_certificate_pinning(base):
         r'->getTrustedIssuers',
     ]
     manual_hits = set()
-    for pat in manual_patterns:
-        manual_hits.update(grep_code(base, pat))
 
     # 3) SSLSocketFactory overrides
     sslfactory_patterns = [
@@ -6899,8 +7091,6 @@ def check_certificate_pinning(base):
         r'new-instance\s+[vp]\d+,\s+L[^;]+SSLSocketFactory;',
     ]
     sslfactory_hits = set()
-    for pat in sslfactory_patterns:
-        sslfactory_hits.update(grep_code(base, pat))
 
     # 4) HostnameVerifier stubs
     hv_re = re.compile(
@@ -6908,15 +7098,55 @@ def check_certificate_pinning(base):
         re.MULTILINE
     )
     hv_hits = set()
-    for rel in grep_code(base, r'->verify\('):
-        path = os.path.join(base, rel)
+
+    lib_regexes = [re.compile(p) for p in lib_patterns]
+    manual_regexes = [re.compile(p) for p in manual_patterns]
+    sslfactory_regexes = [re.compile(p) for p in sslfactory_patterns]
+    verify_call_re = re.compile(r'->verify\(')
+
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for f in files:
+            if f.endswith(('.smali', '.xml', '.java')):
+                files_to_scan.append(os.path.join(root, f))
+
+    with ScanProgress("Certificate Pinning", len(files_to_scan)) as scan_progress:
+        for file_path in files_to_scan:
+            scan_progress.update()
+
+            try:
+                content = open(file_path, errors='ignore').read()
+            except Exception:
+                continue
+
+            rel_path = os.path.relpath(file_path, base)
+
+            if any(rx.search(content) for rx in lib_regexes):
+                lib_hits.add(rel_path)
+            if any(rx.search(content) for rx in manual_regexes):
+                manual_hits.add(rel_path)
+            if any(rx.search(content) for rx in sslfactory_regexes):
+                sslfactory_hits.add(rel_path)
+
+            # Preserve legacy behavior: only consider HostnameVerifier stubs in files
+            # that also contain verify call sites.
+            if verify_call_re.search(content):
+                try:
+                    for ln in content.splitlines():
+                        if hv_re.search(ln):
+                            hv_hits.add(rel_path)
+                            break
+                except Exception:
+                    pass
+
+    if os.path.exists(network_config_path):
         try:
-            for i, ln in enumerate(open(path, errors='ignore'), 1):
-                if hv_re.search(ln):
-                    hv_hits.add(rel)
-                    break
-        except:
-            continue
+            with open(network_config_path, errors='ignore') as f:
+                config_content = f.read()
+                if '<pin-set>' in config_content or 'pin-set' in config_content:
+                    lib_hits.add('res/xml/network_security_config.xml')
+        except Exception:
+            pass
 
     sections = []
 
@@ -7060,8 +7290,7 @@ def check_sharedprefs_encryption(base):
         r'invoke-\w+.*getDefaultSharedPreferences\(',
     ]
 
-    scanned_files = 0
-
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith('.smali'):
@@ -7074,8 +7303,13 @@ def check_sharedprefs_encryption(base):
             if is_library_file(rel_path):
                 continue
 
-            scanned_files += 1
+            files_to_scan.append((full_path, rel_path))
 
+    scanned_files = len(files_to_scan)
+
+    with ScanProgress("SharedPreferences Encryption", scanned_files) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 with open(full_path, errors='ignore') as file:
                     lines = file.readlines()
@@ -7294,50 +7528,75 @@ def check_external_storage(base):
 
     def is_library_file(path):
         """Check if path is library code"""
-        return any(re.search(pattern, path) for pattern in exclude_patterns)
-
-    def find_matching_lines(base, pattern):
-        """Find files and their matching lines for a pattern"""
-        results = {}
-        for root, _, files in os.walk(base):
-            for f in files:
-                if f.endswith(('.smali', '.xml', '.java')):
-                    try:
-                        full_path = os.path.join(root, f)
-                        rel_path = os.path.relpath(full_path, base)
-                        if is_library_file(rel_path):
-                            continue
-
-                        with open(full_path, errors='ignore') as file:
-                            lines = file.readlines()
-                            for line_num, line in enumerate(lines, 1):
-                                if re.search(pattern, line):
-                                    if rel_path not in results:
-                                        results[rel_path] = []
-                                    results[rel_path].append((line_num, line.strip()))
-                                    break  # Only first match per file
-                    except:
-                        pass
-        return results
+        normalized = path.replace('\\', '/')
+        return any(re.search(pattern, normalized) for pattern in exclude_patterns)
 
     risky_findings = {}
     safe_findings = {}
     permission_findings = {}
 
-    for pattern, desc in risky_patterns.items():
-        results = find_matching_lines(base, pattern)
-        if results:
-            risky_findings[desc] = results
+    compiled_risky = {pat: re.compile(pat) for pat in risky_patterns}
+    compiled_safe = {pat: re.compile(pat) for pat in safe_patterns}
+    compiled_permissions = {pat: re.compile(pat) for pat in permission_patterns}
 
-    for pattern, desc in safe_patterns.items():
-        results = find_matching_lines(base, pattern)
-        if results:
-            safe_findings[desc] = results
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
 
-    for pattern, desc in permission_patterns.items():
-        results = find_matching_lines(base, pattern)
-        if results:
-            permission_findings[desc] = results
+            full_path = os.path.join(root, fn)
+            rel_path = os.path.relpath(full_path, base)
+
+            if is_library_file(rel_path):
+                continue
+
+            files_to_scan.append((full_path, rel_path))
+
+    with ScanProgress("External Storage Usage", len(files_to_scan)) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
+            try:
+                with open(full_path, errors='ignore') as file:
+                    lines = file.readlines()
+            except Exception:
+                continue
+
+            found_risky = set()
+            found_safe = set()
+            found_permissions = set()
+
+            for line_num, line in enumerate(lines, 1):
+                for pat, rx in compiled_risky.items():
+                    if pat in found_risky:
+                        continue
+                    if rx.search(line):
+                        desc = risky_patterns[pat]
+                        risky_findings.setdefault(desc, {}).setdefault(rel_path, []).append((line_num, line.strip()))
+                        found_risky.add(pat)
+
+                for pat, rx in compiled_safe.items():
+                    if pat in found_safe:
+                        continue
+                    if rx.search(line):
+                        desc = safe_patterns[pat]
+                        safe_findings.setdefault(desc, {}).setdefault(rel_path, []).append((line_num, line.strip()))
+                        found_safe.add(pat)
+
+                for pat, rx in compiled_permissions.items():
+                    if pat in found_permissions:
+                        continue
+                    if rx.search(line):
+                        desc = permission_patterns[pat]
+                        permission_findings.setdefault(desc, {}).setdefault(rel_path, []).append((line_num, line.strip()))
+                        found_permissions.add(pat)
+
+                if (
+                    len(found_risky) == len(compiled_risky)
+                    and len(found_safe) == len(compiled_safe)
+                    and len(found_permissions) == len(compiled_permissions)
+                ):
+                    break
 
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>MASTG-TEST-0200: Files Written to External Storage</a></div>"
 
@@ -7511,7 +7770,8 @@ def check_hardcoded_keys(base):
         'Low': []        # <0.4 (filtered out unless has sensitive keyword)
     }
 
-    scanned_files = 0
+    # First, collect all files to scan
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith(('.smali', '.xml', '.java', '.json', '.properties')):
@@ -7537,62 +7797,69 @@ def check_hardcoded_keys(base):
                     'attrs.xml' in f.lower()):
                     continue
 
-            scanned_files += 1
+            files_to_scan.append((full_path, rel_path))
 
-            try:
-                content = open(full_path, errors='ignore').read()
+    scan_progress = ScanProgress("Hardcoded Keys", len(files_to_scan))
+    scanned_files = 0
 
-                # Search for patterns
-                for pattern_tuple in string_patterns:
-                    pattern, value_group, key_group = pattern_tuple
+    for full_path, rel_path in files_to_scan:
+        scan_progress.update()
+        scanned_files += 1
 
-                    for match in re.finditer(pattern, content, re.MULTILINE):
-                        try:
-                            # Extract value from specified capture group
-                            value = match.group(value_group) if value_group else match.group(0)
+        try:
+            content = open(full_path, errors='ignore').read()
 
-                            # Extract key name if specified
-                            key_name = match.group(key_group) if key_group else ""
+            # Search for patterns
+            for pattern_tuple in string_patterns:
+                pattern, value_group, key_group = pattern_tuple
 
-                            # Clean up value
-                            value = value.strip('"\'')
+                for match in re.finditer(pattern, content, re.MULTILINE):
+                    try:
+                        # Extract value from specified capture group
+                        value = match.group(value_group) if value_group else match.group(0)
 
-                            # Skip common false positives
-                            if len(value) < 8:
-                                continue
-                            if value.lower() in ['example', 'test', 'default', 'placeholder', 'undefined', 'null']:
-                                continue
-                            if re.match(r'^[0-9]+$', value):  # Pure numbers
-                                continue
+                        # Extract key name if specified
+                        key_name = match.group(key_group) if key_group else ""
 
-                            # Skip Android/Material Design component library strings (by name prefix)
-                            # m3c_ = Material 3 Components, abc_ = AppCompat, mtrl_ = Material Design, exo_ = ExoPlayer
-                            if key_name and re.match(r'^(m3c_|abc_|mtrl_|exo_|mr_|cast_|design_|cardview_|recyclerview_)', key_name):
-                                continue
+                        # Clean up value
+                        value = value.strip('"\'')
 
-                            # Skip strings containing Android format placeholders (UI localization strings)
-                            # %s, %d, %1$s, %2$d, etc. are used in translated UI strings
-                            if re.search(r'%[0-9]*\$?[sdxfn]', value):
-                                continue
+                        # Skip common false positives
+                        if len(value) < 8:
+                            continue
+                        if value.lower() in ['example', 'test', 'default', 'placeholder', 'undefined', 'null']:
+                            continue
+                        if re.match(r'^[0-9]+$', value):  # Pure numbers
+                            continue
 
-                            # Skip Android resource references
-                            if value.startswith('@') or value.startswith('?'):
+                        # Skip Android/Material Design component library strings (by name prefix)
+                        # m3c_ = Material 3 Components, abc_ = AppCompat, mtrl_ = Material Design, exo_ = ExoPlayer
+                        if key_name and re.match(r'^(m3c_|abc_|mtrl_|exo_|mr_|cast_|design_|cardview_|recyclerview_)', key_name):
                                 continue
 
-                            # Skip if it looks like XML tag/attribute names (underscores and alphanumeric only)
-                            if re.match(r'^[a-z_][a-z0-9_]*[0-9]*$', value, re.I):  # Simple identifiers with optional trailing numbers
+                        # Skip strings containing Android format placeholders (UI localization strings)
+                        # %s, %d, %1$s, %2$d, etc. are used in translated UI strings
+                        if re.search(r'%[0-9]*\$?[sdxfn]', value):
                                 continue
 
-                            # Skip common boolean strings
-                            if value in ['true', 'false', 'enabled', 'disabled']:
+                        # Skip Android resource references
+                        if value.startswith('@') or value.startswith('?'):
                                 continue
 
-                            # IMPORTANT: Skip internationalization/localization strings (non-ASCII Unicode)
-                            # These are UI text in various languages (Russian, Chinese, Thai, Arabic, etc.)
-                            # Count non-ASCII characters
-                            non_ascii_count = sum(1 for c in value if ord(c) > 127)
-                            # If more than 30% of the string is non-ASCII Unicode, it's likely i18n text
-                            if non_ascii_count > 0 and (non_ascii_count / len(value)) > 0.3:
+                        # Skip if it looks like XML tag/attribute names (underscores and alphanumeric only)
+                        if re.match(r'^[a-z_][a-z0-9_]*[0-9]*$', value, re.I):  # Simple identifiers with optional trailing numbers
+                                continue
+
+                        # Skip common boolean strings
+                        if value in ['true', 'false', 'enabled', 'disabled']:
+                                continue
+
+                        # IMPORTANT: Skip internationalization/localization strings (non-ASCII Unicode)
+                        # These are UI text in various languages (Russian, Chinese, Thai, Arabic, etc.)
+                        # Count non-ASCII characters
+                        non_ascii_count = sum(1 for c in value if ord(c) > 127)
+                        # If more than 30% of the string is non-ASCII Unicode, it's likely i18n text
+                        if non_ascii_count > 0 and (non_ascii_count / len(value)) > 0.3:
                                 # Check if it contains known secret patterns (base64, hex, known prefixes)
                                 # These should NOT be skipped even if they have some Unicode
                                 is_known_secret_pattern = (
@@ -7604,23 +7871,23 @@ def check_hardcoded_keys(base):
                                 if not is_known_secret_pattern:
                                     continue  # Skip internationalization strings
 
-                            # Skip numeric values with units
-                            if re.match(r'^[0-9]+\.?[0-9]*(dip|dp|sp|px|pt|mm|in)$', value):
+                        # Skip numeric values with units
+                        if re.match(r'^[0-9]+\.?[0-9]*(dip|dp|sp|px|pt|mm|in)$', value):
                                 continue
 
-                            # Skip SQL queries (will be checked in a separate SQL security test)
-                            value_upper = value.upper()
-                            sql_keywords = ['SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ', 'CREATE ', 'DROP ', 'ALTER ', 'FROM ', 'WHERE ', 'JOIN ']
-                            if any(keyword in value_upper for keyword in sql_keywords):
+                        # Skip SQL queries (will be checked in a separate SQL security test)
+                        value_upper = value.upper()
+                        sql_keywords = ['SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ', 'CREATE ', 'DROP ', 'ALTER ', 'FROM ', 'WHERE ', 'JOIN ']
+                        if any(keyword in value_upper for keyword in sql_keywords):
                                 continue
 
-                            # Skip PRAGMA statements (SQLite configuration)
-                            if value_upper.startswith('PRAGMA '):
+                        # Skip PRAGMA statements (SQLite configuration)
+                        if value_upper.startswith('PRAGMA '):
                                 continue
 
-                            # Skip Java/Kotlin package and class names (contain dots and look like com.package.Class)
-                            # BUT DON'T skip known secret patterns like *.apps.googleusercontent.com
-                            if '.' in value and not value.startswith('.'):
+                        # Skip Java/Kotlin package and class names (contain dots and look like com.package.Class)
+                        # BUT DON'T skip known secret patterns like *.apps.googleusercontent.com
+                        if '.' in value and not value.startswith('.'):
                                 # Check if it's a known secret pattern first
                                 known_secret_patterns = [
                                     r'AKIA[0-9A-Z]{16}',
@@ -7642,42 +7909,42 @@ def check_hardcoded_keys(base):
                                         if lowercase_parts >= len(parts) - 2:  # Most parts are lowercase (package names)
                                             continue
 
-                            # Skip strings that look like error messages or natural language
-                            # (contain spaces and common English words, not just identifiers)
-                            if ' ' in value and len(value) > 30:
+                        # Skip strings that look like error messages or natural language
+                        # (contain spaces and common English words, not just identifiers)
+                        if ' ' in value and len(value) > 30:
                                 # Count spaces - error messages typically have many
                                 space_count = value.count(' ')
                                 if space_count >= 3:  # Likely a sentence/error message
                                     continue
 
-                            # Skip strings with parentheses that look like function signatures or debug output
-                            if '(' in value and '=' in value:
+                        # Skip strings with parentheses that look like function signatures or debug output
+                        if '(' in value and '=' in value:
                                 # Looks like "FunctionName(param=value)" - debug output
                                 continue
 
-                            # Skip if it looks like a class name, package path, or identifier
-                            if '/' in value:
+                        # Skip if it looks like a class name, package path, or identifier
+                        if '/' in value:
                                 # But allow known secret prefixes
                                 secret_prefixes = ['AKIA', 'AIza', 'Bearer']
                                 if not any(value.startswith(prefix) for prefix in secret_prefixes):
                                     continue
 
-                            # Skip common Android/UI patterns
-                            if value.startswith('#') or value.endswith(('dip', 'dp', 'sp', 'px')):
+                        # Skip common Android/UI patterns
+                        if value.startswith('#') or value.endswith(('dip', 'dp', 'sp', 'px')):
                                 continue
 
-                            # Skip if it's a camelCase identifier (but allow base64/hex patterns)
-                            if re.match(r'^[a-z][a-zA-Z0-9]*[A-Z]', value):  # camelCase
+                        # Skip if it's a camelCase identifier (but allow base64/hex patterns)
+                        if re.match(r'^[a-z][a-zA-Z0-9]*[A-Z]', value):  # camelCase
                                 # Unless it's base64/hex which might just happen to look like camelCase
                                 if not (re.match(r'^[A-Za-z0-9+/=]+$', value) or re.match(r'^[0-9a-fA-F]+$', value)):
                                     continue
 
-                            # Analyze if it's likely a secret
-                            is_secret, confidence, reason = is_likely_secret(value, key_name)
+                        # Analyze if it's likely a secret
+                        is_secret, confidence, reason = is_likely_secret(value, key_name)
 
-                            # Skip low-confidence findings that only match weak indicators
-                            # (e.g., just having "database" in a class name)
-                            if confidence < 0.5:
+                        # Skip low-confidence findings that only match weak indicators
+                        # (e.g., just having "database" in a class name)
+                        if confidence < 0.5:
                                 # Check if this is only flagged due to generic keywords in the value
                                 has_sensitive_val, val_categories = is_sensitive_keyword(value)
                                 if has_sensitive_val:
@@ -7689,14 +7956,14 @@ def check_hardcoded_keys(base):
                                         if not has_sensitive_key:
                                             continue
 
-                            # Categorize by confidence (raised thresholds)
-                            if confidence >= 0.8:
+                        # Categorize by confidence (raised thresholds)
+                        if confidence >= 0.8:
                                 category = 'Critical'
-                            elif confidence >= 0.65:
+                        elif confidence >= 0.65:
                                 category = 'High'
-                            elif confidence >= 0.5:
+                        elif confidence >= 0.5:
                                 category = 'Medium'
-                            else:
+                        else:
                                 # Only include low confidence if it has very specific sensitive keywords
                                 has_sensitive, sensitive_cats = is_sensitive_keyword(key_name + " " + value)
                                 # Require high-value keywords for low confidence (not just "database" or "encryption")
@@ -7706,19 +7973,19 @@ def check_hardcoded_keys(base):
                                 else:
                                     continue  # Skip
 
-                            # Get context (surrounding lines with actual code)
-                            lines_list = content.splitlines()
-                            line_num = content[:match.start()].count('\n')
-                            context_start = max(0, line_num - 2)
-                            context_end = min(len(lines_list), line_num + 3)
-                            context_lines = lines_list[context_start:context_end]
+                        # Get context (surrounding lines with actual code)
+                        lines_list = content.splitlines()
+                        line_num = content[:match.start()].count('\n')
+                        context_start = max(0, line_num - 2)
+                        context_end = min(len(lines_list), line_num + 3)
+                        context_lines = lines_list[context_start:context_end]
 
-                            # Highlight the matching line
-                            match_line_in_context = line_num - context_start
-                            if 0 <= match_line_in_context < len(context_lines):
+                        # Highlight the matching line
+                        match_line_in_context = line_num - context_start
+                        if 0 <= match_line_in_context < len(context_lines):
                                 context_lines[match_line_in_context] = '>>> ' + context_lines[match_line_in_context]
 
-                            finding = {
+                        finding = {
                                 'file': rel_path,
                                 'line': line_num + 1,
                                 'value': value,
@@ -7728,18 +7995,20 @@ def check_hardcoded_keys(base):
                                 'reason': reason,
                                 'context': context_lines,
                                 'full_match': match.group(0)[:100],
-                            }
+                        }
 
-                            # Avoid duplicates based on file + value
-                            dup_key = (rel_path, value[:50])
-                            if dup_key not in [((f['file'], f['value'][:50])) for f in findings_by_confidence[category]]:
-                                findings_by_confidence[category].append(finding)
+                        # Avoid duplicates based on file + value
+                        dup_key = (rel_path, value[:50])
+                        if dup_key not in [((f['file'], f['value'][:50])) for f in findings_by_confidence[category]]:
+                            findings_by_confidence[category].append(finding)
 
-                        except (IndexError, AttributeError):
-                            continue  # Skip malformed matches
+                    except (IndexError, AttributeError):
+                        continue  # Skip malformed matches
 
-            except Exception as e:
-                pass
+        except Exception as e:
+            pass
+
+    scan_progress.complete()
 
     # Build report
     total_findings = sum(len(findings_by_confidence[cat]) for cat in findings_by_confidence)
@@ -8098,6 +8367,7 @@ def check_biometric_auth(base):
     crypto_object_files = set()
     keystore_files = set()
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -8110,6 +8380,11 @@ def check_biometric_auth(base):
             if is_library_path(rel_path):
                 continue
 
+            files_to_scan.append((path, rel_path))
+
+    with ScanProgress("Biometric Authentication", len(files_to_scan)) as scan_progress:
+        for path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
@@ -8255,47 +8530,57 @@ def check_flag_secure(base, manifest):
     app_disabled = []
     library_disabled = []
 
-    # Scan all code files for FLAG_SECURE patterns
+    # First, collect all files to scan
+    all_files = []
     for root, _, files in os.walk(base):
         for f in files:
             if f.endswith(('.smali', '.java')):
-                file_path = os.path.join(root, f)
-                rel_path = os.path.relpath(file_path, base)
-                is_library = is_library_path(rel_path)
+                all_files.append(os.path.join(root, f))
 
-                try:
-                    with open(file_path, errors='ignore') as fp:
-                        lines = fp.readlines()
+    scan_progress = ScanProgress("FLAG_SECURE Usage", len(all_files))
 
-                    # Check each line for patterns
-                    for i, line in enumerate(lines, 1):
-                        # Check for normal FLAG_SECURE usage
-                        for pat in flag_secure_patterns:
-                            if re.search(pat, line):
-                                # Only add if we haven't already recorded this file
-                                data = (rel_path, file_path, i, lines, pat)
-                                if is_library:
-                                    if not any(d[0] == rel_path for d in library_hits):
-                                        library_hits.append(data)
-                                else:
-                                    if not any(d[0] == rel_path for d in app_hits):
-                                        app_hits.append(data)
-                                break
+    # Scan all code files for FLAG_SECURE patterns
+    for file_path in all_files:
+        scan_progress.update()
 
-                        # Check for disabled FLAG_SECURE
-                        for pat in disabled_patterns:
-                            if re.search(pat, line):
-                                # Only add if we haven't already recorded this file
-                                data = (rel_path, file_path, i, lines, pat)
-                                if is_library:
-                                    if not any(d[0] == rel_path for d in library_disabled):
-                                        library_disabled.append(data)
-                                else:
-                                    if not any(d[0] == rel_path for d in app_disabled):
-                                        app_disabled.append(data)
-                                break
-                except:
-                    continue
+        rel_path = os.path.relpath(file_path, base)
+        is_library = is_library_path(rel_path)
+
+        try:
+            with open(file_path, errors='ignore') as fp:
+                lines = fp.readlines()
+
+            # Check each line for patterns
+            for i, line in enumerate(lines, 1):
+                # Check for normal FLAG_SECURE usage
+                for pat in flag_secure_patterns:
+                    if re.search(pat, line):
+                        # Only add if we haven't already recorded this file
+                        data = (rel_path, file_path, i, lines, pat)
+                        if is_library:
+                            if not any(d[0] == rel_path for d in library_hits):
+                                library_hits.append(data)
+                        else:
+                            if not any(d[0] == rel_path for d in app_hits):
+                                app_hits.append(data)
+                        break
+
+                # Check for disabled FLAG_SECURE
+                for pat in disabled_patterns:
+                    if re.search(pat, line):
+                        # Only add if we haven't already recorded this file
+                        data = (rel_path, file_path, i, lines, pat)
+                        if is_library:
+                            if not any(d[0] == rel_path for d in library_disabled):
+                                library_disabled.append(data)
+                        else:
+                            if not any(d[0] == rel_path for d in app_disabled):
+                                app_disabled.append(data)
+                        break
+        except:
+            continue
+
+    scan_progress.complete()
 
     # Count activities in manifest
     try:
@@ -8479,74 +8764,73 @@ def check_webview_javascript_bridge(base):
     ]
 
     hits = set()
-    for pat in js_interface_patterns:
-        hits.update(grep_code(base, pat))
-
-    if not hits:
-        return True, "No JavaScript interfaces detected"
-
-    # Analyze each file that adds JavaScript interface
     interface_classes = set()
     vulnerable_interfaces = []
     files_with_remote_loading = []
 
-    for rel in hits:
-        full_path = os.path.join(base, rel)
-        try:
-            with open(full_path, 'r', errors='ignore') as f:
-                content = f.read()
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if fn.endswith(('.smali', '.xml', '.java')):
+                files_to_scan.append(os.path.join(root, fn))
 
-            # Check if this file loads REMOTE content (vulnerability indicator)
-            remote_loading_patterns = [
-                r'loadUrl.*"https?://',           # loadUrl("http://...")
-                r'loadUrl.*Ljava/lang/String;',   # loadUrl(stringVar) - might be remote
-                r'loadDataWithBaseURL.*"https?://', # loadDataWithBaseURL with remote base
-            ]
+    remote_loading_patterns = [
+        r'loadUrl.*"https?://',             # loadUrl("http://...")
+        r'loadUrl.*Ljava/lang/String;',     # loadUrl(stringVar) - might be remote
+        r'loadDataWithBaseURL.*"https?://', # loadDataWithBaseURL with remote base
+    ]
+    url_validation_re = re.compile(r'(startsWith|contains|matches|equals).*"(https?://|file://)')
+    add_js_invocation_re = re.compile(r'invoke-virtual\s+\{([^}]+)\}.*addJavascriptInterface')
 
-            loads_remote = False
-            for pattern in remote_loading_patterns:
-                if re.search(pattern, content):
-                    loads_remote = True
-                    break
+    with ScanProgress("WebView JavaScript Bridges", len(files_to_scan)) as scan_progress:
+        for full_path in files_to_scan:
+            scan_progress.update()
+            rel = os.path.relpath(full_path, base)
+            try:
+                with open(full_path, 'r', errors='ignore') as f:
+                    content = f.read()
+            except Exception:
+                continue
 
-            # Check for URL validation (security control)
-            has_url_validation = bool(re.search(r'(startsWith|contains|matches|equals).*"(https?://|file://)', content))
+            if not any(re.search(pat, content) for pat in js_interface_patterns):
+                continue
 
-            if loads_remote:
-                files_with_remote_loading.append({
-                    'file': rel,
-                    'has_validation': has_url_validation
-                })
+            hits.add(rel)
 
-            # Find addJavascriptInterface calls and extract the object being passed
-            # Pattern: invoke-virtual {vX, vY}, Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
-            add_js_matches = re.finditer(
-                r'invoke-virtual\s+\{([^}]+)\}.*addJavascriptInterface',
-                content
-            )
+            try:
+                loads_remote = any(re.search(pattern, content) for pattern in remote_loading_patterns)
+                has_url_validation = bool(url_validation_re.search(content))
 
-            for match in add_js_matches:
-                # Get the lines before this invocation to find what object is being passed
-                lines_before = content[:match.start()].split('\n')
+                if loads_remote:
+                    files_with_remote_loading.append({
+                        'file': rel,
+                        'has_validation': has_url_validation
+                    })
 
-                # Look backwards for field access or new-instance that loads the interface object
-                for i in range(len(lines_before) - 1, max(0, len(lines_before) - 30), -1):
-                    line = lines_before[i]
+                for match in add_js_invocation_re.finditer(content):
+                    # Get the lines before this invocation to find what object is being passed
+                    lines_before = content[:match.start()].split('\n')
 
-                    # Match patterns like: iget-object v2, p0, Lcom/example/MyClass;->jsInterface:Lcom/example/MyInterface;
-                    field_match = re.search(r'L([^;]+);->\w+:L([^;]+);', line)
-                    if field_match:
-                        interface_classes.add(field_match.group(2))
-                        continue
+                    # Look backwards for field access or new-instance that loads the interface object
+                    for i in range(len(lines_before) - 1, max(0, len(lines_before) - 30), -1):
+                        line = lines_before[i]
 
-                    # Match patterns like: new-instance v0, Lcom/example/MyInterface;
-                    new_match = re.search(r'new-instance\s+\w+,\s*L([^;]+);', line)
-                    if new_match:
-                        interface_classes.add(new_match.group(1))
-                        break
+                        # Match patterns like: iget-object v2, p0, Lcom/example/MyClass;->jsInterface:Lcom/example/MyInterface;
+                        field_match = re.search(r'L([^;]+);->\w+:L([^;]+);', line)
+                        if field_match:
+                            interface_classes.add(field_match.group(2))
+                            continue
 
-        except Exception as e:
-            pass
+                        # Match patterns like: new-instance v0, Lcom/example/MyInterface;
+                        new_match = re.search(r'new-instance\s+\w+,\s*L([^;]+);', line)
+                        if new_match:
+                            interface_classes.add(new_match.group(1))
+                            break
+            except Exception:
+                pass
+
+    if not hits:
+        return True, "No JavaScript interfaces detected"
 
     # Now check each interface class for @JavascriptInterface annotations
     secure_count = 0
@@ -8727,9 +9011,7 @@ def check_clipboard_security(base):
     critical_findings = []  # setPrimaryClip with sensitive data
     findings = []           # Other clipboard usage
     prevention_hits = set()
-    scanned_files = 0
-
-    # Scan for clipboard usage
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
             if not f.endswith('.smali'):
@@ -8737,13 +9019,20 @@ def check_clipboard_security(base):
 
             full_path = os.path.join(root, f)
             rel_path = os.path.relpath(full_path, base)
+            rel_path_normalized = rel_path.replace('\\', '/')
 
             # Skip library files
-            if any(lib in rel_path for lib in ['androidx/', 'android/support/', 'com/google/']):
+            if any(lib in rel_path_normalized for lib in ['androidx/', 'android/support/', 'com/google/']):
                 continue
 
-            scanned_files += 1
+            files_to_scan.append((full_path, rel_path))
 
+    scanned_files = len(files_to_scan)
+
+    # Scan for clipboard usage
+    with ScanProgress("Clipboard Security", scanned_files) as scan_progress:
+        for full_path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 with open(full_path, errors='ignore') as file:
                     content = file.read()
@@ -8920,17 +9209,23 @@ def check_pii_location_info(base):
     ]
 
     issues = []
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith(('.smali', '.java')):
                 continue
             path = os.path.join(root, fn)
+            rel_path = os.path.relpath(path, base)
 
             # Filter out library code
-            rel_path = os.path.relpath(path, base)
             if is_library_path(rel_path):
                 continue
 
+            files_to_scan.append((path, rel_path))
+
+    with ScanProgress("PII via Location Info", len(files_to_scan)) as scan_progress:
+        for path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 lines = open(path, errors='ignore').read().splitlines()
             except:
@@ -8975,27 +9270,31 @@ def check_pii_wifi_info(base):
         r'Landroid/net/wifi/WifiManager;->getConnectionInfo',
         # Bluetooth MAC
         r'BluetoothDevice\.getAddress\(',
-        r'Landroid/bluetooth/BluetoothDevice;->getAddress'
+        r'Landroid/bluetooth/BluetoothDevice;->getAddress',
         # Bluetooth device name
         r'BluetoothDevice\.getName\(',
         r'Landroid/bluetooth/BluetoothDevice;->getName'
     ]
 
     issues = []
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith(('.smali', '.java')):
-                continue
-            path = os.path.join(root, fn)
+            if fn.endswith(('.smali', '.java')):
+                files_to_scan.append(os.path.join(root, fn))
+
+    with ScanProgress("PII via Ble Wi-Fi Info", len(files_to_scan)) as scan_progress:
+        for path in files_to_scan:
+            scan_progress.update()
             try:
                 lines = open(path, errors='ignore').read().splitlines()
             except:
                 continue
 
+            rel = os.path.relpath(path, base)
             for i, line in enumerate(lines, 1):
                 for pat in patterns:
                     if re.search(pat, line):
-                        rel = os.path.relpath(path, base)
                         snippet = html.escape(line.strip())
                         link = (
                             f'<a href="file://{html.escape(path)}">'
@@ -9148,6 +9447,8 @@ def check_insecure_randomness(base):
     }
 
     issues = []
+
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -9159,6 +9460,11 @@ def check_insecure_randomness(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((path, rel))
+
+    with ScanProgress("Insecure Randomness", len(files_to_scan)) as scan_progress:
+        for path, rel in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
@@ -9289,6 +9595,7 @@ def check_insecure_fingerprint_api(base):
     crypto_files = set()  # SECURE - uses CryptoObject
     keystore_files = set()  # SECURE - KeyStore integration
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -9300,6 +9607,11 @@ def check_insecure_fingerprint_api(base):
             if is_library_path(rel_path):
                 continue
 
+            files_to_scan.append((path, rel_path))
+
+    with ScanProgress("Insecure Fingerprint API", len(files_to_scan)) as scan_progress:
+        for path, rel_path in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
@@ -9442,18 +9754,7 @@ def check_tls_versions(base):
         '/okhttp3/', '/retrofit2/', '/org/conscrypt/', '/lib/', '/jetified-'
     )
 
-    # Quick file-level filters
-    files_tls10 = set(grep_code(base, r'"TLSv1"'))
-    files_tls11 = set(grep_code(base, r'"TLSv1\.1"'))
-    candidates = (files_tls10 | files_tls11)
-
-    if not candidates:
-        return TestResult(
-            name="Use of TLS 1.0 or 1.1",
-            status="PASS",
-            summary_lines=["No TLSv1/1.1 usage detected"],
-            mastg_ref_html="<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>",
-        )
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
 
     def is_library_path(rel):
         rp = '/' + rel.replace('\\', '/')
@@ -9461,6 +9762,9 @@ def check_tls_versions(base):
 
     hard_hits = []   # direct risky usage in app code
     soft_hits = []   # library-only mentions
+
+    tls10_pattern = re.compile(r'"TLSv1"')
+    tls11_pattern = re.compile(r'"TLSv1\.1"')
 
     # Patterns that imply real use, not just enum/constants
     use_patterns = [
@@ -9472,51 +9776,75 @@ def check_tls_versions(base):
         r'SSLParameters\.setProtocols\s*\(',
     ]
 
-    for rel in sorted(candidates):
-        path = os.path.join(base, rel)
-        try:
-            txt = open(path, errors='ignore').read()
-        except Exception:
-            txt = ""
+    use_regexes = [re.compile(p) for p in use_patterns]
+    indicator_re = re.compile(r'setEnabledProtocols|setProtocols|SSLContext\.getInstance')
 
-        # Decide library vs app first
-        is_lib = is_library_path(rel)
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
+            path = os.path.join(root, fn)
+            rel = os.path.relpath(path, base)
+            files_to_scan.append((path, rel))
 
-        # Heuristic: only call it "use" if a TLSv1/1.1 string appears in the SAME FILE
-        # as an SSLContext.getInstance(...) or *EnabledProtocols/SSLParameters.setProtocols call.
-        suspicious = any(re.search(p, txt) for p in use_patterns)
+    with ScanProgress("Use of TLS 1.0 or 1.1", len(files_to_scan)) as scan_progress:
+        for path, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                txt = open(path, errors='ignore').read()
+            except Exception:
+                continue
 
-        if suspicious and not is_lib:
-            # find a line number to link and extract code snippet
-            line_no = None
-            code_snippet = ""
-            lines = txt.splitlines()
-            for i, line in enumerate(lines, 1):
-                if ('TLSv1' in line) or ('TLSv1.1' in line) or re.search(r'setEnabledProtocols|setProtocols|SSLContext\.getInstance', line):
-                    line_no = i
-                    # Extract 3 lines of context (before, match, after)
-                    start = max(0, i - 2)
-                    end = min(len(lines), i + 2)
-                    context_lines = []
-                    for j in range(start, end):
-                        prefix = "→ " if j == i - 1 else "  "
-                        context_lines.append(f"{prefix}{j+1:4d} | {lines[j]}")
-                    code_snippet = "\n".join(context_lines)
-                    break
+            has_tls10 = tls10_pattern.search(txt) is not None
+            has_tls11 = tls11_pattern.search(txt) is not None
+            if not (has_tls10 or has_tls11):
+                continue
 
-            findings_entry = FindingBlock(
-                title=rel,
-                subtitle=f"Line {line_no}" if line_no else "Legacy TLS usage",
-                link=f"file://{os.path.abspath(path)}" + (f":{line_no}" if line_no else ""),
-                code=code_snippet,
-                code_language="smali" if rel.endswith(".smali") else "java",
-                open_by_default=True,
-            )
-            hard_hits.append(findings_entry)
-        else:
-            soft_hits.append(rel)
+            # Decide library vs app first
+            is_lib = is_library_path(rel)
 
-    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
+            # Heuristic: only call it "use" if a TLSv1/1.1 string appears in the SAME FILE
+            # as an SSLContext.getInstance(...) or *EnabledProtocols/SSLParameters.setProtocols call.
+            suspicious = any(rx.search(txt) for rx in use_regexes)
+
+            if suspicious and not is_lib:
+                # Find a line number to link and extract code snippet
+                line_no = None
+                code_snippet = ""
+                lines = txt.splitlines()
+                for i, line in enumerate(lines, 1):
+                    if ('TLSv1' in line) or ('TLSv1.1' in line) or indicator_re.search(line):
+                        line_no = i
+                        # Extract 3 lines of context (before, match, after)
+                        start = max(0, i - 2)
+                        end = min(len(lines), i + 2)
+                        context_lines = []
+                        for j in range(start, end):
+                            prefix = "→ " if j == i - 1 else "  "
+                            context_lines.append(f"{prefix}{j+1:4d} | {lines[j]}")
+                        code_snippet = "\n".join(context_lines)
+                        break
+
+                findings_entry = FindingBlock(
+                    title=rel,
+                    subtitle=f"Line {line_no}" if line_no else "Legacy TLS usage",
+                    link=f"file://{os.path.abspath(path)}" + (f":{line_no}" if line_no else ""),
+                    code=code_snippet,
+                    code_language="smali" if rel.endswith(".smali") else "java",
+                    open_by_default=True,
+                )
+                hard_hits.append(findings_entry)
+            else:
+                soft_hits.append(rel)
+
+    if not hard_hits and not soft_hits:
+        return TestResult(
+            name="Use of TLS 1.0 or 1.1",
+            status="PASS",
+            summary_lines=["No TLSv1/1.1 usage detected"],
+            mastg_ref_html=mastg_ref,
+        )
 
     if hard_hits:
         return TestResult(
@@ -13091,6 +13419,7 @@ def check_pending_intent_flags(base):
     immutable_files = set()
     library_files = []  # Track library files separately
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith(('.smali', '.java')):
@@ -13102,6 +13431,11 @@ def check_pending_intent_flags(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("PendingIntent Flags", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
             try:
                 lines = open(full, errors='ignore').readlines()
                 content = ''.join(lines)
@@ -13215,13 +13549,18 @@ def check_webview_ssl_error_handling(base):
     """
     finding_blocks = []
 
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith(('.smali', '.java')):
                 continue
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel, fn))
 
+    with ScanProgress("WebView SSL Error Handling", len(files_to_scan)) as scan_progress:
+        for full, rel, fn in files_to_scan:
+            scan_progress.update()
             try:
                 with open(full, errors='ignore') as f:
                     lines = f.readlines()
@@ -13302,19 +13641,25 @@ def check_recent_screenshot_disabled(base):
 
     protected_files = set()
 
-    for pat in protection_patterns:
-        for root, _, files in os.walk(base):
-            for fn in files:
-                if not fn.endswith(('.smali', '.java', '.xml')):
-                    continue
-                full = os.path.join(root, fn)
-                rel = os.path.relpath(full, base)
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java', '.xml')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel))
 
-                try:
-                    if re.search(pat, open(full, errors='ignore').read()):
-                        protected_files.add(rel)
-                except Exception:
-                    pass
+    with ScanProgress("Recent Screenshot Protection", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full, errors='ignore').read()
+            except Exception:
+                continue
+
+            if any(re.search(pat, content) for pat in protection_patterns):
+                protected_files.add(rel)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0292/' target='_blank'>MASTG-TEST-0292: setRecentsScreenshotEnabled Not Used to Prevent Screenshots When Backgrounded</a></div>"
 
@@ -13495,7 +13840,7 @@ def check_datastore_encryption(base):
     datastore_files = set()
     encrypted_files = set()
 
-    # Scan for DataStore usage in APP CODE only
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -13504,27 +13849,30 @@ def check_datastore_encryption(base):
             full = os.path.join(root, fn)
             rel = os.path.relpath(full, base)
 
-            # SKIP library files
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("DataStore Encryption", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(full, errors='ignore').read()
-
-                # Check for DataStore usage
-                for pat in datastore_patterns:
-                    if re.search(pat, content):
-                        datastore_files.add(rel)
-                        break
-
-                # Check for encryption
-                for pat in encryption_patterns:
-                    if re.search(pat, content):
-                        encrypted_files.add(rel)
-                        break
-
             except Exception:
-                pass
+                continue
+
+            # Check for DataStore usage
+            for pat in datastore_patterns:
+                if re.search(pat, content):
+                    datastore_files.add(rel)
+                    break
+
+            # Check for encryption
+            for pat in encryption_patterns:
+                if re.search(pat, content):
+                    encrypted_files.add(rel)
+                    break
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0305/' target='_blank'>MASTG-TEST-0305: Sensitive Data Stored Unencrypted via DataStore</a></div>"
 
@@ -13603,6 +13951,7 @@ def check_room_encryption(base):
     encrypted_files = set()
 
     # Scan for Room usage in APP CODE only
+    files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
             if not fn.endswith('.smali'):
@@ -13615,23 +13964,27 @@ def check_room_encryption(base):
             if is_library_path(rel):
                 continue
 
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("Room Database Encryption", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
             try:
                 content = open(full, errors='ignore').read()
-
-                # Check for Room usage
-                for pat in room_patterns:
-                    if re.search(pat, content):
-                        room_files.add(rel)
-                        break
-
-                # Check for encryption
-                for pat in encryption_patterns:
-                    if re.search(pat, content):
-                        encrypted_files.add(rel)
-                        break
-
             except Exception:
-                pass
+                continue
+
+            # Check for Room usage
+            for pat in room_patterns:
+                if re.search(pat, content):
+                    room_files.add(rel)
+                    break
+
+            # Check for encryption
+            for pat in encryption_patterns:
+                if re.search(pat, content):
+                    encrypted_files.add(rel)
+                    break
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0306/' target='_blank'>MASTG-TEST-0306: Sensitive Data Stored Unencrypted via Android Room DB</a></div>"
 
@@ -13680,9 +14033,28 @@ def check_anti_debugging(base):
 
     detections = defaultdict(list)
 
-    for pat, desc in anti_debug_patterns:
-        for rel in grep_code(base, pat):
-            detections[desc].append(rel)
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel))
+
+    compiled = [(re.compile(pat), desc) for pat, desc in anti_debug_patterns]
+
+    with ScanProgress("Anti-Debugging", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full, errors='ignore').read()
+            except Exception:
+                continue
+
+            for rx, desc in compiled:
+                if rx.search(content):
+                    detections[desc].append(rel)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0046/' target='_blank'>MASTG-TEST-0046: Testing Anti-Debugging Detection</a></div>"
 
@@ -13723,9 +14095,26 @@ def check_gms_security_provider(base):
     ]
 
     provider_files = set()
-    for pat in provider_patterns:
-        for rel in grep_code(base, pat):
-            provider_files.add(rel)
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel))
+
+    compiled = [re.compile(pat) for pat in provider_patterns]
+    with ScanProgress("GMS Security Provider", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full, errors='ignore').read()
+            except Exception:
+                continue
+
+            if any(rx.search(content) for rx in compiled):
+                provider_files.add(rel)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0295/' target='_blank'>MASTG-TEST-0295: GMS Security Provider Not Updated</a></div>"
 
