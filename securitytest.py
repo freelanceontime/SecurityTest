@@ -33,7 +33,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "4.5.1"
+__version__ = "5.0.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 
 ## Add new test as def
@@ -14162,7 +14162,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 4.5.1 – Automated Mobile App Security Test Script
+    AppSec 5.0.2 – Automated Mobile App Security Test Script
 
     Options:
       -f, --file       APK file to decompile into smali
