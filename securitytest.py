@@ -2262,6 +2262,21 @@ def check_s3_bucket_security(base):
     bucket_locations = {}
 
     scan_exts = ('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')
+    lib_paths = (
+        '/androidx/', '/android/support/',
+        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+        '/okhttp3/', '/retrofit2/', '/com/squareup/',
+        '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/io/reactivex/', '/rx/', '/dagger/',
+        '/net/sqlcipher/', '/org/sqlite/',
+        '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/apache/', '/javax/',
+        '/lib/', '/jetified-'
+    )
+
+    def is_library_path(path):
+        normalized = '/' + path.replace('\\', '/')
+        return any(lib in normalized for lib in lib_paths)
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
@@ -2270,6 +2285,8 @@ def check_s3_bucket_security(base):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
+            if fn.endswith('.smali') and is_library_path(rel):
+                continue
             files_to_scan.append((path, rel))
 
     with ScanProgress("S3 Bucket Security", len(files_to_scan)) as scan_progress:
