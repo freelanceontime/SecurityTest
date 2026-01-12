@@ -45,10 +45,16 @@ LIB_PATHS = (
     '/net/sqlcipher/', '/org/sqlite/',
     '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
     '/org/apache/', '/javax/',
+    '/org/conscrypt/',  # Google's Conscrypt TLS/crypto provider
+    '/com/livechatinc/',  # LiveChat SDK
+    '/io/flutter/plugins/',  # Flutter plugins (webview, url_launcher, etc.)
+    '/com/mux/',  # Mux video analytics SDK
     '/lib/', '/jetified-'
 )
 
 def is_library_path(path):
+    if INCLUDE_LIBS:
+        return False
     normalized = '/' + path.replace('\\', '/')
     return any(lib in normalized for lib in LIB_PATHS)
 
@@ -2585,7 +2591,8 @@ def check_x509(base):
     library_paths = [
         'androidx/', 'android/support/', 'com/google/',
         'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
-        'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/'
+        'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/',
+        'org/conscrypt/'  # Google's Conscrypt TLS/crypto provider (standalone version)
     ]
 
     files_to_scan = []
@@ -2941,6 +2948,10 @@ def check_kotlin_assert(base):
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
         '/org/apache/', '/javax/',
+        '/com/livechatinc/',  # LiveChat SDK
+        '/io/flutter/plugins/',  # Flutter plugins
+        '/com/mux/',  # Mux video analytics SDK
+        '/io/sentry/',  # Sentry error tracking
         '/lib/', '/jetified-'
     )
 
@@ -3194,6 +3205,15 @@ def check_logging(base):
         'retrofit2/',                  # Retrofit (alternate package)
         'com/google/dagger',           # Dagger DI
         'javax/',                      # Java extensions
+        'com/it_nomads/',              # flutter_secure_storage plugin
+        'io/flutter/plugins/',         # Flutter plugins (webview, path_provider, etc.)
+        'com/tekartik/',               # sqflite Flutter plugin
+        'io/sentry/',                  # Sentry error tracking SDK
+        'com/livechatinc/',            # LiveChat SDK
+        'com/mux/',                    # Mux video analytics SDK
+        'com/scottyab/rootbeer/',      # RootBeer root detection library
+        'org/conscrypt/',              # Conscrypt TLS provider
+        'io/requery/',                 # Requery ORM
     ]
 
     # Comprehensive sensitive keywords that indicate potentially sensitive data being logged
@@ -3546,6 +3566,8 @@ def check_updates(base):
 
     def is_library_path(rel_path):
         """Check if the file path is from a library (not app code)"""
+        if INCLUDE_LIBS:
+            return False
         library_indicators = [
             'com/google/android/gms/',
             'com/google/android/play/',
@@ -4013,11 +4035,17 @@ def check_serialize(base):
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/org/chromium/', '/io/reactivex/',
         '/io/sentry/',
+        '/org/conscrypt/',  # Conscrypt TLS library (key serialization)
+        '/org/apache/',     # Apache Commons libraries
+        '/io/requery/',     # Requery database ORM
+        '/io/flutter/plugins/',  # Flutter plugins (SharedPreferences etc)
         '/lib/', '/jetified-'
     )
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -5230,6 +5258,8 @@ def check_notification_sensitive_data(manifest, base):
     )
 
     def is_library_path(path):
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -5953,6 +5983,8 @@ def check_sql_injection(base, manifest):
         r'androidx/', r'android/support/', r'com/google/', r'org/apache/',
         r'kotlin/', r'kotlinx/', r'okhttp', r'retrofit', r'gson',
         r'net/sqlcipher/', r'org/spongycastle/', r'com/squareup/',
+        r'com/tekartik/',  # sqflite Flutter SQLite plugin
+        r'io/requery/',    # requery SQL ORM library
     ]
 
     def is_third_party(path):
@@ -6016,6 +6048,24 @@ def check_raw_sql_queries(base):
         'rawQueryWithFactory': r'Landroid/database/sqlite/SQLiteDatabase;->rawQueryWithFactory',
     }
 
+    # Parameterized method signatures (SAFE - have bind parameters)
+    # These use Object[] or String[] for parameters, so they're safe
+    safe_parameterized_patterns = [
+        r'execSQL\(Ljava/lang/String;\[Ljava/lang/Object;\)V',  # execSQL(String, Object[])
+        r'rawQuery\(Ljava/lang/String;\[Ljava/lang/String;\)',  # rawQuery(String, String[])
+    ]
+
+    # Library paths to exclude from SQL injection checks
+    sql_lib_paths = (
+        'androidx/', 'android/support/', 'com/google/',
+        'com/tekartik/',  # sqflite Flutter plugin
+        'io/flutter/plugins/',  # Flutter plugins
+        'io/requery/',  # Requery database ORM
+        'net/sqlcipher/', 'org/sqlite/',  # SQLCipher
+        'okhttp3/', 'retrofit2/', 'com/squareup/',
+        'kotlin/', 'kotlinx/',
+    )
+
     files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
@@ -6027,7 +6077,7 @@ def check_raw_sql_queries(base):
             rel_path_normalized = rel_path.replace('\\', '/')
 
             # Skip library files
-            if any(lib in rel_path_normalized for lib in ['androidx/', 'android/support/', 'com/google/']):
+            if any(lib in rel_path_normalized for lib in sql_lib_paths):
                 continue
 
             files_to_scan.append((full_path, rel_path))
@@ -6602,6 +6652,8 @@ def check_os_command_injection(base):
     )
 
     def is_library_path(path):
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -6762,12 +6814,15 @@ def check_weak_crypto(base):
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
+        '/org/conscrypt/',  # Google's Conscrypt TLS/crypto provider
         '/org/apache/', '/javax/',
         '/lib/', '/jetified-'
     )
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -6871,6 +6926,10 @@ def check_kotlin_metadata(base):
     Returns (ok, details_html, total_hits).
     Only the first 100 hits are shown; total_hits is the real count.
     Filters out library code to show only app code issues.
+    
+    Security concern: Kotlin Metadata annotations contain class/function
+    information that can help reverse engineers understand the code structure.
+    This is relevant for MASVS-RESILIENCE obfuscation requirements.
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0040/' target='_blank'>MASTG-TEST-0040: Testing for Debugging Symbols</a></div>"
 
@@ -6884,11 +6943,17 @@ def check_kotlin_metadata(base):
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
         '/org/apache/', '/javax/',
+        '/com/livechatinc/',  # LiveChat SDK
+        '/io/flutter/plugins/',  # Flutter plugins
+        '/com/mux/',  # Mux video analytics SDK
+        '/io/sentry/',  # Sentry error tracking
         '/lib/', '/jetified-'
     )
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -6994,6 +7059,8 @@ def check_package_context(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -8393,6 +8460,8 @@ def check_biometric_auth(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -8556,6 +8625,8 @@ def check_flag_secure(base, manifest):
     """
     def is_library_path(rel_path):
         """Check if the file path is from a library (not app code)"""
+        if INCLUDE_LIBS:
+            return False
         library_indicators = [
             'com/google/android/gms/',
             'com/google/android/play/',
@@ -9265,6 +9336,8 @@ def check_pii_location_info(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -9504,11 +9577,15 @@ def check_insecure_randomness(base):
         '/com/airbnb/', '/org/bson/', '/io/jsonwebtoken/',
         '/org/jsoup/',  # jsoup library
         '/j$/',  # Java 8+ backport library (j$ prefix)
+        '/com/mux/',  # Mux video analytics SDK (non-crypto random for analytics)
+        '/org/apache/',  # Apache Commons libraries (math operations)
         '/lib/', '/jetified-'
     )
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -9629,6 +9706,8 @@ def check_insecure_fingerprint_api(base):
 
     def is_library_path(path):
         """Check if path is framework library code (androidx biometric only - NOT FingerprintManagerCompat)"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -9831,6 +9910,8 @@ def check_tls_versions(base):
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
 
     def is_library_path(rel):
+        if INCLUDE_LIBS:
+            return False
         rp = '/' + rel.replace('\\', '/')
         return any(ns in rp for ns in lib_ns)
 
@@ -11026,12 +11107,12 @@ def check_frida_strict_mode(base, wait_secs=7):
         return 'FAIL', severity_note + detail
     elif library_strictmode_calls:
         # Library StrictMode is present but not from app - WARN instead of FAIL
-        info_note = "<div style='background:#d1ecf1; padding:12px; border-left:4px solid #0c5460; font-size:11px; color:#0c5460; margin:10px 0;'>"
+        info_note = "<div class='info-box' style='font-size:12px; margin:10px 0;'>"
         info_note += "<strong>ℹ Information:</strong><br>"
         info_note += "StrictMode calls detected in library/framework code only (Google Play Services, Firebase, Android Framework).<br>"
         info_note += "These are managed by the library vendor and are generally not a security concern.<br>"
         info_note += "<strong>Optional:</strong> If you want to suppress these, configure ProGuard/R8:<br>"
-        info_note += "<code style='background:#b8daff; padding:2px 4px; border-radius:3px; color:#004085;'>-assumenosideeffects class android.os.StrictMode { *; }</code><br>"
+        info_note += "<code style='padding:2px 6px; border-radius:3px;'>-assumenosideeffects class android.os.StrictMode { *; }</code><br>"
         info_note += "</div><br>"
 
         return 'WARN', info_note + detail
@@ -13484,6 +13565,8 @@ def check_pending_intent_flags(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -13895,6 +13978,8 @@ def check_datastore_encryption(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
@@ -14004,6 +14089,8 @@ def check_room_encryption(base):
 
     def is_library_path(path):
         """Check if path is library code"""
+        if INCLUDE_LIBS:
+            return False
         normalized = '/' + path.replace('\\', '/')
         return any(lib in normalized for lib in lib_paths)
 
