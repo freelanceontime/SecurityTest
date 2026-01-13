@@ -48,6 +48,7 @@ LIB_PATHS = (
     '/org/conscrypt/',  # Google's Conscrypt TLS/crypto provider
     '/com/livechatinc/',  # LiveChat SDK
     '/io/flutter/plugins/',  # Flutter plugins (webview, url_launcher, etc.)
+    '/dev/fluttercommunity/',  # Flutter community plugins (share_plus, etc.)
     '/com/mux/',  # Mux video analytics SDK
     '/lib/', '/jetified-'
 )
@@ -579,6 +580,11 @@ HTML_TEMPLATE = '''
 
   .info {{
     color: #2563eb;
+    font-weight: 600;
+  }}
+
+  .skip {{
+    color: #6b7280;
     font-weight: 600;
   }}
 
@@ -1400,6 +1406,10 @@ HTML_TEMPLATE = '''
 
   [data-theme="dark"] .info {{
     color: #60a5fa;
+  }}
+
+  [data-theme="dark"] .skip {{
+    color: #9ca3af;
   }}
 
   /* Dark mode header gradient styling */
@@ -2950,6 +2960,7 @@ def check_kotlin_assert(base):
         '/org/apache/', '/javax/',
         '/com/livechatinc/',  # LiveChat SDK
         '/io/flutter/plugins/',  # Flutter plugins
+        '/dev/fluttercommunity/',  # Flutter community plugins (share_plus, etc.)
         '/com/mux/',  # Mux video analytics SDK
         '/io/sentry/',  # Sentry error tracking
         '/lib/', '/jetified-'
@@ -3207,6 +3218,7 @@ def check_logging(base):
         'javax/',                      # Java extensions
         'com/it_nomads/',              # flutter_secure_storage plugin
         'io/flutter/plugins/',         # Flutter plugins (webview, path_provider, etc.)
+        'dev/fluttercommunity/',       # Flutter community plugins (share_plus, etc.)
         'com/tekartik/',               # sqflite Flutter plugin
         'io/sentry/',                  # Sentry error tracking SDK
         'com/livechatinc/',            # LiveChat SDK
@@ -6945,6 +6957,7 @@ def check_kotlin_metadata(base):
         '/org/apache/', '/javax/',
         '/com/livechatinc/',  # LiveChat SDK
         '/io/flutter/plugins/',  # Flutter plugins
+        '/dev/fluttercommunity/',  # Flutter community plugins (share_plus, etc.)
         '/com/mux/',  # Mux video analytics SDK
         '/io/sentry/',  # Sentry error tracking
         '/lib/', '/jetified-'
@@ -9462,58 +9475,169 @@ def check_pii_wifi_info(base):
 def check_signature_schemes(apk_path):
     """
     Runs `apksigner verify --verbose --print-certs` on the APK and reports:
-      • which schemes (v1, v2, v3) are present/missing
-      • checks for weak hash algorithms (SHA1withRSA - vulnerable to collisions)
+      • which schemes (v1, v2, v3, v4) are present/missing
+      • checks for weak hash algorithms (SHA1withRSA, MD5 - vulnerable to collisions)
       • flags Janus (CVE-2017-13156) correctly:
          - v1 ONLY: CRITICAL - vulnerable on all Android 5.0-8.0
          - v1 + v2/v3: WARNING - still vulnerable on Android 5.0-7.x
          - v2/v3 only (no v1): SECURE - but breaks Android < 7.0 compatibility
       • Android 5.0-7.x do NOT properly enforce v2/v3, so v1 presence = vulnerability
     """
-    out = run_cmd(f"apksigner verify --verbose --print-certs {apk_path}")
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0224/' target='_blank'>MASTG-TEST-0224: Usage of Insecure Signature Version</a></div>"
+    
+    # First verify the APK file actually exists
+    if not apk_path or not os.path.exists(apk_path):
+        return None, (
+            f"<div style='color:#fd7e14;'>SKIPPED: APK file not found</div>"
+            f"<div style='margin-left:20px;'>Path: <code>{apk_path or 'None'}</code></div>"
+            f"<div style='margin-left:20px;'>The original APK file is required for signature verification.</div>"
+            f"<div style='margin-left:20px;'><strong>Tip:</strong> Use <code>-f /path/to/app.apk</code> to specify the APK file directly.</div>"
+            f"{mastg_ref}"
+        )
+    
+    # Try running apksigner
+    try:
+        result = subprocess.run(
+            ['apksigner', 'verify', '--verbose', '--print-certs', apk_path],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        out = result.stdout + result.stderr
+    except FileNotFoundError:
+        return False, f"<div style='color:#dc3545;'>ERROR: apksigner not found in PATH. Please install Android SDK Build Tools.</div>{mastg_ref}"
+    except subprocess.TimeoutExpired:
+        return False, f"<div style='color:#dc3545;'>ERROR: apksigner timed out while verifying APK.</div>{mastg_ref}"
+    except Exception as e:
+        return False, f"<div style='color:#dc3545;'>ERROR: Failed to run apksigner: {str(e)}</div>{mastg_ref}"
+    
+    # Clean output of ANSI escape codes and non-printable characters
     clean = re.sub(r"\x1b\[[0-9;]*m", "", out)
     clean = re.sub(r"[^\x20-\x7E\n]", "", clean)
 
-    # Detect schemes
-    present = []
-    for ver, marker in [
-        ("v1", r"Verified using v1 scheme.*: true"),
-        ("v2", r"Verified using v2 scheme.*: true"),
-        ("v3", r"Verified using v3 scheme.*: true")
-    ]:
-        if re.search(marker, clean):
-            present.append(ver)
+    # Check for verification errors first
+    if "DOES NOT VERIFY" in clean.upper() or result.returncode != 0:
+        # Still try to extract scheme info even if verification failed
+        pass
 
-    all_schemes = ["v1", "v2", "v3"]
+    # Detect schemes - use case-insensitive matching and more flexible patterns
+    present = []
+    scheme_details = {}
+    for ver, marker in [
+        ("v1", r"Verified using v1 scheme.*?:\s*(true|false)"),
+        ("v2", r"Verified using v2 scheme.*?:\s*(true|false)"),
+        ("v3", r"Verified using v3 scheme.*?:\s*(true|false)"),
+        ("v4", r"Verified using v4 scheme.*?:\s*(true|false)"),
+    ]:
+        match = re.search(marker, clean, re.IGNORECASE)
+        if match:
+            is_present = match.group(1).lower() == 'true'
+            scheme_details[ver] = is_present
+            if is_present:
+                present.append(ver)
+
+    all_schemes = ["v1", "v2", "v3", "v4"]
     missing = [v for v in all_schemes if v not in present]
 
-    # Build base report with clear structure
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0224/' target='_blank'>MASTG-TEST-0224: Usage of Insecure Signature Version</a></div>"
-
-    if not present:
-        return False, f"No signature schemes found{mastg_ref}"
+    # If no schemes detected, provide more debug info
+    if not present and not scheme_details:
+        error_msg = "<div style='color:#dc3545;'>No signature schemes found.</div>"
+        # Check if apksigner gave an error
+        if "error" in clean.lower() or "exception" in clean.lower():
+            error_msg += f"<div style='margin-top:5px;'><strong>apksigner error:</strong> <code>{clean[:500]}</code></div>"
+        elif not clean.strip():
+            error_msg += "<div style='margin-top:5px;'>apksigner returned empty output. Ensure the APK path is correct and accessible.</div>"
+        else:
+            # Show first part of output for debugging
+            preview = clean[:300].replace('<', '&lt;').replace('>', '&gt;')
+            error_msg += f"<div style='margin-top:5px;'><strong>Raw output preview:</strong> <code>{preview}</code></div>"
+        return False, error_msg + mastg_ref
 
     report_lines = []
     has_failures = False
 
-    # INFO: Signature scheme versions
+    # INFO: Signature scheme versions with detailed status
     info_parts = []
-    info_parts.append(f"<strong>Present:</strong> {', '.join(present)}")
-    if missing:
-        info_parts.append(f"<strong>Missing:</strong> {', '.join(missing)}")
+    if present:
+        info_parts.append(f"<strong>Present:</strong> {', '.join(present)}")
+    # Show explicitly false schemes
+    false_schemes = [v for v, status in scheme_details.items() if not status]
+    if false_schemes:
+        info_parts.append(f"<strong>Not Used:</strong> {', '.join(false_schemes)}")
     report_lines.append("<div style='color:#0d6efd;'>INFO: " + " | ".join(info_parts) + "</div>")
 
-    # Check certificate hash algorithm (SHA1 vs SHA256)
-    sha1_detected = False
-    if re.search(r'(SHA1withRSA|SHA-1)', clean, re.IGNORECASE):
-        sha1_detected = True
+    # Extract certificate and key details from apksigner output
+    cert_info = []
+    
+    # Extract certificate fingerprints (these are just identifiers, NOT security concerns)
+    sha256_digest = re.search(r'certificate SHA-256 digest[:\s]*([a-f0-9]+)', clean, re.IGNORECASE)
+    sha1_digest = re.search(r'certificate SHA-1 digest[:\s]*([a-f0-9]+)', clean, re.IGNORECASE)
+    
+    if sha256_digest:
+        cert_info.append(f"<strong>SHA-256:</strong> <code>{sha256_digest.group(1)[:32]}...</code>")
+    if sha1_digest:
+        cert_info.append(f"<strong>SHA-1 (fingerprint):</strong> <code>{sha1_digest.group(1)}</code>")
+    
+    # Extract key algorithm and size - apksigner uses "key algorithm" not "public key type"
+    key_algo = re.search(r'key algorithm[:\s]*(\w+)', clean, re.IGNORECASE)
+    key_size = re.search(r'key size.*?(\d+)', clean, re.IGNORECASE)
+    
+    if key_algo or key_size:
+        key_info = []
+        if key_algo:
+            key_info.append(key_algo.group(1))
+        if key_size:
+            key_info.append(f"{key_size.group(1)} bits")
+        cert_info.append(f"<strong>Key:</strong> {' '.join(key_info)}")
+    
+    # Extract certificate DN for context
+    cert_dn = re.search(r'certificate DN[:\s]*(.+?)(?:\n|$)', clean, re.IGNORECASE)
+    if cert_dn:
+        dn_value = cert_dn.group(1).strip()[:80]
+        cert_info.append(f"<strong>DN:</strong> {dn_value}")
+    
+    if cert_info:
+        report_lines.append("<div style='margin-top:5px;color:#6c757d;'>Certificate: " + " | ".join(cert_info) + "</div>")
+
+    # Check for weak signature algorithms - ONLY relevant for v1 (JAR) signing
+    # Note: SHA-1 fingerprints shown by apksigner are NOT the signing algorithm
+    # They are just identifiers and do NOT indicate weak cryptography
+    weak_sig_algo = False
+    weak_algo_name = None
+    
+    # Look for actual signature algorithm declarations (only appears with v1 signing issues)
+    # Pattern: "Signature algorithm: SHA1withRSA" or similar
+    sig_algo_match = re.search(r'Signature algorithm[:\s]*(SHA1with\w+|MD5with\w+)', clean, re.IGNORECASE)
+    if sig_algo_match:
+        weak_sig_algo = True
+        weak_algo_name = sig_algo_match.group(1)
+    
+    # Also check for explicit weak algorithm warnings from apksigner
+    if re.search(r'uses.*weak.*algorithm|weak.*signature|SHA-?1.*signing', clean, re.IGNORECASE):
+        weak_sig_algo = True
+        weak_algo_name = weak_algo_name or "SHA1-based"
+    
+    # Only flag weak algorithms if v1 signing is in use (v2/v3 always use strong algorithms)
+    if weak_sig_algo and "v1" in present:
         has_failures = True
         report_lines.append(
-            "<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Weak Signature Algorithm</strong></div>"
-            "<div style='margin-left:20px;'>Certificate uses <code>SHA1withRSA</code>. "
-            "SHA-1 is cryptographically broken and vulnerable to collision attacks.</div>"
-            "<div style='margin-left:20px;'><strong>Recommendation:</strong> Re-sign with <code>SHA256withRSA</code> or stronger.</div>"
+            f"<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Weak Signature Algorithm</strong></div>"
+            f"<div style='margin-left:20px;'>v1 (JAR) signing uses <code>{weak_algo_name}</code>.</div>"
+            "<div style='margin-left:20px;'>SHA-1/MD5 based algorithms are cryptographically broken and vulnerable to collision attacks.</div>"
+            "<div style='margin-left:20px;'><strong>Recommendation:</strong> Re-sign with v2/v3 scheme using SHA-256 or stronger.</div>"
         )
+
+    # Check key size (RSA < 2048 is weak)
+    if key_algo and key_size:
+        kt = key_algo.group(1).upper()
+        ks = int(key_size.group(1))
+        if kt == 'RSA' and ks < 2048:
+            has_failures = True
+            report_lines.append(
+                f"<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Weak Key Size</strong></div>"
+                f"<div style='margin-left:20px;'>RSA key size is {ks} bits, which is below the recommended minimum of 2048 bits.</div>"
+                f"<div style='margin-left:20px;'><strong>Recommendation:</strong> Generate a new signing key with at least 2048-bit RSA or use ECDSA.</div>"
+            )
 
     # Janus vulnerability logic (CVE-2017-13156)
     # CORRECT vulnerability assessment:
@@ -9541,6 +9665,14 @@ def check_signature_schemes(apk_path):
                 "Android 5.0-7.x devices do NOT properly enforce v2/v3 validation and remain vulnerable.</div>"
                 "<div style='margin-left:20px;'><strong>Recommendation:</strong> Consider dropping support for Android < 7.0 and removing v1 signing entirely.</div>"
             )
+    
+    # Check for v3 without v2 (unusual configuration)
+    if "v3" in present and "v2" not in present and "v1" not in present:
+        report_lines.append(
+            "<div style='margin-top:10px;'><strong style='color:#fd7e14;'>WARNING: v3 Only Signing</strong></div>"
+            "<div style='margin-left:20px;'>APK uses only v3 signing. This requires Android 9.0+ (API 28+).</div>"
+            "<div style='margin-left:20px;'>Devices running Android 7.0-8.1 will not be able to install this APK.</div>"
+        )
 
     # Final verdict
     report_lines.append(mastg_ref)
@@ -9549,10 +9681,10 @@ def check_signature_schemes(apk_path):
 
     # If we have v2/v3 WITHOUT v1, we're fully protected
     if "v2" in present or "v3" in present:
-        report_lines.append("<div style='margin-top:10px;color:#198754;'>Secure signature configuration</div>")
+        report_lines.insert(0, "<div style='margin-bottom:10px;color:#198754;'><strong>✓ Secure signature configuration</strong></div>")
         return True, "<br>\n".join(report_lines)
 
-    # No proper signatures
+    # No proper signatures (shouldn't reach here, but safety fallback)
     return False, "<br>\n".join(report_lines)
     
 def check_insecure_randomness(base):
@@ -13560,7 +13692,12 @@ def check_pending_intent_flags(base):
         '/com/google/common/', '/com/google/android/play/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
-        '/io/reactivex/', '/lib/', '/jetified-'
+        '/io/reactivex/', '/lib/', '/jetified-',
+        '/io/flutter/plugins/',  # Flutter plugins
+        '/dev/fluttercommunity/',  # Flutter community plugins (share_plus, etc.)
+        '/com/livechatinc/',  # LiveChat SDK
+        '/com/mux/',  # Mux video analytics SDK
+        '/io/sentry/',  # Sentry error tracking
     )
 
     def is_library_path(path):
@@ -15190,8 +15327,14 @@ def main():
     if apk_path:
         print("[*] Checking APK signature schemes…")
         ok, det = check_signature_schemes(apk_path)
-        cls    = 'pass' if ok else 'fail'
-        status = 'PASS' if ok else 'FAIL'
+        # Handle skipped case (ok is None when APK file not found)
+        if ok is None:
+            cls = 'skip'
+            status = 'SKIPPED'
+            print("[*] APK file not found - signature check skipped")
+        else:
+            cls = 'pass' if ok else 'fail'
+            status = 'PASS' if ok else 'FAIL'
         block = (
             "<details>"
             f"<summary class='{cls}'><span class='bullet'></span> "
