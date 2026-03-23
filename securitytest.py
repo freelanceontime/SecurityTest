@@ -653,6 +653,8 @@ HTML_TEMPLATE = '''
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    min-width: 60px;
+    text-align: center;
   }}
 
   summary.pass .check-status {{
@@ -7381,7 +7383,7 @@ def check_certificate_pinning(base):
 
 def check_sharedprefs_encryption(base):
     """
-    Check if SharedPreferences usage implements encryption (EncryptedSharedPreferences).
+    Check if SharedPreferences usage implements encryption.
     FAIL if plain SharedPreferences found without encryption.
     Shows actual API calls with context for better understanding.
     """
@@ -7498,6 +7500,7 @@ def check_sharedprefs_encryption(base):
     ]
     if encrypted_count > 0:
         summary_lines.append(f"Encrypted usage found: {encrypted_count} instance(s)")
+        summary_lines.append("Note: EncryptedSharedPreferences is deprecated; prefer Keystore-backed value encryption or encrypted DataStore for new implementations")
     if unencrypted_count > 0:
         summary_lines.append(f"WARNING: Unencrypted usage found in app code: {unencrypted_count} instance(s)")
     if encrypted_count == 0 and unencrypted_count == 0:
@@ -7525,9 +7528,9 @@ def check_sharedprefs_encryption(base):
         # Add section header for encrypted usage
         finding_blocks.append(
             FindingBlock(
-                title="✓ ENCRYPTED SharedPreferences Usage (Secure)",
-                subtitle=f"Found {encrypted_count} instance(s) using EncryptedSharedPreferences",
-                code="These are properly secured and do not pose a risk.",
+                title="✓ ENCRYPTED SharedPreferences Usage (Legacy Secure Pattern)",
+                subtitle=f"Found {encrypted_count} encrypted instance(s) (includes deprecated EncryptedSharedPreferences)",
+                code="Encryption is present, but EncryptedSharedPreferences is deprecated. Prefer Keystore-backed value encryption or encrypted DataStore for new code.",
                 code_language="",
                 open_by_default=False,
             )
@@ -7564,7 +7567,7 @@ def check_sharedprefs_encryption(base):
         FindingBlock(
             title="⚠ UNENCRYPTED SharedPreferences Usage (Insecure)",
             subtitle=f"Found {unencrypted_count} instance(s) - REQUIRES ATTENTION",
-            code="These store data in plaintext and should be migrated to EncryptedSharedPreferences.",
+            code="These store data in plaintext. Migrate sensitive values to Keystore-backed encryption (for SharedPreferences) or encrypted DataStore; avoid introducing deprecated EncryptedSharedPreferences in new code.",
             code_language="",
             open_by_default=True,
         )
@@ -13828,7 +13831,7 @@ def check_pending_intent_flags(base):
     vulnerable_files = []
     mutable_files = []
     update_current_files = []
-    immutable_files = set()
+    immutable_files = []   # list of (rel, line_num, code_snippet) — same shape as others
     library_files = []  # Track library files separately
 
     files_to_scan = []
@@ -13937,7 +13940,7 @@ def check_pending_intent_flags(base):
                     code_snippet = '\n'.join(ctx)
 
                 if file_has_immutable:
-                    immutable_files.add(rel)
+                    immutable_files.append((rel, line_num, code_snippet))
                 elif file_has_mutable:
                     mutable_files.append((rel, line_num, code_snippet))
                 elif file_has_update:
@@ -13979,7 +13982,7 @@ def check_pending_intent_flags(base):
 
     findings = []
 
-    def add_findings(files, subtitle):
+    def add_findings(files, subtitle, expand=False):
         for rel, line_num, code_snippet in files[:15]:
             full = os.path.abspath(os.path.join(base, rel))
             findings.append(
@@ -13989,13 +13992,14 @@ def check_pending_intent_flags(base):
                     link=f"file://{full}",
                     code=code_snippet or "",
                     code_language="smali",
-                    open_by_default=True if status == "FAIL" else False,
+                    open_by_default=expand,
                 )
             )
 
-    add_findings(vulnerable_files, "Missing FLAG_IMMUTABLE")
-    add_findings(mutable_files, "Uses FLAG_MUTABLE")
-    add_findings(update_current_files, "Uses FLAG_UPDATE_CURRENT without FLAG_IMMUTABLE")
+    add_findings(vulnerable_files,     "Missing FLAG_IMMUTABLE",                        expand=True)
+    add_findings(mutable_files,        "Uses FLAG_MUTABLE",                             expand=True)
+    add_findings(update_current_files, "Uses FLAG_UPDATE_CURRENT without FLAG_IMMUTABLE", expand=False)
+    add_findings(immutable_files,      "FLAG_IMMUTABLE present — review only",          expand=False)
 
     return TestResult(
         name="PendingIntent Flags",
