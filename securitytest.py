@@ -10079,10 +10079,19 @@ def check_tls_versions(base):
         r'Ljavax/net/ssl/SSLEngine;->setEnabledProtocols\(\[Ljava/lang/String;\)',# smali
         r'Ljavax/net/ssl/SSLParameters;->setProtocols\(\[Ljava/lang/String;\)',   # smali
         r'SSLParameters\.setProtocols\s*\(',
+        # OkHttp ConnectionSpec with explicit TLS version list
+        r'Lokhttp3/TlsVersion;->TLS_1_0:Lokhttp3/TlsVersion;',                    # smali enum ref
+        r'Lokhttp3/TlsVersion;->TLS_1_1:Lokhttp3/TlsVersion;',
+        r'TlsVersion\.TLS_1_0',                                                    # Java/Kotlin source
+        r'TlsVersion\.TLS_1_1',
+        r'ConnectionSpec\.Builder.*tlsVersions.*TLS_1_[01]',                       # ConnectionSpec builder
     ]
 
     use_regexes = [re.compile(p) for p in use_patterns]
-    indicator_re = re.compile(r'setEnabledProtocols|setProtocols|SSLContext\.getInstance')
+    indicator_re = re.compile(
+        r'setEnabledProtocols|setProtocols|SSLContext\.getInstance'
+        r'|TlsVersion\.TLS_1_0|TlsVersion\.TLS_1_1|TLS_1_0|TLS_1_1'
+    )
 
     files_to_scan = []
     for root, _, files in os.walk(base):
@@ -10252,37 +10261,106 @@ def check_frida_tls_negotiation(base, wait_secs=12):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # 3) Frida JS – prints "VERDICT: …" lines we parse below
+    #
+    # MASVS-NETWORK-1 requires TLS 1.2+ only.
+    # The correct test is NOT whether legacy TLS was negotiated (servers may reject it),
+    # but whether the socket's ENABLED protocol set includes TLS 1.0 or 1.1.
+    # We intercept getEnabledProtocols() BEFORE startHandshake() to capture this.
     jscode = r"""
     (function () {
-      // ---- Java layer -------------------------------------------------
       function safe(fn) { try { fn(); } catch (e) {} }
 
       safe(function () {
         Java.perform(function () {
 
-          // SSLContext.getInstance logging (visibility)
-          safe(function () {
-            var SC = Java.use('javax.net.ssl.SSLContext');
-            SC.getInstance.overload('java.lang.String').implementation = function (alg) {
-              console.log('[TLS-INIT] SSLContext.getInstance("' + alg + '")');
-              return this.getInstance(alg);
-            };
-          });
+          // ----------------------------------------------------------------
+          // PRIMARY TEST: capture getEnabledProtocols() before each handshake.
+          // This tells us what the socket is WILLING to accept, regardless of
+          // what the server ultimately negotiates. This is the MASVS-NETWORK-1
+          // relevant check — not what was negotiated but what is permitted.
+          // ----------------------------------------------------------------
+          function hookPreHandshake(className) {
+            safe(function () {
+              var C = Java.use(className);
+              if (!C.startHandshake) return;
+              C.startHandshake.overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                  // Read enabled protocols BEFORE the handshake
+                  try {
+                    var enabled = this.getEnabledProtocols();
+                    var listed = [], bad = [];
+                    for (var i = 0; i < enabled.length; i++) {
+                      var v = enabled[i] + '';
+                      listed.push(v);
+                      if (v === 'TLSv1' || v === 'TLSv1.1') bad.push(v);
+                    }
+                    console.log('[PRE-SHAKE] ' + className + ' enabled=' + listed.join(','));
+                    if (bad.length > 0) {
+                      console.log('VERDICT: LEGACY_IN_ENABLED_SET (' + className + ') bad=' + bad.join(',') + ' all=' + listed.join(','));
+                    }
+                  } catch (e) {}
 
-          // OkHttp negotiated TLS (3.x/4.x)
+                  // Call original, then report negotiated version
+                  var ret = ov.call(this);
+                  try {
+                    var sess = this.getSession();
+                    var proto = sess.getProtocol();
+                    var cipher = sess.getCipherSuite();
+                    console.log('[NEGOTIATED] ' + className + ' tls=' + proto + ' cipher=' + cipher);
+                    if (proto === 'TLSv1' || proto === 'TLSv1.1') {
+                      console.log('VERDICT: LEGACY_NEGOTIATED (' + className + ')');
+                    }
+                  } catch (e) {}
+                  return ret;
+                };
+              });
+              console.log('[HOOK] ' + className + '.startHandshake armed');
+            });
+          }
+
+          // ----------------------------------------------------------------
+          // SECONDARY: catch explicit setEnabledProtocols() calls
+          // (app code intentionally narrowing or expanding the protocol set)
+          // ----------------------------------------------------------------
+          function hookSetEnabledProtocols(className) {
+            safe(function () {
+              var C = Java.use(className);
+              if (!C.setEnabledProtocols) return;
+              C.setEnabledProtocols.overloads.forEach(function (ov) {
+                ov.implementation = function (arr) {
+                  try {
+                    var bad = [], listed = [];
+                    for (var i = 0; i < arr.length; i++) {
+                      var v = arr[i] + '';
+                      listed.push(v);
+                      if (v === 'TLSv1' || v === 'TLSv1.1') bad.push(v);
+                    }
+                    if (bad.length > 0) {
+                      console.log('VERDICT: LEGACY_SET_BY_APP (' + className + ') bad=' + bad.join(',') + ' all=' + listed.join(','));
+                    }
+                  } catch (e) {}
+                  return ov.call(this, arr);
+                };
+              });
+            });
+          }
+
+          // ----------------------------------------------------------------
+          // OkHttp: report negotiated version post-handshake
+          // ----------------------------------------------------------------
           safe(function () {
             var RC = Java.use('okhttp3.internal.connection.RealConnection');
-            function hook(ov) {
+            function hookOkHttp(ov) {
               ov.implementation = function () {
                 var ret = ov.apply(this, arguments);
                 try {
                   var hs = this.handshake();
                   if (hs) {
                     var tv = hs.tlsVersion();
-                    var cs = hs.cipherSuite();
                     var tname = tv ? tv.javaName() : '(null)';
+                    var cs = hs.cipherSuite();
                     var cname = cs ? cs.javaName() : '(null)';
-                    console.log('[OKHTTP] tls=' + tname + ' cipher=' + cname);
+                    console.log('[OKHTTP] negotiated tls=' + tname + ' cipher=' + cname);
                     if (tname === 'TLSv1' || tname === 'TLSv1.1') {
                       console.log('VERDICT: LEGACY_NEGOTIATED (OkHttp)');
                     }
@@ -10291,79 +10369,46 @@ def check_frida_tls_negotiation(base, wait_secs=12):
                 return ret;
               };
             }
-            if (RC['connectTls$okhttp']) RC['connectTls$okhttp'].overloads.forEach(hook);
-            else if (RC.connectTls)      RC.connectTls.overloads.forEach(hook);
+            if (RC['connectTls$okhttp']) RC['connectTls$okhttp'].overloads.forEach(hookOkHttp);
+            else if (RC.connectTls) RC.connectTls.overloads.forEach(hookOkHttp);
           });
 
-          // Helpers for JSSE/Conscrypt sockets
-          function hookEnabledProtocols(className) {
-            safe(function () {
-              var C = Java.use(className);
-              if (!C.setEnabledProtocols || !C.setEnabledProtocols.overloads) return;
-              C.setEnabledProtocols.overloads.forEach(function (ov) {
-                ov.implementation = function (arr) {
-                  try {
-                    // Read String[] -> JS list safely
-                    var bad = false, listed = [];
-                    for (var i = 0; i < arr.length; i++) {
-                      var v = arr[i] + '';
-                      listed.push(v);
-                      if (v === 'TLSv1' || v === 'TLSv1.1') bad = true;
-                    }
-                    if (bad) {
-                      console.log('VERDICT: LEGACY_ENABLED_BY_APP (' + className + ') ' + listed.join(','));
-                    }
-                  } catch (e) {}
-                  return ov.call(this, arr);
-                };
-              });
-              console.log('[TLS-INIT] hook ' + className + '.setEnabledProtocols');
-            });
-          }
-
-          function hookStartHandshake(className) {
-            safe(function () {
-              var C = Java.use(className);
-              if (!C.startHandshake) return;
-              var orig = C.startHandshake;
-              C.startHandshake.implementation = function () {
-                var ret = orig.call(this);
-                try {
-                  var sess = this.getSession();
-                  var proto = sess.getProtocol();
-                  var cipher = sess.getCipherSuite();
-                  console.log('[JSSE] ' + className + ' tls=' + proto + ' cipher=' + cipher);
-                  if (proto === 'TLSv1' || proto === 'TLSv1.1') {
-                    console.log('VERDICT: LEGACY_NEGOTIATED (' + className + ')');
-                  }
-                } catch (e) {}
-                return ret;
-              };
-              console.log('[JSSE] hooked ' + className + '.startHandshake()');
-            });
-          }
-
-          var impls = [
+          // Hook all known Conscrypt/JSSE socket implementations
+          var socketImpls = [
             'com.android.org.conscrypt.ConscryptFileDescriptorSocket',
             'com.android.org.conscrypt.OpenSSLSocketImpl',
             'com.android.org.conscrypt.Java8EngineSocket',
             'org.conscrypt.ConscryptFileDescriptorSocket',
-            'com.google.android.gms.org.conscrypt.ConscryptFileDescriptorSocket'
+            'com.google.android.gms.org.conscrypt.ConscryptFileDescriptorSocket',
+            'javax.net.ssl.SSLSocket',
           ];
-          impls.forEach(hookEnabledProtocols);
-          impls.forEach(hookStartHandshake);
+          socketImpls.forEach(hookPreHandshake);
+          socketImpls.forEach(hookSetEnabledProtocols);
+
+          // SSLContext.getInstance visibility
+          safe(function () {
+            var SC = Java.use('javax.net.ssl.SSLContext');
+            SC.getInstance.overload('java.lang.String').implementation = function (alg) {
+              console.log('[TLS-CTX] SSLContext.getInstance("' + alg + '")');
+              if (alg === 'TLSv1' || alg === 'TLSv1.1') {
+                console.log('VERDICT: LEGACY_CONTEXT_CREATED alg=' + alg);
+              }
+              return this.getInstance(alg);
+            };
+          });
         });
       });
 
-      // ---- Native (BoringSSL) layer -----------------------------------
+      // ---- Native BoringSSL layer (WebView / Cronet) -------------------
       safe(function () {
         var resolver = new ApiResolver('module');
         function str(p) { return (p && !p.isNull()) ? Memory.readUtf8String(p) : '(null)'; }
-        var gvMap = {}, gcMap = {}, gcnMap = {};
+        var gvMap = {};
         function cache(mod) {
-          if (!gvMap[mod]) { var f = Module.findExportByName(mod, 'SSL_get_version'); if (f) gvMap[mod] = new NativeFunction(f, 'pointer', ['pointer']); }
-          if (!gcMap[mod]) { var f = Module.findExportByName(mod, 'SSL_get_current_cipher'); if (f) gcMap[mod] = new NativeFunction(f, 'pointer', ['pointer']); }
-          if (!gcnMap[mod]){ var f = Module.findExportByName(mod, 'SSL_CIPHER_get_name'); if (f) gcnMap[mod] = new NativeFunction(f, 'pointer', ['pointer']); }
+          if (!gvMap[mod]) {
+            var f = Module.findExportByName(mod, 'SSL_get_version');
+            if (f) gvMap[mod] = new NativeFunction(f, 'pointer', ['pointer']);
+          }
         }
         function attach(sym) {
           cache(sym.moduleName);
@@ -10371,9 +10416,12 @@ def check_frida_tls_negotiation(base, wait_secs=12):
             onEnter: function (args) { this.ssl = args[0]; this.mod = sym.moduleName; },
             onLeave: function () {
               try {
-                var ver = gvMap[this.mod] ? str(gvMap[this.mod](this.ssl)) : '(unknown)';
-                if (ver === 'TLSv1' || ver === 'TLSv1.1') {
-                  console.log('VERDICT: LEGACY_NEGOTIATED (native:' + this.mod + ')');
+                var ver = gvMap[this.mod] ? str(gvMap[this.mod](this.ssl)) : null;
+                if (ver) {
+                  console.log('[NATIVE] tls=' + ver + ' mod=' + this.mod);
+                  if (ver === 'TLSv1' || ver === 'TLSv1.1') {
+                    console.log('VERDICT: LEGACY_NEGOTIATED (native:' + this.mod + ')');
+                  }
                 }
               } catch (e) {}
             }
@@ -10389,12 +10437,8 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         var dlopen = Module.findExportByName(null, 'android_dlopen_ext') || Module.findExportByName(null, 'dlopen');
         if (dlopen) {
           Interceptor.attach(dlopen, {
-            onEnter: function (args) {
-              this.path = args[0].isNull() ? null : Memory.readUtf8String(args[0]);
-            },
-            onLeave: function () {
-              if (this.path && /ssl|boringssl|cronet|webview/i.test(this.path)) arm();
-            }
+            onEnter: function (args) { this.path = args[0].isNull() ? null : Memory.readUtf8String(args[0]); },
+            onLeave: function () { if (this.path && /ssl|boringssl|cronet|webview/i.test(this.path)) arm(); }
           });
         }
       });
@@ -10429,9 +10473,13 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     logs = interactive_frida_monitor(proc, "TLS NEGOTIATION", instructions)
 
     # Parse collected logs for verdicts
-    legacy_neg = any('VERDICT: LEGACY_NEGOTIATED' in line for line in logs)
-    legacy_enabled = any('VERDICT: LEGACY_ENABLED_BY_APP' in line for line in logs)
-    tls_v1_context = sum(1 for line in logs if 'SSLContext.getInstance("TLSv1")' in line)
+    legacy_neg      = any('VERDICT: LEGACY_NEGOTIATED'       in line for line in logs)
+    legacy_enabled  = any('VERDICT: LEGACY_IN_ENABLED_SET'   in line for line in logs)
+    legacy_set      = any('VERDICT: LEGACY_SET_BY_APP'       in line for line in logs)
+    legacy_ctx      = any('VERDICT: LEGACY_CONTEXT_CREATED'  in line for line in logs)
+    # Treat any form of legacy enablement as a violation
+    legacy_enabled  = legacy_enabled or legacy_set or legacy_ctx
+    tls_v1_context  = sum(1 for line in logs if '[TLS-CTX]' in line and 'TLSv1' in line)
 
     # 6) cleanup
     proc.terminate()
@@ -10452,16 +10500,20 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     summary_parts = []
 
     if legacy_neg:
-        summary_parts.append("<div style='color:#dc3545'><strong>⚠ CRITICAL: TLS 1.0/1.1 WAS NEGOTIATED</strong></div>")
-        summary_parts.append("<div>The app successfully connected using legacy TLS during this test session!</div>")
+        summary_parts.append("<div style='color:#dc3545'><strong>FAIL: TLS 1.0/1.1 WAS NEGOTIATED</strong></div>")
+        summary_parts.append("<div>The app successfully completed a handshake using legacy TLS during this session. MASVS-NETWORK-1 requires TLS 1.2 minimum.</div>")
     elif legacy_enabled:
-        summary_parts.append("<div style='color:#dc3545'><strong>⚠ WARNING: TLS 1.0/1.1 IS ENABLED BY APP</strong></div>")
-        summary_parts.append("<div><strong>Vulnerability:</strong> The app explicitly enables legacy TLS versions (TLSv1/TLSv1.1) via <code>setEnabledProtocols()</code> or <code>SSLContext.getInstance(\"TLSv1\")</code></div>")
+        summary_parts.append("<div style='color:#dc3545'><strong>FAIL: TLS 1.0/1.1 IS IN THE SOCKET'S ENABLED PROTOCOL SET</strong></div>")
+        summary_parts.append(
+            "<div><strong>How this was detected:</strong> <code>getEnabledProtocols()</code> was intercepted "
+            "<em>before</em> each TLS handshake. TLS 1.0 or 1.1 appeared in the enabled set — meaning the socket "
+            "is willing to accept these versions even if modern servers reject them. A server configured to accept "
+            "legacy TLS, or an active MitM attacker performing a downgrade, could exploit this.</div>"
+        )
         if tls_v1_context > 0:
-            summary_parts.append(f"<div style='margin-top:5px;'>• Detected <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code></div>")
-        summary_parts.append("<div style='margin-top:5px;'><strong>Risk:</strong> Even though modern TLS 1.3 was negotiated during this test, enabling legacy protocols makes the app vulnerable to:</div>")
-        summary_parts.append("<ul style='margin:5px 0 5px 20px;'><li>MitM downgrade attacks - attacker can force TLS 1.0/1.1 connection</li><li>Known TLS 1.0/1.1 vulnerabilities (BEAST, POODLE, etc.)</li></ul>")
-        summary_parts.append("<div><strong>Observed:</strong> All {0} connections used TLS 1.3 because servers rejected legacy versions, but app code still allows them.</div>".format(okhttp_calls + jsse_calls))
+            summary_parts.append(f"<div style='margin-top:5px;'>• <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code> detected</div>")
+        summary_parts.append("<div style='margin-top:5px;'><strong>Risk:</strong> BEAST, POODLE, downgrade attacks (TLS 1.0/1.1 were deprecated by RFC 8996, 2021).</div>")
+        summary_parts.append("<div><strong>Fix:</strong> Ensure the app does not call <code>setEnabledProtocols()</code> with legacy versions. On Android 10+ the platform defaults to TLS 1.2+ — do not override this.</div>")
     else:
         # Check if actual network connections happened
         if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
@@ -13710,7 +13762,12 @@ def check_pending_intent_flags(base):
     ]
 
     # Flag patterns - these are static final int constants (const/high16 or const)
-    flag_immutable = r'0x4000000|67108864'  # FLAG_IMMUTABLE = 0x04000000 (67108864)
+    # FLAG_IMMUTABLE = 0x04000000. Must also match combined values where the bit is set:
+    #   0x4000000  = FLAG_IMMUTABLE alone
+    #   0xc000000  = FLAG_IMMUTABLE | FLAG_UPDATE_CURRENT  (most common, via const/high16)
+    #   0x44000000 = FLAG_IMMUTABLE | FLAG_ONE_SHOT
+    #   0x4c000000 = FLAG_IMMUTABLE | FLAG_ONE_SHOT | FLAG_UPDATE_CURRENT
+    flag_immutable = r'0x[0-9a-fA-F]*4[0]{6}|0xc000000|0x4c000000|0x44000000|67108864'
     flag_mutable = r'0x2000000|33554432'    # FLAG_MUTABLE = 0x02000000 (33554432)
     flag_update = r'0x8000000[08]|134217728'  # FLAG_UPDATE_CURRENT = 0x08000000 (134217728)
 
@@ -13768,35 +13825,91 @@ def check_pending_intent_flags(base):
                 if not has_pending_intent:
                     continue
 
-                has_immutable = re.search(flag_immutable, content)
-                has_mutable = re.search(flag_mutable, content)
-                has_update_current = re.search(flag_update, content)
+                # Per-call analysis: for each PendingIntent call, look at the
+                # 30 lines of context before it to find what flag value is loaded.
+                # Parse the hex constant and test bit 0x04000000 (FLAG_IMMUTABLE).
+                # This is more accurate than whole-file regex because it handles:
+                #  - Combined constants: 0xc000000 (FLAG_UPDATE_CURRENT|FLAG_IMMUTABLE)
+                #  - API-version-gated: SDK_INT branch with 0xc000000 in modern path
+                #  - Any future combined values with the immutable bit set
+                FLAG_IMMUTABLE_BIT = 0x04000000
+                FLAG_MUTABLE_BIT   = 0x02000000
+                const_re = re.compile(
+                    r'const(?:/high16|/16|/4|)\s+\w+,\s*(0x[0-9a-fA-F]+|-?\d+)'
+                )
 
-                # Find the line with PendingIntent call for snippet with context
+                def flags_from_context(line_index):
+                    """Return set of hex flag values loaded in the 30 lines before line_index."""
+                    start = max(0, line_index - 30)
+                    vals = set()
+                    for ln in lines[start:line_index]:
+                        m = const_re.search(ln)
+                        if m:
+                            raw = m.group(1)
+                            try:
+                                v = int(raw, 16) if raw.startswith('0x') else int(raw)
+                                # baksmali already emits the full 32-bit value for
+                                # const/high16 (e.g. 0xc000000 = 0x0C000000), so
+                                # no additional shift is needed — parse as-is.
+                                vals.add(v & 0xFFFFFFFF)
+                            except ValueError:
+                                pass
+                    return vals
+
+                file_has_immutable = False
+                file_has_mutable   = False
+                file_has_update    = False
                 code_snippet = None
                 line_num = 0
-                for i, line in enumerate(lines, 1):
-                    if any(re.search(pat, line) for pat in pending_intent_patterns):
-                        line_num = i
-                        # Extract 3 lines before and after for context
-                        start = max(0, i - 4)
-                        end = min(len(lines), i + 3)
-                        context_lines = []
-                        for j in range(start, end):
-                            line_text = lines[j].rstrip()
-                            # Highlight the vulnerable line
-                            if j == i - 1:
-                                context_lines.append(f'→ {j+1:4d} | {line_text}  ⚠️ MISSING FLAG_IMMUTABLE')
-                            else:
-                                context_lines.append(f'  {j+1:4d} | {line_text}')
-                        code_snippet = '\n'.join(context_lines)
-                        break
 
-                if has_immutable:
+                for i, line in enumerate(lines, 1):
+                    if not any(re.search(pat, line) for pat in pending_intent_patterns):
+                        continue
+
+                    if line_num == 0:  # capture first call for snippet
+                        line_num = i
+
+                    ctx_vals = flags_from_context(i - 1)
+                    # If the file has an API version gate (SDK_INT), the context may
+                    # contain BOTH the modern (immutable) and legacy flag values.
+                    # Count as safe if ANY value in context has FLAG_IMMUTABLE bit set.
+                    has_sdk_gate = bool(re.search(r'Build\$VERSION.*SDK_INT|SDK_INT', content))
+                    call_immutable = any(v & FLAG_IMMUTABLE_BIT for v in ctx_vals)
+                    call_mutable   = any(v & FLAG_MUTABLE_BIT   for v in ctx_vals)
+
+                    if call_immutable:
+                        file_has_immutable = True
+                    elif call_mutable:
+                        file_has_mutable = True
+                    elif ctx_vals:
+                        file_has_update = True
+                    else:
+                        # No const found in context — fall back to whole-file search
+                        if re.search(flag_immutable, content):
+                            file_has_immutable = True
+                        elif re.search(flag_mutable, content):
+                            file_has_mutable = True
+                        elif re.search(flag_update, content):
+                            file_has_update = True
+
+                # Build snippet for first call
+                if line_num:
+                    start = max(0, line_num - 4)
+                    end = min(len(lines), line_num + 3)
+                    ctx = []
+                    for j in range(start, end):
+                        txt = lines[j].rstrip()
+                        if j == line_num - 1 and not file_has_immutable:
+                            ctx.append(f'→ {j+1:4d} | {txt}  ⚠️ MISSING FLAG_IMMUTABLE')
+                        else:
+                            ctx.append(f'  {j+1:4d} | {txt}')
+                    code_snippet = '\n'.join(ctx)
+
+                if file_has_immutable:
                     immutable_files.add(rel)
-                elif has_mutable:
+                elif file_has_mutable:
                     mutable_files.append((rel, line_num, code_snippet))
-                elif has_update_current:
+                elif file_has_update:
                     update_current_files.append((rel, line_num, code_snippet))
                 else:
                     vulnerable_files.append((rel, line_num, code_snippet))
