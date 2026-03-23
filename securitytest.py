@@ -9180,8 +9180,8 @@ def check_clipboard_security(base):
             rel_path = os.path.relpath(full_path, base)
             rel_path_normalized = rel_path.replace('\\', '/')
 
-            # Skip library files
-            if any(lib in rel_path_normalized for lib in ['androidx/', 'android/support/', 'com/google/']):
+            # Skip library files (use global LIB_PATHS for consistency)
+            if any(lib in rel_path_normalized for lib in LIB_PATHS):
                 continue
 
             files_to_scan.append((full_path, rel_path))
@@ -9201,14 +9201,25 @@ def check_clipboard_security(base):
                 for line_num, line in enumerate(lines, 1):
                     for api_name, pattern in clipboard_api_patterns.items():
                         if re.search(pattern, line, re.IGNORECASE):
-                            # Get broader context to check for sensitive data indicators
-                            context_start = max(0, line_num - 30)
-                            context_end = min(len(lines), line_num + 5)
+                            # Narrow context: only the 5 lines before the clipboard call where
+                            # ClipData content is constructed (const-string / invoke chain).
+                            # A wide window (30+ lines) picks up unrelated class-level strings
+                            # such as "token"/"key" in SDK class names or field declarations.
+                            context_start = max(0, line_num - 5)
+                            context_end = min(len(lines), line_num + 2)
                             context_lines = lines[context_start:context_end]
                             context_text = '\n'.join(context_lines).lower()
 
-                            # Check if sensitive data is involved
-                            is_sensitive = any(indicator in context_text for indicator in sensitive_indicators)
+                            # Only flag if a sensitive keyword appears inside a const-string
+                            # literal in the narrow context, not just anywhere in the file.
+                            is_sensitive = any(
+                                indicator in context_text
+                                and re.search(
+                                    r'const-string[^"]*"[^"]*' + re.escape(indicator),
+                                    context_text
+                                )
+                                for indicator in sensitive_indicators
+                            )
 
                             finding = {
                                 'file': rel_path,
