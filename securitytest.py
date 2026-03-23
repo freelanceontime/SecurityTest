@@ -4054,6 +4054,7 @@ def check_serialize(base):
         '/org/apache/',     # Apache Commons libraries
         '/io/requery/',     # Requery database ORM
         '/io/flutter/plugins/',  # Flutter plugins (SharedPreferences etc)
+        '/b0/',             # Obfuscated AndroidX BundleCompat shim (safe compatibility wrapper)
         '/lib/', '/jetified-'
     )
 
@@ -9763,6 +9764,32 @@ def check_insecure_randomness(base):
 
             files_to_scan.append((path, rel))
 
+    # Structural patterns that identify Kotlin stdlib Random wrappers regardless of
+    # obfuscated package name. These cannot be excluded by path alone because
+    # single-letter packages (x3/, y3/) could also contain developer code in other apps.
+    #
+    # Pattern 1: class extends kotlin/random/* — it IS a Kotlin Random implementation
+    # Pattern 2: Random usage is inside initialValue() of a ThreadLocal subclass
+    #            — this is just a lazy-init factory, not direct use of insecure randomness
+    # Pattern 3: Random usage is inside getImpl() returning java.util.Random
+    #            — this is a Random provider/wrapper, not direct usage
+    kotlin_random_super = re.compile(r'\.super\s+Lkotlin/random/')
+    threadlocal_super   = re.compile(r'\.super\s+Ljava/lang/ThreadLocal;')
+    in_initial_value    = re.compile(r'\.method.*initialValue\(\)')
+    in_get_impl         = re.compile(r'\.method.*getImpl\(\)Ljava/util/Random;')
+
+    def is_kotlin_random_wrapper(file_content):
+        """Return True if this file is a Kotlin stdlib Random implementation."""
+        if kotlin_random_super.search(file_content):
+            return True
+        # ThreadLocal<Random> where the Random is created in initialValue()
+        if threadlocal_super.search(file_content) and in_initial_value.search(file_content):
+            return True
+        # Abstract adapter with getImpl() — Kotlin JVM Random bridge
+        if in_get_impl.search(file_content):
+            return True
+        return False
+
     with ScanProgress("Insecure Randomness", len(files_to_scan)) as scan_progress:
         for path, rel in files_to_scan:
             scan_progress.update()
@@ -9770,6 +9797,10 @@ def check_insecure_randomness(base):
                 content = open(path, errors='ignore').read()
                 lines = content.splitlines()
             except:
+                continue
+
+            # Skip Kotlin stdlib Random wrappers that cannot be excluded by path
+            if is_kotlin_random_wrapper(content):
                 continue
 
             for i, line in enumerate(lines, 1):
