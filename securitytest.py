@@ -50,6 +50,9 @@ LIB_PATHS = (
     '/io/flutter/plugins/',  # Flutter plugins (webview, url_launcher, etc.)
     '/dev/fluttercommunity/',  # Flutter community plugins (share_plus, etc.)
     '/com/mux/',  # Mux video analytics SDK
+    '/com/badlogic/gdx/',  # libGDX game engine
+    '/com/fredporciuncula/flow/preferences/',  # flow-preferences library
+    '/com/pierfrancescosoffritti/',  # Android YouTube Player library
     '/lib/', '/jetified-'
 )
 
@@ -7409,6 +7412,8 @@ def check_sharedprefs_encryption(base):
         r'com/airbnb/lottie/',             # Lottie
         r'io/reactivex/',                  # RxJava
         r'com/jakewharton/',               # JakeWharton libraries
+        r'com/badlogic/gdx/',              # libGDX game engine
+        r'com/fredporciuncula/flow/preferences/',  # flow-preferences library
         r'/lib/',
         r'/jetified-',
     ]
@@ -7662,6 +7667,7 @@ def check_external_storage(base):
         r'com/airbnb/lottie/',              # Lottie animations
         r'io/reactivex/',                   # RxJava
         r'com/jakewharton/',                # JakeWharton libraries
+        r'com/badlogic/gdx/',               # libGDX game engine
         r'/lib/',
         r'/jetified-',
     ]
@@ -9711,6 +9717,7 @@ def check_insecure_randomness(base):
         '/j$/',  # Java 8+ backport library (j$ prefix)
         '/com/mux/',  # Mux video analytics SDK (non-crypto random for analytics)
         '/org/apache/',  # Apache Commons libraries (math operations)
+        '/com/badlogic/gdx/',  # libGDX game engine (non-crypto random for game logic)
         '/lib/', '/jetified-'
     )
 
@@ -13605,7 +13612,18 @@ def check_storage_analysis(base, package_name):
                     # Check encryption status
                     is_encrypted = check_db_encryption(db_full_path) if db_full_path else None
 
-                    if '-rw-rw-' in file_entry or '-rw-rw-rw-' in file_entry:
+                    # Skip known third-party library databases (not developer-controlled)
+                    library_dbs = (
+                        'google_app_measurement',   # Firebase Analytics SDK
+                        'google_app_measurement_local',
+                        'androidx.',                # AndroidX libraries
+                        'com.google.',              # Google Play Services
+                    )
+                    if db_filename and any(db_filename.startswith(lib) for lib in library_dbs):
+                        pass  # skip library DB
+                    # World-readable = others segment (chars 8-10 of permission string) contains 'r'
+                    # e.g. -rw-rw-r-- (world-readable) vs -rw-rw---- (group only, NOT world-readable)
+                    elif len(file_entry) >= 10 and file_entry[7] == 'r':
                         # World-readable database - security issue
                         if is_encrypted:
                             security_issues.append(f" Database file with world-readable permissions (encrypted): {file_entry}")
@@ -13682,7 +13700,7 @@ def check_pending_intent_flags(base):
 
     # Flag patterns - these are static final int constants (const/high16 or const)
     flag_immutable = r'0x4000000|67108864'  # FLAG_IMMUTABLE = 0x04000000 (67108864)
-    flag_mutable = r'0x8000000|134217728'   # FLAG_MUTABLE = 0x08000000 (134217728)
+    flag_mutable = r'0x2000000|33554432'    # FLAG_MUTABLE = 0x02000000 (33554432)
     flag_update = r'0x8000000[08]|134217728'  # FLAG_UPDATE_CURRENT = 0x08000000 (134217728)
 
     # Library paths to exclude (third-party code)
@@ -13698,6 +13716,7 @@ def check_pending_intent_flags(base):
         '/com/livechatinc/',  # LiveChat SDK
         '/com/mux/',  # Mux video analytics SDK
         '/io/sentry/',  # Sentry error tracking
+        '/io/branch/',  # Branch SDK
     )
 
     def is_library_path(path):
