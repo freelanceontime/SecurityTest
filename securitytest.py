@@ -11762,6 +11762,7 @@ def check_frida_task_hijack(base, manifest,
         for p in root.findall('permission')
     }
     bad = []
+    safe = []  # exported but protected (launcher or signature/system permission)
     for act in root.findall('.//activity'):
         name = act.get(ns('name'),'')
         if not name: continue
@@ -11783,13 +11784,38 @@ def check_frida_task_hijack(base, manifest,
             acts = [a.get(ns('name')) for a in act.findall('.//action')]
             cats = [c.get(ns('name')) for c in act.findall('.//category')]
             if 'android.intent.action.MAIN' in acts and 'android.intent.category.LAUNCHER' in cats:
+                safe.append((fq, "Launcher activity — skipped"))
                 continue
 
         if weak:
             bad.append(fq)
+        else:
+            safe.append((fq, f"Protected by permission: {perm}"))
 
     if not bad:
-        return True, "No exported, unprotected activities detected."
+        total = len(safe)
+        if total:
+            rows = "".join(
+                f"<li style='padding:3px 0;'><code style='font-size:12px;'>{html.escape(fq)}</code>"
+                f" <span style='color:#6b7280;font-size:12px;'>— {html.escape(reason)}</span></li>"
+                for fq, reason in safe
+            )
+            detail_html = (
+                f"<p style='margin:0 0 8px 0;'>Scanned <strong>{total}</strong> exported "
+                f"activit{'y' if total==1 else 'ies'} — none are vulnerable to task hijacking.</p>"
+                f"<ul style='margin:0;padding-left:20px;'>{rows}</ul>"
+            )
+            summary = [f"{total} exported activit{'y' if total==1 else 'ies'} checked — none vulnerable to task hijacking"]
+        else:
+            detail_html = "<p style='margin:0;'>No exported activities found in manifest.</p>"
+            summary = ["No exported activities found in manifest"]
+        return TestResult(
+            name="Dynamic Exported Activity",
+            status="PASS",
+            summary_lines=summary,
+            raw_html=detail_html,
+            is_dynamic=True,
+        )
 
     # ── 2) inline Frida JS ───────────────────────────────────────────
     jscode = r"""
