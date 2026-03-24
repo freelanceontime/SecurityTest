@@ -41,6 +41,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import urllib.request
+import urllib.error
 import json
 import os
 import pathlib
@@ -121,9 +123,94 @@ RUN_INTRO = []
 
 Status = Literal["PASS", "FAIL", "WARN", "INFO"]
 
-# --------------------------- 
+# Version tracking for auto-update
+__version__ = "1.1.2"
+__script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/ios_securitytest.py"
+
+# ---------------------------
+# Update check
+# ---------------------------
+
+def check_for_updates():
+    """Check if a newer version exists on GitHub and offer to update."""
+    try:
+        print(f"[*] Current version: {__version__}")
+        print(f"[*] Checking for updates from GitHub...")
+
+        script_path = os.path.abspath(__file__)
+        with open(script_path, 'rb') as f:
+            local_hash = hashlib.sha256(f.read()).hexdigest()
+
+        try:
+            with urllib.request.urlopen(__script_url__, timeout=5) as response:
+                remote_content = response.read()
+                remote_hash = hashlib.sha256(remote_content).hexdigest()
+        except urllib.error.URLError as e:
+            print(f"[!] Could not check for updates: {e}")
+            print("[*] Continuing with current version...")
+            return
+        except Exception as e:
+            print(f"[!] Update check failed: {e}")
+            print("[*] Continuing with current version...")
+            return
+
+        if local_hash == remote_hash:
+            print("[+] You have the latest version!")
+            print()
+            return
+
+        print("\n" + "="*70)
+        print("[!] A newer version is available on GitHub!")
+        print("="*70)
+        print(f"Local hash:  {local_hash[:16]}...")
+        print(f"Remote hash: {remote_hash[:16]}...")
+        print(f"Source: {__script_url__}")
+
+        try:
+            response = input("\n[?] Do you want to update now? [y/N]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n[*] Update cancelled. Continuing with current version...")
+            return
+
+        if response not in ['y', 'yes']:
+            print("[*] Update declined. Continuing with current version...")
+            print()
+            return
+
+        print("\n[*] Downloading update...")
+        backup_path = script_path + ".backup"
+        shutil.copy2(script_path, backup_path)
+
+        try:
+            with open(script_path, 'wb') as f:
+                f.write(remote_content)
+            print("[+] Update installed successfully!")
+            try:
+                os.remove(backup_path)
+            except:
+                pass
+            print("\n[*] Please restart the script to use the new version.")
+            print("="*70)
+            sys.exit(0)
+        except Exception as e:
+            print(f"[!] Update failed: {e}")
+            print("[*] Restoring backup...")
+            shutil.copy2(backup_path, script_path)
+            print("[+] Backup restored. Continuing with current version...")
+            try:
+                os.remove(backup_path)
+            except:
+                pass
+
+    except Exception as e:
+        print(f"[!] Update check error: {e}")
+        print("[*] Continuing with current version...")
+
+    print()
+
+# ---------------------------
 # Utilities
-# --------------------------- 
+# ---------------------------
 
 def run(cmd: List[str], timeout: int = 60, cwd: Optional[str] = None) -> Tuple[int, str]:
     try:
@@ -8935,6 +9022,7 @@ def preflight() -> Tuple[bool, List[str]]:
 # --------------------------- 
 
 def main():
+    check_for_updates()
     ap = argparse.ArgumentParser(description="iOS IPA MASVS-oriented scanner (static-first)")
     ap.add_argument("-f", "--file", required=True, help="Path to .ipa")
     ap.add_argument("-o", "--out", default=None, help="Output directory (default: ./<ipa_name>_iosscan)")
