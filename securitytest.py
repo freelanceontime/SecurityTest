@@ -875,6 +875,78 @@ HTML_TEMPLATE = '''
     font-size: 14px;
   }}
 
+  /* === KPI SUMMARY GRID === */
+  .kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin: 16px 0 24px 0;
+  }}
+
+  .kpi {{
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s ease;
+    text-align: center;
+  }}
+
+  .kpi:hover {{
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  }}
+
+  .kpi .kpi-num {{
+    font-size: 28px;
+    font-weight: 800;
+    line-height: 1.1;
+  }}
+
+  .kpi .kpi-lbl {{
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.75;
+    margin-top: 4px;
+  }}
+
+  .kpi.kpi-active {{
+    border-width: 2px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }}
+
+  .kpi[data-status="fail"] .kpi-num {{ color: #dc2626; }}
+  .kpi[data-status="warn"] .kpi-num {{ color: #d97706; }}
+  .kpi[data-status="info"] .kpi-num {{ color: #2563eb; }}
+  .kpi[data-status="pass"] .kpi-num {{ color: #059669; }}
+
+  .kpi[data-status="fail"].kpi-active {{ border-color: #dc2626; background: #fff5f5; }}
+  .kpi[data-status="warn"].kpi-active {{ border-color: #d97706; background: #fffbf0; }}
+  .kpi[data-status="info"].kpi-active {{ border-color: #2563eb; background: #eff6ff; }}
+  .kpi[data-status="pass"].kpi-active {{ border-color: #059669; background: #f0fdf4; }}
+
+  .kpi-hint {{
+    font-size: 11px;
+    color: #6b7280;
+    text-align: center;
+    margin-bottom: 6px;
+  }}
+
+  [data-theme="dark"] .kpi {{
+    background: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+  }}
+
+  [data-theme="dark"] .kpi[data-status="fail"].kpi-active {{ border-color: #dc2626; background: #450a0a; }}
+  [data-theme="dark"] .kpi[data-status="warn"].kpi-active {{ border-color: #d97706; background: #422006; }}
+  [data-theme="dark"] .kpi[data-status="info"].kpi-active {{ border-color: #3b82f6; background: #1e3a8a; }}
+  [data-theme="dark"] .kpi[data-status="pass"].kpi-active {{ border-color: #10b981; background: #064e3b; }}
+
   /* === FILTER CONTROLS === */
   .filter-controls {{
     background: white;
@@ -1661,6 +1733,37 @@ function applyFilters() {{
   }});
 }}
 
+// Filter test results by status
+function filterByStatus(status) {{
+  var kpi = document.querySelector('.kpi[data-status="' + status + '"]');
+  if (!kpi) return;
+  kpi.classList.toggle('kpi-active');
+  var activeFilters = Array.from(document.querySelectorAll('.kpi.kpi-active')).map(function(k) {{
+    return k.getAttribute('data-status');
+  }});
+  var statusClasses = ['pass', 'fail', 'warn', 'info', 'skip'];
+  document.querySelectorAll('details').forEach(function(d) {{
+    var summary = d.querySelector(':scope > summary');
+    if (!summary) return;
+    var statusCls = statusClasses.find(function(c) {{ return summary.classList.contains(c); }});
+    if (!statusCls) return;
+    if (activeFilters.length === 0) {{
+      d.style.display = '';
+    }} else {{
+      d.style.display = activeFilters.indexOf(statusCls) >= 0 ? '' : 'none';
+    }}
+  }});
+  document.querySelectorAll('h2, h3, h4').forEach(function(h) {{
+    var sib = h.nextElementSibling;
+    var anyVisible = false;
+    while (sib && !['H2','H3','H4'].includes(sib.tagName)) {{
+      if (sib.tagName === 'DETAILS' && sib.style.display !== 'none') anyVisible = true;
+      sib = sib.nextElementSibling;
+    }}
+    if (h.tagName === 'H2') h.style.display = (activeFilters.length > 0 && !anyVisible) ? 'none' : '';
+  }});
+}}
+
 // Dark mode toggle functionality
 function toggleDarkMode() {{
   const html = document.documentElement;
@@ -1739,6 +1842,14 @@ document.addEventListener('DOMContentLoaded', initDarkMode);
   </div>
 
   {library_changes_section}
+</div>
+
+<div class="kpi-hint">Click a card to filter results &mdash; click again to clear</div>
+<div class="kpi-grid">
+  <div class="kpi" data-status="fail" onclick="filterByStatus('fail')"><div class="kpi-num">{kpi_fail}</div><div class="kpi-lbl">FAIL</div></div>
+  <div class="kpi" data-status="warn" onclick="filterByStatus('warn')"><div class="kpi-num">{kpi_warn}</div><div class="kpi-lbl">WARN</div></div>
+  <div class="kpi" data-status="info" onclick="filterByStatus('info')"><div class="kpi-num">{kpi_info}</div><div class="kpi-lbl">INFO</div></div>
+  <div class="kpi" data-status="pass" onclick="filterByStatus('pass')"><div class="kpi-num">{kpi_pass}</div><div class="kpi-lbl">PASS</div></div>
 </div>
 
 {sections}
@@ -15903,6 +16014,13 @@ def main():
         sections += "<h4>Other Checks</h4>\n" + ''.join(ungrouped)
 
     # 10) Write out HTML report with metadata
+    # Count KPI totals from assembled sections HTML
+    import re as _re
+    kpi_fail = len(_re.findall(r"<summary class='fail'", sections))
+    kpi_warn = len(_re.findall(r"<summary class='warn'", sections))
+    kpi_info = len(_re.findall(r"<summary class='info'", sections))
+    kpi_pass = len(_re.findall(r"<summary class='pass'", sections))
+
     # Create report filename with package name
     report_filename = f"{metadata['package']}.report.html" if metadata['package'] else 'report.html'
 
@@ -15916,6 +16034,10 @@ def main():
             finish_time=finish_time_str,
             previous_scan_info=previous_scan_info_html,
             library_changes_section=library_changes_html,
+            kpi_fail=kpi_fail,
+            kpi_warn=kpi_warn,
+            kpi_info=kpi_info,
+            kpi_pass=kpi_pass,
             sections=sections
         ))
     print(f'[+] Report generated: {report_filename}')
