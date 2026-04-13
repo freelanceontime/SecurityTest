@@ -2390,7 +2390,7 @@ Recommendations:
         findings=findings
     )
 
-def check_keychain_security(app_dir: str, base: str) -> TestResult:
+def check_keychain_security(app_dir: str, base: str, main_bin: Optional[str] = None) -> TestResult:
     """
     Comprehensive Keychain security analysis.
 
@@ -2457,13 +2457,42 @@ def check_keychain_security(app_dir: str, base: str) -> TestResult:
                 elif severity == 'PASS':
                     secure_found = True
 
+    # Fallback for release/stripped builds: inspect Mach-O strings for capability evidence.
+    binary_hits = {}
+    if main_bin and os.path.isfile(main_bin):
+        binary_strings = strings_dump(main_bin, timeout=60)
+        for pattern_name, (pattern, description, severity) in keychain_patterns.items():
+            if pattern_name in api_usage:
+                continue
+            if any(re.search(pattern, s, re.IGNORECASE) for s in binary_strings):
+                binary_hits[pattern_name] = {
+                    'count': 1,
+                    'description': description,
+                    'severity': severity,
+                }
+                api_usage[pattern_name] = binary_hits[pattern_name]
+                if 'kSecAttrAccessible' in pattern_name:
+                    accessibility_attrs[pattern_name] = {
+                        'count': 1,
+                        'description': description,
+                        'severity': severity,
+                        'files': [main_bin]
+                    }
+                    if severity == 'FAIL':
+                        insecure_found = True
+                        status = "FAIL"
+                    elif severity == 'WARN' and status == "PASS":
+                        status = "WARN"
+                    elif severity == 'PASS':
+                        secure_found = True
+
     # Build summary
     keychain_api_count = sum(1 for k in api_usage.keys() if k.startswith('SecItem'))
 
     if keychain_api_count > 0:
         summary_lines.append(f"Keychain API usage detected: {keychain_api_count} different API(s) used")
     else:
-        summary_lines.append("No Keychain API usage detected")
+        summary_lines.append("No source-level Keychain API usage detected")
         status = "INFO"
 
     # Summarize accessibility attributes
@@ -2474,9 +2503,12 @@ def check_keychain_security(app_dir: str, base: str) -> TestResult:
             severity_icon = {"FAIL": "✗", "WARN": "⚠", "PASS": "✓", "INFO": "•"}[attr_data['severity']]
             summary_lines.append(f"{severity_icon} {attr_name}: {attr_data['count']} usage(s) - {attr_data['description']}")
     else:
-        summary_lines.append("⚠ No kSecAttrAccessible attributes found (default accessibility unknown)")
+        summary_lines.append("⚠ No explicit kSecAttrAccessible attributes found (default accessibility unknown)")
         if status == "PASS":
             status = "WARN"
+
+    if binary_hits:
+        summary_lines.append(f"Binary capability evidence detected for {len(binary_hits)} Keychain symbol(s)")
 
     # Build detailed findings for insecure usage
     if insecure_found:
@@ -2540,7 +2572,7 @@ def check_keychain_security(app_dir: str, base: str) -> TestResult:
             title="No Keychain Usage Detected",
             subtitle="Verify how sensitive data is stored",
             evidence=[
-                "No Keychain API calls detected in source code.",
+                "No Keychain API calls were detected in source-level files.",
                 "",
                 "Considerations:",
                 "• Sensitive data (passwords, tokens, keys) should use iOS Keychain",
@@ -2549,6 +2581,13 @@ def check_keychain_security(app_dir: str, base: str) -> TestResult:
                 "• Check for alternative storage mechanisms"
             ],
             open_by_default=True
+        ))
+    elif binary_hits:
+        findings.append(FindingBlock(
+            title="Binary Keychain Capability Evidence",
+            subtitle="Symbols/strings found in the shipped binary",
+            evidence=[f"• {name}: {data['description']}" for name, data in sorted(binary_hits.items())],
+            open_by_default=False
         ))
 
     return TestResult(
@@ -4192,7 +4231,7 @@ def check_certificate_pinning(app_dir: str, base: str) -> TestResult:
     """
     summary_lines: List[str] = []
     findings: List[FindingBlock] = []
-    status: Status = "WARN"  # Default to WARN since pinning should be implemented
+    status: Status = "INFO"
 
     # Certificate pinning patterns (iOS-specific)
     pinning_patterns = {
@@ -4270,7 +4309,7 @@ def check_certificate_pinning(app_dir: str, base: str) -> TestResult:
     elif challenge_handling_found:
         status = "INFO"  # Challenge handling present but pinning not confirmed
     else:
-        status = "WARN"  # No pinning detected
+        status = "INFO"  # Absence of static pinning indicators is not itself a confirmed failure
 
     # Build summary
     if pinning_found:
@@ -4281,7 +4320,7 @@ def check_certificate_pinning(app_dir: str, base: str) -> TestResult:
         if manual_pinning_found:
             summary_lines.append("  • Manual pinning implementation detected")
     else:
-        summary_lines.append("✗ No certificate pinning detected")
+        summary_lines.append("No certificate pinning evidence detected in the current static data set")
 
     if challenge_handling_found:
         summary_lines.append(f"• URLSession challenge handling detected ({len([k for k in api_usage if 'Challenge' in k or 'Trust' in k])} API(s))")
@@ -4402,25 +4441,14 @@ def check_certificate_pinning(app_dir: str, base: str) -> TestResult:
     # Add warning if no pinning at all
     if not pinning_found and not challenge_handling_found:
         findings.append(FindingBlock(
-            title="No Certificate Pinning Detected",
-            subtitle="App may be vulnerable to MITM attacks",
+            title="Certificate Pinning Not Demonstrated",
+            subtitle="Static analysis did not confirm pinning",
             evidence=[
-                "❌ No certificate pinning implementation detected",
+                "Static review did not confirm certificate pinning.",
                 "",
-                "Risks without pinning:",
-                "• Man-in-the-middle attacks using rogue certificates",
-                "• Compromised or fraudulent Certificate Authorities",
-                "• Network-level SSL interception",
-                "",
-                "Recommended solutions:",
-                "1. Use TrustKit framework (easiest, well-tested)",
-                "2. Implement public key pinning via URLSession delegates",
-                "3. Use NSPinnedDomains in ATS configuration",
-                "",
-                "OWASP MASTG recommends pinning for:",
-                "• Authentication endpoints",
-                "• Payment/financial transactions",
-                "• Sensitive user data transmission"
+                "This is not a validated failure by itself.",
+                "Verify at runtime with an intercepting proxy and challenge-handler tracing.",
+                "Static indicators that were not found include TrustKit, SecTrustEvaluate, and explicit pinning markers."
             ],
             open_by_default=True
         ))
@@ -4491,6 +4519,15 @@ def check_url_and_keyboard_security(info: Dict, main_bin: str, info_path: str, b
         for s in (ut.get("CFBundleURLSchemes", []) or []):
             if s:
                 schemes.append(str(s))
+    associated_domains = []
+    try:
+        ent_path = os.path.join(os.path.dirname(info_path), "..", "..", "artefacts", "entitlements.plist")
+        ent_path = os.path.normpath(ent_path)
+        if os.path.exists(ent_path):
+            ent_data = plutil_to_plist(ent_path)
+            associated_domains = ent_data.get("com.apple.developer.associated-domains", []) or []
+    except Exception:
+        associated_domains = []
 
     # Deep analysis using multiple techniques
     strings_output = strings_dump(main_bin, timeout=60)
@@ -4614,6 +4651,10 @@ def check_url_and_keyboard_security(info: Dict, main_bin: str, info_path: str, b
     else:
         evidence_rows.append(["URL Scheme", "None", "No CFBundleURLTypes entries"])
 
+    if associated_domains:
+        for domain in associated_domains:
+            evidence_rows.append(["Universal Link", str(domain), "Declared in entitlements"])
+
     if url_handler_methods:
         for method in url_handler_methods:
             demangled = method
@@ -4639,8 +4680,8 @@ def check_url_and_keyboard_security(info: Dict, main_bin: str, info_path: str, b
     if schemes and not (has_strong or has_medium or has_weak):
         evidence_rows.append(["Validation", "None detected", "Review: Add URL allowlists/validation"])
         if status == "PASS":
-            status = "WARN"  # WARN not FAIL - needs manual verification
-        issues.append("No URL validation detected - verify URL handling manually")
+            status = "INFO"
+        issues.append("No static URL validation indicators detected - verify handler behavior manually")
 
     # Dangerous functions are informational - they're usually from frameworks
     if dangerous_functions_info:
@@ -4687,6 +4728,12 @@ def check_url_and_keyboard_security(info: Dict, main_bin: str, info_path: str, b
             evidence=[f"{len(schemes)} scheme(s) declared in Info.plist"],
             open_by_default=False
         ))
+    if associated_domains:
+        findings.append(FindingBlock(
+            title="Universal Link Exposure",
+            evidence=[f"• {domain}" for domain in associated_domains],
+            open_by_default=False
+        ))
 
     # Short guidance (keep concise)
     findings.append(FindingBlock(
@@ -4713,7 +4760,10 @@ def check_url_and_keyboard_security(info: Dict, main_bin: str, info_path: str, b
         elif validation_indicators['Medium']:
             summary_lines.append(f"⚠ Basic validation detected: {', '.join(validation_indicators['Medium'][:2])}")
         else:
-            summary_lines.append("❌ NO validation indicators found - CRITICAL RISK")
+            summary_lines.append("No static validation indicators found - verify handlers at runtime")
+
+    if associated_domains:
+        summary_lines.append(f"Found {len(associated_domains)} associated domain(s) for universal links")
 
         # Don't alarm about dangerous functions - they're usually framework code
         # Just note them informationally if present
@@ -6275,6 +6325,105 @@ def _render_table_html(table_id: str, col_order: List[str], table_rows: List[Lis
     html_parts.append('</div>')
     return "".join(html_parts)
 
+def check_logging_static_binary(app_dir: str, main_bin: str, base: str) -> TestResult:
+    """
+    Static logging analysis using binary strings and linked binaries.
+
+    This is intentionally evidence-conservative:
+    - presence of logging APIs/frameworks is capability evidence only
+    - only co-occurrence of logging indicators and sensitive field terms is escalated
+    """
+    bins = list_bundle_binaries(app_dir, main_bin)
+    findings: List[FindingBlock] = []
+    summary_lines: List[str] = []
+    status: Status = "INFO"
+
+    logging_patterns = [
+        r'\bos_log\b', r'\bNSLog\b', r'\bprint\(', r'\bdebugPrint\(',
+        r'logger', r'logEvent', r'logMessage', r'logLevel', r'sdk\.log'
+    ]
+    sensitive_patterns = [
+        r'email', r'password', r'token', r'auth', r'bearer', r'first_name',
+        r'last_name', r'postcode', r'gender', r'age', r'drink', r'user[_ ]?id'
+    ]
+
+    api_hits = []
+    risky_hits = []
+
+    for binary_path in bins:
+        lines = strings_dump(binary_path, timeout=90)
+        if not lines:
+            continue
+
+        matched_logging = sorted(set(strings_grep_lines(lines, logging_patterns, max_hits=40)))
+        matched_sensitive = sorted(set(strings_grep_lines(lines, sensitive_patterns, max_hits=60)))
+
+        if matched_logging:
+            api_hits.append((binary_path, matched_logging[:12]))
+
+        if matched_logging and matched_sensitive:
+            risky_hits.append((binary_path, matched_logging[:8], matched_sensitive[:12]))
+
+    if risky_hits:
+        status = "WARN"
+        summary_lines.append(f"Found {len(risky_hits)} binary file(s) with both logging indicators and sensitive-field terms")
+        summary_lines.append("This is static co-occurrence evidence only; confirm actual leakage with device logs or crash artifacts")
+
+        for binary_path, logging_hit_lines, sensitive_hit_lines in risky_hits[:10]:
+            rel_path = rel(binary_path, base)
+            findings.append(FindingBlock(
+                title=rel_path,
+                link=make_file_link(base, rel_path),
+                evidence=[
+                    "Logging indicators:",
+                    *[f"• {line[:180]}" for line in logging_hit_lines],
+                    "",
+                    "Sensitive-field terms:",
+                    *[f"• {line[:180]}" for line in sensitive_hit_lines]
+                ],
+                open_by_default=False
+            ))
+    elif api_hits:
+        status = "INFO"
+        summary_lines.append(f"Logging-related indicators found in {len(api_hits)} binary file(s)")
+        summary_lines.append("No binary file showed both logging indicators and searched sensitive-field terms")
+
+        for binary_path, logging_hit_lines in api_hits[:8]:
+            rel_path = rel(binary_path, base)
+            findings.append(FindingBlock(
+                title=rel_path,
+                link=make_file_link(base, rel_path),
+                evidence=[
+                    "Logging indicators:",
+                    *[f"• {line[:180]}" for line in logging_hit_lines]
+                ],
+                open_by_default=False
+            ))
+    else:
+        status = "PASS"
+        summary_lines.append("No obvious logging indicators matched the current binary strings scan")
+
+    findings.append(FindingBlock(
+        title="Interpretation Notes",
+        evidence=[
+            "This is a static binary test, not proof of runtime log leakage.",
+            "Treat API/framework presence as capability evidence only.",
+            "Use the SSH log review and crash-artifact privacy tests to validate real exposure."
+        ],
+        open_by_default=False
+    ))
+
+    return TestResult(
+        name="Static Logging Indicators (Binary Analysis)",
+        status=status,
+        summary_lines=summary_lines,
+        findings=findings,
+        mastg_ref_html=mastg_ref(
+            ["MASTG-TEST-0053", "MASTG-TEST-0296"],
+            ["Checking Logs for Sensitive Data", "Sensitive Data Exposure Through Insecure Logging"]
+        )
+    )
+
 def _format_cell_value(text: str, max_len: int = 120) -> str:
     """Render a cell with safe truncation and tooltip for long values."""
     if text is None:
@@ -6806,7 +6955,7 @@ def check_bundle_filetypes(app_dir: str, base: str) -> List[TestResult]:
             id="RESILIENCE-MOBILEPROVISION",
             name="Embedded Mobile Provision (build artefact)",
             status="PASS",
-            summary=["No embedded.mobileprovision (likely App Store distribution)"],
+            summary=["No embedded.mobileprovision found in the extracted bundle (distribution channel not directly confirmed)"],
             mastg_ref_html=mastg_ref(["MASTG-TEST-0079"], ["Analysis of the Build Settings of the App"])
         ))
 
@@ -6830,7 +6979,7 @@ def check_bundle_filetypes(app_dir: str, base: str) -> List[TestResult]:
             id="STORAGE-BUNDLEDB",
             name="Databases Bundled in App",
             status="PASS",
-            summary=["No .sqlite/.db/.realm files found inside the app bundle"],
+            summary=["No .sqlite/.db/.realm files were found inside the extracted app bundle"],
             mastg_ref_html=mastg_ref(["MASTG-TEST-0060"], ["Testing for Sensitive Data Stored in Local Databases"])
         ))
 
@@ -6874,7 +7023,7 @@ def check_bundle_filetypes(app_dir: str, base: str) -> List[TestResult]:
             id="STORAGE-CONFIGFILES",
             name="Config/Key Material Files in Bundle",
             status="PASS",
-            summary=["No obvious config/cert/key material file types found in bundle"],
+            summary=["No obvious config/cert/key material file types matched the current bundle scan"],
             mastg_ref_html=mastg_ref(["MASTG-TEST-0058"], ["Testing for Sensitive Data in Local Storage"])
         ))
 
@@ -7094,7 +7243,7 @@ def check_strings_patterns(app_dir: str, main_bin: str, base: str) -> List[TestR
         name="TLS/Pinning Indicators (strings triage)",
         status="INFO" if pin_hits else "INFO",
         summary=[f"Found indicators in {len(pin_hits)} file(s) (review implementation quality)"] if pin_hits else
-                ["No obvious pinning keywords found (not a guarantee)"],
+                ["No obvious pinning keywords matched the current strings triage (not a guarantee)"],
         findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:25], files=[rel(t, base)]) for t, h in pin_hits[:8]] if pin_hits else [],
         mastg_ref_html=mastg_ref(["MASTG-TEST-0068"], ["Testing Custom Certificate Stores and Certificate Pinning"])
     ))
@@ -7110,7 +7259,7 @@ def check_strings_patterns(app_dir: str, main_bin: str, base: str) -> List[TestR
         name="Anti-Debug / Anti-Tamper Indicators (strings triage)",
         status="INFO" if ad_hits else "PASS",
         summary=[f"Indicators in {len(ad_hits)} file(s) (review for false positives)"] if ad_hits else
-                ["No obvious anti-debug indicators found"],
+                ["No obvious anti-debug indicators matched the current strings triage"],
         findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:25], files=[rel(t, base)]) for t, h in ad_hits[:8]] if ad_hits else [],
         mastg_ref_html=mastg_ref(["MASTG-TEST-0082"], ["Testing for Anti-Debugging Detection"])
     ))
@@ -7136,7 +7285,7 @@ def check_strings_patterns(app_dir: str, main_bin: str, base: str) -> List[TestR
         name="Jailbreak Detection Indicators (strings triage)",
         status="INFO" if jb_hits else "PASS",
         summary=[f"Indicators in {len(jb_hits)} file(s) (presence indicates checks; validate robustness)"] if jb_hits else
-                ["No obvious jailbreak artifact strings found"],
+                ["No obvious jailbreak artifact strings matched the current strings triage"],
         findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:30], files=[rel(t, base)]) for t, h in jb_hits[:8]] if jb_hits else [],
         mastg_ref_html=mastg_ref(["MASTG-TEST-0083"], ["Testing for Jailbreak Detection"])
     ))
@@ -7263,7 +7412,7 @@ def check_strings_patterns(app_dir: str, main_bin: str, base: str) -> List[TestR
         summary_lines.append("  • Localhost URLs - acceptable for development")
         summary_lines.append("Only flag URLs that transmit sensitive data over HTTP")
     else:
-        summary_lines.append("✓ No concerning HTTP URLs found in bundle scan")
+        summary_lines.append("✓ No concerning HTTP URLs matched the current bundle scan rules")
         summary_lines.append("(Schemas, localhost, and documentation links were filtered out)")
 
     # Only WARN if we have meaningful HTTP URLs (not just format strings or schemas)
@@ -7423,7 +7572,7 @@ def check_device_installed_files(device_ip: str, bundle_id: str, base: str, pass
                     ))
 
     if not findings:
-        summary_lines.append("No sensitive files found in app bundle or data container")
+        summary_lines.append("No concerning files matched the current app bundle/data-container scan")
         status = "PASS"
     else:
         summary_lines.append(f"Found {len(findings)} categories of files requiring review")
@@ -7479,7 +7628,7 @@ def check_device_cleartext_dbs(device_ip: str, bundle_id: str, base: str, passwo
             id="DEVICE-CLEARTEXT-DB",
             name="Cleartext Database Detection (SSH)",
             status="PASS",
-            summary_lines=["No SQLite databases found in app data container"],
+            summary_lines=["No SQLite databases were found in the sampled app data container paths"],
             mastg_ref_html=mastg_ref(["MASTG-TEST-0001"], ["Local Storage"])
         )
 
@@ -7740,7 +7889,7 @@ def check_device_backup_and_protection(device_ip: str, bundle_id: str, base: str
             id="DEVICE-DATAPROTECTION",
             name="Backup Exclusion & Data Protection (SSH)",
             status="INFO",
-            summary=["No sensitive files found or unable to search"],
+            summary=["No matching files were found in the sampled search, or the search could not be completed"],
             mastg_ref_html=mastg_ref(["MASTG-TEST-0060"], ["Local Storage"])
         )
 
@@ -7801,7 +7950,8 @@ def check_device_backup_and_protection(device_ip: str, bundle_id: str, base: str
         backup_cmd = f"{xattr_bin} -p com.apple.MobileBackup '{file_path}' 2>/dev/null"
         rc_backup, backup_out = ssh_run(device_ip, backup_cmd, timeout=5, manual=manual)
 
-        is_excluded = (rc_backup == 0 and backup_out.strip())
+        rc_backup2, backup_out2 = ssh_run(device_ip, f"{xattr_bin} -p com.apple.metadata:com_apple_backup_excludeItem '{file_path}' 2>/dev/null", timeout=5, manual=manual)
+        is_excluded = (rc_backup == 0 and backup_out.strip()) or (rc_backup2 == 0 and backup_out2.strip())
 
         file_dir = os.path.dirname(file_path).replace(data_path, "...")
 
@@ -7819,12 +7969,8 @@ def check_device_backup_and_protection(device_ip: str, bundle_id: str, base: str
             evidence_lines.append("  Will NOT be included in iTunes/iCloud backup")
         else:
             not_excluded_count += 1
-            evidence_lines.append("⚠ Backup Exclusion: NO")
-            evidence_lines.append("  File WILL be included in backups")
-
-            # Sensitive file types should be excluded
-            if any(ext in file_name.lower() for ext in ['.db', '.sqlite', '.log']):
-                evidence_lines.append("  ⚠ WARNING: Sensitive file not excluded from backup!")
+            evidence_lines.append("ℹ Backup Exclusion: NOT EXPLICITLY SET")
+            evidence_lines.append("  Effective backup behavior was not validated via an actual backup operation")
 
         evidence_lines.append("")
 
@@ -7883,18 +8029,19 @@ def check_device_backup_and_protection(device_ip: str, bundle_id: str, base: str
     summary_lines = [
         f"Analyzed {len(files[:20])} file(s) in data container",
         f"✓ {backup_excluded_count} file(s) excluded from backup",
-        f"⚠ {not_excluded_count} file(s) NOT excluded from backup"
+        f"ℹ {not_excluded_count} file(s) without explicit backup-exclusion xattr"
     ]
 
-    if not_excluded_count > backup_excluded_count:
+    if weak_protection_count > 0:
         status = "WARN"
-        summary_lines.append("⚠ Many files not excluded - verify if sensitive data is backed up")
 
     summary_lines.append(f"⚠ {weak_protection_count} file(s) using weak/default data protection class (Class C or below)")
     if weak_protection_count > 0:
-        status = "WARN"
         summary_lines.append("  Upgrade to NSFileProtectionComplete (Class A) for sensitive health data")
         summary_lines.append("  Class C files are accessible after first unlock even with screen locked")
+    elif backup_excluded_count == 0 and not_excluded_count > 0:
+        status = "INFO"
+        summary_lines.append("Backup-exclusion evidence was inconclusive; explicit xattrs were not present on sampled files")
 
     # Add guidance
     guidance = [
@@ -7936,6 +8083,90 @@ def check_device_backup_and_protection(device_ip: str, bundle_id: str, base: str
         summary=summary_lines,
         findings=findings,
         mastg_ref_html=mastg_ref(["MASTG-TEST-0060"], ["Local Storage"])
+    )
+
+def check_device_crash_privacy(device_ip: str, bundle_id: str, base: str, password: str = "alpine", manual: bool = False, discovered_data_path: Optional[str] = None) -> TestResult:
+    """
+    Inspect on-device crash-report artifacts for real evidence of sensitive app data leakage.
+    """
+    if not ssh_check_connectivity(device_ip, password, manual):
+        return TestResult(
+            id="DEVICE-CRASH-PRIVACY",
+            name="Crash Artifact Privacy Review (SSH)",
+            status="WARN",
+            summary_lines=[f"Cannot connect to device at {device_ip} via SSH"],
+            mastg_ref_html=mastg_ref(["MASTG-TEST-0053", "MASTG-TEST-0296"], ["Checking Logs for Sensitive Data", "Sensitive Data Exposure Through Insecure Logging"])
+        )
+
+    data_path = discovered_data_path or ssh_find_app_data_path(device_ip, bundle_id, password, manual)
+    if not data_path:
+        return TestResult(
+            id="DEVICE-CRASH-PRIVACY",
+            name="Crash Artifact Privacy Review (SSH)",
+            status="INFO",
+            summary_lines=[f"App data container not found for '{bundle_id}' on device"],
+            mastg_ref_html=mastg_ref(["MASTG-TEST-0053", "MASTG-TEST-0296"], ["Checking Logs for Sensitive Data", "Sensitive Data Exposure Through Insecure Logging"])
+        )
+
+    crash_find_cmd = (
+        f"find '{data_path}' -type f "
+        "\\( -path '*Crash*' -o -path '*crash*' -o -path '*Crashlytics*' -o -name '*.clsrecord' -o -name 'sdk.log' -o -name 'settings.json' \\) "
+        "2>/dev/null | head -60"
+    )
+    rc, out = ssh_run(device_ip, crash_find_cmd, password=password, timeout=30, manual=manual)
+    if rc != 0 or not out.strip():
+        return TestResult(
+            id="DEVICE-CRASH-PRIVACY",
+            name="Crash Artifact Privacy Review (SSH)",
+            status="PASS",
+            summary_lines=["No crash-report artifacts were found in the sampled app container paths"],
+            mastg_ref_html=mastg_ref(["MASTG-TEST-0053", "MASTG-TEST-0296"], ["Checking Logs for Sensitive Data", "Sensitive Data Exposure Through Insecure Logging"])
+        )
+
+    crash_files = out.strip().splitlines()[:25]
+    findings: List[FindingBlock] = []
+    summary_lines = [f"Found {len(crash_files)} crash-report artifact file(s) in app-owned paths"]
+    status: Status = "INFO"
+
+    sensitive_terms = "email|password|bearer|token|auth|gender|age|drink|postcode|first_name|last_name"
+    hit_count = 0
+    for path in crash_files:
+        grep_cmd = f"grep -a -n -i '{sensitive_terms}' '{path}' 2>/dev/null | head -20"
+        rc_grep, grep_out = ssh_run(device_ip, grep_cmd, password=password, timeout=10, manual=manual)
+        basename = os.path.basename(path)
+        if rc_grep == 0 and grep_out.strip():
+            hit_count += 1
+            status = "FAIL"
+            findings.append(FindingBlock(
+                title=f"Sensitive pattern hit: {basename}",
+                evidence=[f"Path: {path}", "Matched lines:"] + [f"• {line[:240]}" for line in grep_out.strip().splitlines()[:10]],
+                open_by_default=True
+            ))
+        else:
+            sample_cmd = f"head -c 800 '{path}' 2>/dev/null"
+            rc_head, head_out = ssh_run(device_ip, sample_cmd, password=password, timeout=10, manual=manual)
+            evidence = [f"Path: {path}", "No searched sensitive patterns matched in this artifact."]
+            findings.append(FindingBlock(
+                title=f"Crash artifact reviewed: {basename}",
+                evidence=evidence,
+                code=head_out[:800] if rc_head == 0 and head_out.strip() else None,
+                code_language="text",
+                open_by_default=False
+            ))
+
+    if hit_count:
+        summary_lines.append(f"Sensitive patterns matched in {hit_count} crash artifact file(s)")
+    else:
+        status = "PASS"
+        summary_lines.append("No searched sensitive patterns matched the inspected crash artifacts")
+
+    return TestResult(
+        id="DEVICE-CRASH-PRIVACY",
+        name="Crash Artifact Privacy Review (SSH)",
+        status=status,
+        summary_lines=summary_lines,
+        findings=findings,
+        mastg_ref_html=mastg_ref(["MASTG-TEST-0053", "MASTG-TEST-0296"], ["Checking Logs for Sensitive Data", "Sensitive Data Exposure Through Insecure Logging"])
     )
 
 def check_device_keyboard_cache(device_ip: str, bundle_id: str, base: str, password: str = "alpine", manual: bool = False) -> TestResult:
@@ -8057,7 +8288,7 @@ def check_device_keyboard_cache(device_ip: str, bundle_id: str, base: str, passw
         ))
 
     else:
-        summary_lines.append("No keyboard cache files found (or access denied)")
+        summary_lines.append("No keyboard cache files were found in the sampled locations, or access was denied")
 
     # Add recommendations
     remediation = [
@@ -8195,7 +8426,7 @@ def check_device_system_logs(device_ip: str, bundle_id: str, base: str, password
                     meta={"severity": "CRITICAL"}
                 ))
         else:
-            summary_lines.append("✓ No obvious sensitive patterns detected in logs")
+            summary_lines.append("✓ No searched sensitive patterns matched the retrieved log lines")
 
         # Sample log entries
         findings.append(FindingBlock(
@@ -8587,6 +8818,8 @@ def build_tests() -> List[TestDef]:
                 "MASTG iOS: Insecure APIs / Code Quality", lambda ctx: check_insecure_apis_symbols(ctx["main_bin"])),
         TestDef("CODE-LOGGING", "Source Code Logging Analysis", "MASVS-STORAGE",
                 "MASTG iOS: Sensitive Data in Logs", lambda ctx: check_logging_source_code(ctx["app_dir"], ctx["base"])),
+        TestDef("STATIC-LOGGING", "Static Logging Indicators (Binary Analysis)", "MASVS-STORAGE",
+                "MASTG iOS: Static Log Exposure Triage", lambda ctx: check_logging_static_binary(ctx["app_dir"], ctx["main_bin"], ctx["base"])),
         TestDef("SECRETS", "Hardcoded Secrets (Binary Analysis)", "MASVS-STORAGE",
                 "MASTG iOS: Hardcoded Secrets / Entropy Analysis", lambda ctx: check_hardcoded_secrets_binary(ctx["main_bin"], ctx.get("base", ""))),
         TestDef("EXTENSIONS", "App Extensions Analysis", "MASVS-PLATFORM",
@@ -8608,7 +8841,7 @@ def build_tests() -> List[TestDef]:
         TestDef("WEBVIEW", "WebView Security Configuration", "MASVS-PLATFORM",
                 "MASTG iOS: WebView Security", lambda ctx: check_webview_security(ctx["app_dir"], ctx["base"])),
         TestDef("KEYCHAIN", "Keychain Security Analysis", "MASVS-STORAGE",
-                "MASTG iOS: Keychain Storage", lambda ctx: check_keychain_security(ctx["app_dir"], ctx["base"])),
+                "MASTG iOS: Keychain Storage", lambda ctx: check_keychain_security(ctx["app_dir"], ctx["base"], ctx.get("main_bin"))),
         TestDef("DATAPROTECTION", "Data Protection Class (Static)", "MASVS-STORAGE",
                 "MASTG iOS: MASTG-TEST-0051 / MASTG-TEST-0054 — File Data Protection", lambda ctx: check_data_protection_class(ctx["main_bin"], ctx["app_dir"], ctx["base"])),
         TestDef("CERTPIN", "Certificate Pinning Detection", "MASVS-NETWORK",
@@ -8629,6 +8862,8 @@ def build_tests() -> List[TestDef]:
                 "MASTG iOS: Database Encryption", lambda ctx: check_device_cleartext_dbs(ctx.get("device_ip", ""), ctx["bundle_id"], ctx["base"], ctx.get("ssh_password", "alpine"), ctx.get("ssh_manual", False), ctx.get("discovered_data_path"))),
         TestDef("DEVICE-BACKUP", "Backup Exclusion & Data Protection (SSH)", "MASVS-DEVICE",
                 "MASTG iOS: Backup & File Protection", lambda ctx: check_device_backup_and_protection(ctx.get("device_ip", ""), ctx["bundle_id"], ctx["base"], ctx.get("ssh_password", "alpine"), ctx.get("ssh_manual", False), ctx.get("discovered_data_path"))),
+        TestDef("DEVICE-CRASH-PRIVACY", "Crash Artifact Privacy Review (SSH)", "MASVS-DEVICE",
+                "MASTG iOS: Crash/Log Privacy", lambda ctx: check_device_crash_privacy(ctx.get("device_ip", ""), ctx["bundle_id"], ctx["base"], ctx.get("ssh_password", "alpine"), ctx.get("ssh_manual", False), ctx.get("discovered_data_path"))),
         TestDef("DEVICE-KEYBOARD", "Keyboard Cache Analysis (SSH)", "MASVS-STORAGE",
                 "MASTG iOS: Keyboard Cache Security", lambda ctx: check_device_keyboard_cache(ctx.get("device_ip", ""), ctx["bundle_id"], ctx["base"], ctx.get("ssh_password", "alpine"), ctx.get("ssh_manual", False))),
         TestDef("DEVICE-LOGS", "System Logs Analysis (SSH)", "MASVS-STORAGE",
