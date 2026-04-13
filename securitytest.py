@@ -36,6 +36,14 @@ from html import escape, unescape
 __version__ = "5.1.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
+CUSTOM_FRIDA_SCRIPT = None  # Optional user-supplied JS to append to every Frida session
+
+
+def _build_frida_js(jscode: str) -> str:
+    """Return jscode with the user's custom script appended (if one was supplied via -l)."""
+    if CUSTOM_FRIDA_SCRIPT:
+        return jscode + "\n\n// ===== Custom script (-l) =====\n" + CUSTOM_FRIDA_SCRIPT
+    return jscode
 LIB_PATHS = (
     '/androidx/', '/android/support/',
     '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
@@ -10592,7 +10600,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
 
     # 4) write JS, launch frida (send Enter to resume the spawned app)
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
@@ -10967,7 +10975,7 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 5) spawn Frida CLI with our script
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
@@ -11134,7 +11142,7 @@ def check_frida_file_reads(base, wait_secs=7):
 
     # 5) write to temp file and launch frida CLI
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
     proc = subprocess.Popen(
         ['frida','-l', tmp.name, '-U','-f', spawn_name],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
@@ -11260,7 +11268,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     });
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
 
     # 4) launch Frida CLI
     proc = subprocess.Popen(
@@ -11578,7 +11586,7 @@ def check_frida_dynamic_logging(base, wait_secs=15):
 
     # 4) Write script to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
 
     # 5) Launch Frida with large buffer to handle high-volume output
     proc = subprocess.Popen(
@@ -11837,7 +11845,7 @@ def check_frida_task_hijack(base, manifest,
 
     # ── 3) write JS to temp file ────────────────────────────────────
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
 
     # ── 4) launch Frida CLI ────────────────────────────────────────
     proc = subprocess.Popen(
@@ -12600,7 +12608,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode())
+    tmp.write(_build_frida_js(jscode).encode())
     tmp.flush()
     tmp.close()
 
@@ -12996,7 +13004,7 @@ def check_frida_external_storage(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode())
+    tmp.write(_build_frida_js(jscode).encode())
     tmp.flush()
     tmp.close()
 
@@ -13247,7 +13255,7 @@ def check_frida_pending_intent(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode())
+    tmp.write(_build_frida_js(jscode).encode())
     tmp.flush()
     tmp.close()
 
@@ -13427,7 +13435,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode())
+    tmp.write(_build_frida_js(jscode).encode())
     tmp.flush()
     tmp.close()
 
@@ -13571,7 +13579,7 @@ def check_frida_clipboard(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(jscode.encode())
+    tmp.write(_build_frida_js(jscode).encode())
     tmp.flush()
     tmp.close()
 
@@ -14768,6 +14776,7 @@ def print_banner():
       -u, --usb           Run dynamic Frida USB checks
       -i, --include-libs  Include third-party/library code in scans
       -a, --all-tests     Run all tests without interactive selection
+      -l, --load-script   Custom Frida JS file injected into every dynamic test session
 
     Notes:
      ensure adb devices identifes the connected devices 
@@ -15428,10 +15437,20 @@ def main():
     parser.add_argument('-u','--usb', action='store_true', help='Run dynamic Frida USB pinning presence check')
     parser.add_argument('-i','--include-libs', action='store_true', help='Include third-party/library code in scans')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
+    parser.add_argument('-l','--load-script', dest='load_script', default=None,
+                        help='Path to a custom Frida JS file to inject alongside every dynamic test')
     args = parser.parse_args()
 
-    global INCLUDE_LIBS
+    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT
     INCLUDE_LIBS = args.include_libs
+
+    if args.load_script:
+        if not os.path.isfile(args.load_script):
+            print(f"[!] Error: custom Frida script not found: '{args.load_script}'")
+            sys.exit(1)
+        with open(args.load_script, 'r', encoding='utf-8') as fh:
+            CUSTOM_FRIDA_SCRIPT = fh.read()
+        print(f"[+] Custom Frida script loaded: {args.load_script}")
 
     # Run pre-flight checks
     success, errors = run_preflight_checks(check_device=args.usb)
