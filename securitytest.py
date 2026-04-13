@@ -15265,7 +15265,13 @@ def run_preflight_checks(check_device=False):
                 capture_output=True,
                 timeout=15
             )
-            if result.returncode == 0:
+            output = (result.stdout + result.stderr).decode(errors='replace').lower()
+            # apktool on Windows (.bat wrapper) can return non-zero even when working;
+            # accept it if the output contains version information
+            ok = result.returncode == 0 or (tool == 'apktool' and any(
+                c.isdigit() for c in output
+            ))
+            if ok:
                 print(f"  ✓ {tool} found ({purpose})")
             else:
                 errors.append(f"{tool} not working properly")
