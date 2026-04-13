@@ -52,15 +52,17 @@ def _build_frida_js(jscode: str, context: str = "") -> str:
 def _build_frida_command(builtin_script_path: str, spawn_name: str, context: str = "") -> list:
     """
     Build frida CLI command.
-    Loads built-in dynamic-test script first, then optional user -l script.
+    Loads user -l script first (if provided), then built-in dynamic-test script.
+    This prioritizes app-specific bypass hooks (root/pinning) before scanner hooks.
     """
-    cmd = ['frida', '-l', builtin_script_path]
+    cmd = ['frida']
     if CUSTOM_FRIDA_SCRIPT_PATH:
-        cmd += ['-l', CUSTOM_FRIDA_SCRIPT_PATH]
+        cmd += ['-l', CUSTOM_FRIDA_SCRIPT_PATH, '-l', builtin_script_path]
         sid = CUSTOM_FRIDA_SCRIPT_ID or "custom"
         label = context or "DYNAMIC_TEST"
-        print(f"[*] Loading Frida scripts for {label}: builtin + user (-l, id={sid})")
+        print(f"[*] Loading Frida scripts for {label}: user (-l, id={sid}) + builtin")
     else:
+        cmd += ['-l', builtin_script_path]
         print(f"[*] Loading Frida script: builtin ({context or 'DYNAMIC_TEST'})")
     cmd += ['-U', '-f', spawn_name]
     return cmd
