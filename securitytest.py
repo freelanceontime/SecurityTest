@@ -356,6 +356,10 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
         fcntl.fcntl(stdin_fd, fcntl.F_SETFL, stdin_fl | os.O_NONBLOCK)
 
     # Real-time log collection with user prompt
+    frida_stopped = False
+    stop_reason = None
+    stop_notice_shown = False
+
     try:
         while True:
             # Check for user input (platform-specific)
@@ -379,7 +383,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
 
             if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
-                if send_exit_on_stop:
+                if send_exit_on_stop and proc.poll() is None:
                     print("[*] Sending exit command to Frida...")
                     try:
                         # First, drain any pending output to prevent blocking
@@ -438,6 +442,11 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                         proc.terminate()
                 break
 
+            # If Frida/app has already stopped, wait for explicit ENTER before continuing.
+            if frida_stopped:
+                time.sleep(0.05)
+                continue
+
             # Collect Frida output (platform-specific)
             line = None
             if is_windows:
@@ -482,15 +491,21 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 # Store log line
                 logs.append(line.rstrip())
 
-                # Stop early on app crash to avoid massive tombstone spam.
+                # App crash detected in output. Do not auto-continue: wait for ENTER.
                 if "Process crashed:" in line:
-                    print("[!] Target process crashed. Stopping this dynamic test early.")
-                    break
+                    stop_reason = "Target process crashed."
+                    frida_stopped = True
 
-            # If Frida exited and there's no new output, stop monitoring.
+            # If Frida exited and there's no new output, do not auto-continue.
             if proc.poll() is not None and not line:
-                print("[!] Frida process exited unexpectedly. Stopping monitor.")
-                break
+                if not stop_reason:
+                    stop_reason = "Frida process exited unexpectedly."
+                frida_stopped = True
+
+            if frida_stopped and not stop_notice_shown:
+                print(f"[!] {stop_reason}")
+                print("[*] Press ENTER to continue to result analysis.")
+                stop_notice_shown = True
 
             # Small delay to prevent CPU spinning
             if is_windows:
