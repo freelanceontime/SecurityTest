@@ -36,121 +36,34 @@ from html import escape, unescape
 __version__ = "5.1.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
-CUSTOM_FRIDA_SCRIPT = None  # Optional user-supplied JS to append to every Frida session
-CUSTOM_FRIDA_SCRIPT_MODE = "safe"  # safe=auto conflict handling, force=inject everywhere
+CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
+CUSTOM_FRIDA_SCRIPT_PATH = None  # Optional user-supplied JS path passed via -l
 CUSTOM_FRIDA_SCRIPT_ID = ""  # short hash/id for visibility in logs
 
-# Context-specific keywords used for lightweight conflict detection between built-in
-# dynamic-test hooks and user-provided -l scripts.
-CUSTOM_SCRIPT_CONFLICT_KEYWORDS = {
-    "CERT_PINNING_ANALYSIS": (
-        "certificatepinner", "networksecuritytrustmanager", "trustmanagerimpl",
-        "x509trustmanager", "sslcontext", "hostnameverifier",
-        "sslpeerunverifiedexception", "usercertificatesource",
-        "openconnection", "webviewclient.onreceivedsslerror",
-    ),
-    "TLS_NEGOTIATION": (
-        "sslcontext", "sslsocket", "setenabledprotocols", "okhttp",
-        "trustmanager", "hostnameverifier", "openconnection",
-    ),
-    "DYNAMIC_LOGGING": (
-        "android.util.log", "log.", "timber", "openconnection",
-    ),
-}
 
-
-def _detect_custom_script_conflicts(context: str) -> list:
-    if not CUSTOM_FRIDA_SCRIPT or not context:
-        return []
-
-    keywords = CUSTOM_SCRIPT_CONFLICT_KEYWORDS.get(context, ())
-    if not keywords:
-        return []
-
-    script_l = CUSTOM_FRIDA_SCRIPT.lower()
-    return [kw for kw in keywords if kw in script_l]
-
-
-def _resolve_custom_script_strategy(context: str) -> tuple:
+def _build_frida_js(jscode: str, context: str = "") -> str:
     """
-    Decide how to combine built-in dynamic-test hooks with the user -l script.
-    Returns: (strategy, conflicts)
-      - "append": append custom script to built-in script
-      - "skip": do not inject custom script for this context
-      - "custom_only": run only custom script for this context (used for cert test)
-      - "none": no custom script configured
+    Return built-in jscode unchanged.
+    User -l script is loaded as a separate Frida script via extra '-l <path>'.
     """
-    if not CUSTOM_FRIDA_SCRIPT:
-        return ("none", [])
-
-    if CUSTOM_FRIDA_SCRIPT_MODE == "force":
-        return ("append", [])
-
-    conflicts = _detect_custom_script_conflicts(context)
-    if not conflicts:
-        return ("append", [])
-
-    # Some tests often require app-specific bypass script to launch/reach network.
-    # For these contexts, prefer custom-only mode when conflicts are detected.
-    if context in ("CERT_PINNING_ANALYSIS", "DYNAMIC_LOGGING"):
-        return ("custom_only", conflicts)
-
-    # For other overlapping contexts, keep built-in test stable.
-    if context in ("TLS_NEGOTIATION",):
-        return ("skip", conflicts)
-
-    return ("append", conflicts)
-
-
-def _build_frida_js(jscode: str, context: str = "", allow_custom_only: bool = False) -> str:
-    """
-    Return jscode combined with user custom script according to the selected strategy.
-    """
-    if not CUSTOM_FRIDA_SCRIPT:
-        return jscode
-
-    strategy, conflicts = _resolve_custom_script_strategy(context)
-    label = context or "UNSCOPED"
-    sid = CUSTOM_FRIDA_SCRIPT_ID or "custom"
-
-    print(f"[*] -l strategy for {label}: {strategy} (script={sid})")
-
-    if strategy == "skip":
-        print(f"[!] Custom Frida script skipped for {context} (safe mode, hook overlap detected)")
-        if conflicts:
-            print(f"[*] Overlap keywords: {', '.join(conflicts[:6])}")
-        print("[*] Use --load-script-mode force to inject anyway.")
-        return jscode
-
-    if strategy == "custom_only":
-        if allow_custom_only:
-            print(f"[*] Custom-only mode for {context} (safe mode, hook overlap detected)")
-            if conflicts:
-                print(f"[*] Overlap keywords: {', '.join(conflicts[:6])}")
-            return (
-                f'console.log("[securitytest] -l loaded ({label}, mode=custom_only, id={sid})");\n'
-                + CUSTOM_FRIDA_SCRIPT
-            )
-        print(f"[!] Custom-only recommended for {context}, but this test does not allow it; skipping -l.")
-        return jscode
-
-    if context:
-        return (
-            jscode
-            + f'\nconsole.log("[securitytest] -l loaded ({label}, mode=append, id={sid})");\n'
-            + f"\n\n// ===== Custom script (-l) | Context: {context} =====\n"
-            + CUSTOM_FRIDA_SCRIPT
-        )
-
-    # Default behavior for callers that don't provide a context.
-    if CUSTOM_FRIDA_SCRIPT:
-        return (
-            jscode
-            + f'\nconsole.log("[securitytest] -l loaded ({label}, mode=append, id={sid})");\n'
-            + "\n\n// ===== Custom script (-l) =====\n"
-            + CUSTOM_FRIDA_SCRIPT
-        )
     return jscode
+
+
+def _build_frida_command(builtin_script_path: str, spawn_name: str, context: str = "") -> list:
+    """
+    Build frida CLI command.
+    Loads built-in dynamic-test script first, then optional user -l script.
+    """
+    cmd = ['frida', '-l', builtin_script_path]
+    if CUSTOM_FRIDA_SCRIPT_PATH:
+        cmd += ['-l', CUSTOM_FRIDA_SCRIPT_PATH]
+        sid = CUSTOM_FRIDA_SCRIPT_ID or "custom"
+        label = context or "DYNAMIC_TEST"
+        print(f"[*] Loading Frida scripts for {label}: builtin + user (-l, id={sid})")
+    else:
+        print(f"[*] Loading Frida script: builtin ({context or 'DYNAMIC_TEST'})")
+    cmd += ['-U', '-f', spawn_name]
+    return cmd
 LIB_PATHS = (
     '/androidx/', '/android/support/',
     '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
@@ -10786,7 +10699,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     tmp.write(_build_frida_js(jscode, context="TLS_NEGOTIATION").encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="TLS_NEGOTIATION"),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -10947,20 +10860,7 @@ def check_frida_pinning(base, wait_secs=15):
     )
 
     # 4) inline JS detection script with hostname extraction
-    # In safe mode, cert-pinning can fall back to custom-only if overlapping hooks are detected.
-    script_strategy, _ = _resolve_custom_script_strategy("CERT_PINNING_ANALYSIS")
-    use_custom_only = script_strategy == "custom_only"
-    if use_custom_only:
-        jscode = r"""
-        setImmediate(function install(){
-          if (!Java.available) return setTimeout(install,100);
-          Java.perform(function(){
-            send("[securitytest] Custom script mode active for cert-pinning test; built-in hooks disabled");
-          });
-        });
-        """
-    else:
-        jscode = r"""
+    jscode = r"""
     setImmediate(function install(){
       if (!Java.available) return setTimeout(install,100);
       Java.perform(function(){
@@ -11171,17 +11071,11 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 5) spawn Frida CLI with our script
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(
-        _build_frida_js(
-            jscode,
-            context="CERT_PINNING_ANALYSIS",
-            allow_custom_only=True
-        ).encode()
-    )
+    tmp.write(_build_frida_js(jscode, context="CERT_PINNING_ANALYSIS").encode())
     tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
-      ['frida','-l', tmp.name, '-U','-f', spawn_name],
+      _build_frida_command(tmp.name, spawn_name, context="CERT_PINNING_ANALYSIS"),
       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -11192,8 +11086,6 @@ def check_frida_pinning(base, wait_secs=15):
         "Try features that connect to servers (login, sync, API calls)",
         "Collecting both pinned and non-pinned network activity..."
     ]
-    if use_custom_only:
-        instructions.append("Custom -l script is active in custom-only mode for this test")
     all_output = interactive_frida_monitor(proc, "CERTIFICATE PINNING ANALYSIS", instructions)
 
     # Parse collected logs
@@ -11282,22 +11174,6 @@ def check_frida_pinning(base, wait_secs=15):
         detail_parts.append("\n</pre></details>")
 
     if not pinned_hosts and not non_pinned_hosts and not pinning_methods:
-        if use_custom_only:
-            detail_parts = [
-                "<div><strong>Custom Frida script mode active</strong></div>",
-                "<div>Built-in pinning detection hooks were disabled for this test to avoid collisions with your <code>-l</code> script.</div>",
-                "<div>Use this mode to validate app launch/root-bypass behavior while the custom script runs.</div>",
-            ]
-            if logs:
-                detail_parts.append("<br>")
-                detail_parts.append(
-                    "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
-                    "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
-                )
-                detail_parts.append("\n".join(logs[-600:]))
-                detail_parts.append("\n</pre></details>")
-            return 'INFO', "".join(detail_parts)
-
         return 'INFO', "No network activity or pinning methods observed during test."
 
     detail = "".join(detail_parts)
@@ -11365,7 +11241,7 @@ def check_frida_file_reads(base, wait_secs=7):
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
     tmp.write(_build_frida_js(jscode, context="FILE_READS").encode()); tmp.flush(); tmp.close()
     proc = subprocess.Popen(
-        ['frida','-l', tmp.name, '-U','-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="FILE_READS"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -11493,7 +11369,7 @@ def check_frida_strict_mode(base, wait_secs=7):
 
     # 4) launch Frida CLI
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="STRICT_MODE"),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -11726,10 +11602,6 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     )
 
     # 3) Frida script to hook all Log methods with filtering
-    # In safe mode, logging can fall back to custom-only if overlapping hooks are detected.
-    script_strategy, _ = _resolve_custom_script_strategy("DYNAMIC_LOGGING")
-    use_custom_only = script_strategy == "custom_only"
-
     jscode = r"""
     Java.perform(function(){
       var Log = Java.use("android.util.Log");
@@ -11811,18 +11683,12 @@ def check_frida_dynamic_logging(base, wait_secs=15):
 
     # 4) Write script to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(
-        _build_frida_js(
-            jscode,
-            context="DYNAMIC_LOGGING",
-            allow_custom_only=True
-        ).encode()
-    )
+    tmp.write(_build_frida_js(jscode, context="DYNAMIC_LOGGING").encode())
     tmp.flush(); tmp.close()
 
     # 5) Launch Frida with large buffer to handle high-volume output
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="DYNAMIC_LOGGING"),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -11837,8 +11703,6 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         "Login, authentication, API calls, data operations, etc.",
         "App Log.v/d/i/w/e calls will be captured (system logs filtered out)"
     ]
-    if use_custom_only:
-        instructions.append("Custom -l script is active in custom-only mode for this test")
     logs = interactive_frida_monitor(proc, "DYNAMIC LOGGING", instructions, send_exit_on_stop=True)
 
     # 7) Parse captured logs for sensitive data
@@ -11884,21 +11748,6 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0003/' target='_blank'>MASTG-TEST-0003: Testing Logs for Sensitive Data</a></div>"
 
     if not captured_logs:
-        if use_custom_only:
-            detail_parts = [
-                "<div><strong>Custom Frida script mode active</strong></div>",
-                "<div>Built-in dynamic logging hooks were disabled for this test to avoid collisions with your <code>-l</code> script.</div>",
-                "<div>This mode prioritizes app launch/root-bypass behavior.</div>",
-            ]
-            if logs:
-                detail_parts.append(
-                    "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
-                    "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
-                    + html.escape("\n".join(logs[-600:])) +
-                    "\n</pre></details>"
-                )
-            return 'INFO', "".join(detail_parts) + mastg_ref
-
         return 'INFO', f"<div>No log calls captured during monitoring session</div>{mastg_ref}"
 
     report_lines = []
@@ -12098,7 +11947,7 @@ def check_frida_task_hijack(base, manifest,
 
     # ── 4) launch Frida CLI ────────────────────────────────────────
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', pkg],
+        _build_frida_command(tmp.name, pkg, context="EXPORTED_ACTIVITY"),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -12862,7 +12711,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="SHAREDPREFS_DATASTORE"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -13258,7 +13107,7 @@ def check_frida_external_storage(base, wait_secs=10):
     tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="EXTERNAL_STORAGE"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -13509,7 +13358,7 @@ def check_frida_pending_intent(base, wait_secs=10):
     tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="PENDING_INTENT"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -13689,7 +13538,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="CRYPTO_KEYS"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -13833,7 +13682,7 @@ def check_frida_clipboard(base, wait_secs=10):
     tmp.close()
 
     proc = subprocess.Popen(
-        ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
+        _build_frida_command(tmp.name, spawn_name, context="CLIPBOARD"),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
@@ -15026,23 +14875,18 @@ def print_banner():
       -i, --include-libs  Include third-party/library code in scans
       -a, --all-tests     Run all tests without interactive selection
       -l, --load-script   Additional Frida JS file for dynamic tests
-      --load-script-mode  safe (default) or force
 
     Notes:
      ensure adb devices identifes the connected devices 
      while the -u requires Frida to be running on rooted android device connected via usb
      verify frida-ps -Uai finds the app before using this option
-     use -l to load an additional Frida script during dynamic tests
-     safe mode auto-detects likely hook overlap with built-in dynamic tests
-     cert-pinning and dynamic-logging use custom-only mode when overlap is detected
-     some other overlapping tests (for example TLS negotiation) may skip -l
-     use --load-script-mode force to inject -l into every dynamic test
+     use -l to load an additional app-specific Frida script for dynamic tests
+     securitytest loads built-in and user -l scripts together via multiple Frida -l options
 
     Usage:
       python3 securitytest.py -f /path/to/app.apk -u -a
       python3 securitytest.py -d /path/to/decompiled -u -a
       python3 securitytest.py -d /path/to/decompiled -u -l /path/to/extra_hooks.js -a
-      python3 securitytest.py -d /path/to/decompiled -u -l /path/to/extra_hooks.js --load-script-mode force -a
       python3 securitytest.py --help
 
     Requirements:  These must be on your $PATH
@@ -15708,25 +15552,22 @@ def main():
     parser.add_argument('-i','--include-libs', action='store_true', help='Include third-party/library code in scans')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     parser.add_argument('-l','--load-script', dest='load_script', default=None,
-                        help='Path to an additional Frida JS file for dynamic tests (behavior controlled by --load-script-mode)')
-    parser.add_argument('--load-script-mode', choices=['safe', 'force'], default='safe',
-                        help='safe: auto conflict handling for -l per test context; force: inject -l into all dynamic tests')
+                        help='Path to an additional Frida JS file loaded alongside built-in dynamic-test scripts')
     args = parser.parse_args()
 
-    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_MODE, CUSTOM_FRIDA_SCRIPT_ID
+    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_PATH, CUSTOM_FRIDA_SCRIPT_ID
     INCLUDE_LIBS = args.include_libs
-    CUSTOM_FRIDA_SCRIPT_MODE = args.load_script_mode
 
     if args.load_script:
         if not os.path.isfile(args.load_script):
             print(f"[!] Error: custom Frida script not found: '{args.load_script}'")
             sys.exit(1)
+        CUSTOM_FRIDA_SCRIPT_PATH = args.load_script
         with open(args.load_script, 'r', encoding='utf-8') as fh:
             CUSTOM_FRIDA_SCRIPT = fh.read()
         CUSTOM_FRIDA_SCRIPT_ID = hashlib.sha1(CUSTOM_FRIDA_SCRIPT.encode('utf-8', errors='ignore')).hexdigest()[:10]
         print(f"[+] Custom Frida script loaded: {args.load_script}")
         print(f"[*] Custom Frida script id: {CUSTOM_FRIDA_SCRIPT_ID}")
-        print(f"[*] Custom script mode: {CUSTOM_FRIDA_SCRIPT_MODE}")
 
     # Run pre-flight checks
     success, errors = run_preflight_checks(check_device=args.usb)
