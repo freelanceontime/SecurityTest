@@ -39,6 +39,7 @@ INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
 CUSTOM_FRIDA_SCRIPT_PATH = None  # Optional user-supplied JS path passed via -l
 CUSTOM_FRIDA_SCRIPT_ID = ""  # short hash/id for visibility in logs
+FRIDA_LAST_STOP_REASON = None  # tracks why the last interactive Frida monitor ended
 
 
 def _build_frida_js(jscode: str, context: str = "") -> str:
@@ -339,6 +340,8 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
 
     logs = []
     is_windows = platform.system() == 'Windows'
+    global FRIDA_LAST_STOP_REASON
+    FRIDA_LAST_STOP_REASON = None
 
     # Import threading/queue for Windows
     if is_windows:
@@ -385,6 +388,8 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
 
             if user_pressed_enter:
                 print("\n[*] Stopping Frida and analyzing results...")
+                if FRIDA_LAST_STOP_REASON is None:
+                    FRIDA_LAST_STOP_REASON = "user_stop"
                 if send_exit_on_stop and proc.poll() is None:
                     print("[*] Sending exit command to Frida...")
                     try:
@@ -496,12 +501,15 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 # App crash detected in output. Do not auto-continue: wait for ENTER.
                 if "Process crashed:" in line:
                     stop_reason = "Target process crashed."
+                    FRIDA_LAST_STOP_REASON = "crash"
                     frida_stopped = True
 
             # If Frida exited and there's no new output, do not auto-continue.
             if proc.poll() is not None and not line:
                 if not stop_reason:
                     stop_reason = "Frida process exited unexpectedly."
+                if FRIDA_LAST_STOP_REASON is None:
+                    FRIDA_LAST_STOP_REASON = "frida_exit"
                 frida_stopped = True
 
             if frida_stopped and not stop_notice_shown:
@@ -515,6 +523,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
 
     except KeyboardInterrupt:
         print("\n[!] Test interrupted by user")
+        FRIDA_LAST_STOP_REASON = "keyboard_interrupt"
         pass
     finally:
         # Restore stdin to blocking mode on Unix
@@ -15572,7 +15581,7 @@ def main():
                         help='Path to an additional Frida JS file loaded alongside built-in dynamic-test scripts')
     args = parser.parse_args()
 
-    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_PATH, CUSTOM_FRIDA_SCRIPT_ID
+    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_PATH, CUSTOM_FRIDA_SCRIPT_ID, FRIDA_LAST_STOP_REASON
     INCLUDE_LIBS = args.include_libs
 
     if args.load_script:
@@ -16058,10 +16067,36 @@ def main():
             res = None
             ok = None
             det = ""
+
+            # Track whether this dynamic test crashed under user -l, and if so retry once without it.
+            FRIDA_LAST_STOP_REASON = None
             try:
                 res = fn()
             except Exception as e:
                 res = ('FAIL', f"<strong>Error: {html.escape(str(e))}</strong>")
+
+            if CUSTOM_FRIDA_SCRIPT_PATH and FRIDA_LAST_STOP_REASON == "crash":
+                print("[!] Dynamic test crashed while user -l script was active.")
+                print(f"[*] Retrying {name} once without user -l script...")
+
+                saved_script_path = CUSTOM_FRIDA_SCRIPT_PATH
+                saved_script_text = CUSTOM_FRIDA_SCRIPT
+                saved_script_id = CUSTOM_FRIDA_SCRIPT_ID
+
+                try:
+                    CUSTOM_FRIDA_SCRIPT_PATH = None
+                    CUSTOM_FRIDA_SCRIPT = None
+                    CUSTOM_FRIDA_SCRIPT_ID = ""
+                    FRIDA_LAST_STOP_REASON = None
+
+                    try:
+                        res = fn()
+                    except Exception as e:
+                        res = ('FAIL', f"<strong>Error (retry without -l): {html.escape(str(e))}</strong>")
+                finally:
+                    CUSTOM_FRIDA_SCRIPT_PATH = saved_script_path
+                    CUSTOM_FRIDA_SCRIPT = saved_script_text
+                    CUSTOM_FRIDA_SCRIPT_ID = saved_script_id
 
             cls_map = {'PASS': 'pass', 'WARN': 'warn', 'FAIL': 'fail', 'INFO': 'info'}
             if isinstance(res, TestResult):
