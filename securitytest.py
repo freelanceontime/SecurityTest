@@ -4632,29 +4632,124 @@ def check_deep_link_misconfiguration(manifest):
 def render_checksec_table(text):
     """
     Render checksec output into an HTML table with dropdown filters.
-    1) Split on 2+ spaces to get 8 tokens per row.
-    2) Treat token #8 as a combo string and regex‐split it into 4 fields.
+    Supports both legacy checksec tabular output and checksec.rs key/value output.
     """
+    def _build_table_html(col_names, rows):
+        unique_vals = [sorted({r[i] for r in rows}) for i in range(len(col_names))]
+        table_html = ['<table id="checksecTable"><thead><tr>']
+        for vals in unique_vals:
+            opts = "".join(
+                f'<option value="{html.escape(v)}">{html.escape(v)}</option>'
+                for v in vals
+            )
+            table_html.append(
+                '<th><select class="filter-select" onchange="applyFilters()">'
+                '<option value="">All</option>' + opts +
+                '</select></th>'
+            )
+        table_html.append('</tr><tr>')
+        for idx, h in enumerate(col_names):
+            table_html.append(
+                f'<th class="sortable" onclick="sortTable({idx})">'
+                f'{html.escape(h)} <span class="chevron"></span></th>'
+            )
+        table_html.append('</tr></thead><tbody>')
+        for r in rows:
+            table_html.append('<tr>')
+            for cell in r:
+                table_html.append(f'<td>{html.escape(cell)}</td>')
+            table_html.append('</tr>')
+        table_html.append('</tbody></table>')
+        return "".join(table_html)
 
-    # 1) Gather non-empty lines
     lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return f"<pre>{html.escape(text)}</pre>"
+
+    # 1) checksec.rs format:
+    # ELF64: | Canary: true ... Relro: Full ... | File: /path/lib.so
+    kv_re = re.compile(r'([A-Za-z][A-Za-z0-9_-]*):\s*([^:|]+?)(?=\s+[A-Za-z][A-Za-z0-9_-]*:\s*|$)')
+    rs_rows = []
+    for ln in lines:
+        if "|" not in ln or "File:" not in ln:
+            continue
+        segs = [s.strip() for s in ln.split("|")]
+        if not segs:
+            continue
+
+        row = {}
+        arch = segs[0].rstrip(":").strip()
+        if arch:
+            row["Binary"] = arch
+
+        kv_blob_parts = []
+        file_path = ""
+        for seg in segs[1:]:
+            if seg.lower().startswith("file:"):
+                file_path = seg.split(":", 1)[1].strip()
+            else:
+                kv_blob_parts.append(seg)
+
+        kv_blob = " ".join(kv_blob_parts).strip()
+        for m in kv_re.finditer(kv_blob):
+            row[m.group(1).strip()] = m.group(2).strip()
+
+        if file_path:
+            row["File"] = file_path
+
+        if row.get("File"):
+            rs_rows.append(row)
+
+    if rs_rows:
+        preferred_cols = [
+            "Binary", "Relro", "Canary", "NX", "PIE", "CFI",
+            "SafeStack", "StackClash", "Fortify", "Fortified",
+            "Fortifiable", "RPATH", "RUNPATH", "File",
+        ]
+        discovered_cols = []
+        for row in rs_rows:
+            for k in row.keys():
+                if k not in discovered_cols:
+                    discovered_cols.append(k)
+
+        col_names = [c for c in preferred_cols if c in discovered_cols]
+        col_names += [c for c in discovered_cols if c not in col_names]
+        rows = [[row.get(c, "") for c in col_names] for row in rs_rows]
+
+        relro_idx = next((i for i, c in enumerate(col_names) if c.lower() == "relro"), None)
+        if relro_idx is not None:
+            rows.sort(key=lambda r: 0 if "partial" in r[relro_idx].lower() else 1)
+
+        return _build_table_html(col_names, rows)
+
     if len(lines) < 2:
-        return f"<pre>{text}</pre>"
+        return f"<pre>{html.escape(text)}</pre>"
 
-    # 2) Split header into its raw tokens (should be 8)
+    # 2) Legacy tabular output
     raw_hdr = re.split(r"\s{2,}", lines[0].strip())
-    if len(raw_hdr) < 8:
-        return f"<pre>Unexpected header format:\n{lines[0]}</pre>"
 
-    # Build our final column names: 
-    # first 7 from raw_hdr, then the four we’re about to parse out, 
-    # then ignore raw_hdr[7] (combined) entirely.
+    # Generic split parser first (most legacy outputs)
+    if len(raw_hdr) >= 2:
+        generic_rows = []
+        for ln in lines[1:]:
+            parts = re.split(r"\s{2,}", ln.strip(), maxsplit=len(raw_hdr) - 1)
+            if len(parts) == len(raw_hdr):
+                generic_rows.append(parts)
+        if generic_rows:
+            relro_idx = next((i for i, h in enumerate(raw_hdr) if "relro" in h.lower()), 0)
+            generic_rows.sort(
+                key=lambda r: 0 if "partial" in r[relro_idx].lower() else 1
+            )
+            return _build_table_html(raw_hdr, generic_rows)
+
+    # Compatibility fallback for older compact combo format
+    if len(raw_hdr) < 8:
+        return f"<pre>Unexpected header format:\n{html.escape(lines[0])}</pre>"
+
     filename_hdr = raw_hdr[-1]
     col_names = raw_hdr[:7] + ["FORTIFY", "Fortified", "Fortifiable", filename_hdr]
-
     rows = []
     combo_re = re.compile(r'^(Yes|No)(\d+)(\d+)(/.+)$')
-    # 3) For each data line, split into 8 parts, then parse part 8
     for ln in lines[1:]:
         parts = re.split(r"\s{2,}", ln.strip(), maxsplit=7)
         if len(parts) != 8:
@@ -4662,45 +4757,16 @@ def render_checksec_table(text):
         first7, combo = parts[:7], parts[7]
         m = combo_re.match(combo)
         if not m:
-            # fallback: stick everything into filename
             f_val, fort, fortif, fname = "", "", "", combo
         else:
             f_val, fort, fortif, fname = m.groups()
         rows.append(first7 + [f_val, fort, fortif, fname])
 
-    # 4) Sort Partial RELRO first
+    if not rows:
+        return f"<pre>{html.escape(text)}</pre>"
+
     rows.sort(key=lambda r: 0 if "Partial RELRO" in r[0] else 1)
-
-    # 5) Build unique filter options per column
-    unique_vals = [sorted({r[i] for r in rows}) for i in range(len(col_names))]
-
-    # 6) Assemble HTML with per-column dropdowns
-    html = ['<table id="checksecTable"><thead><tr>']
-    # filter row
-    for vals in unique_vals:
-        opts = "".join(f'<option value="{v}">{v}</option>' for v in vals)
-        html.append(
-            '<th><select class="filter-select" onchange="applyFilters()">'
-            '<option value="">All</option>' + opts +
-            '</select></th>'
-        )
-    html.append('</tr><tr>')
-    # header labels with sort chevrons
-    for idx, h in enumerate(col_names):
-        html.append(
-            f'<th class="sortable" onclick="sortTable({idx})">'
-            f'{h} <span class="chevron"></span></th>'
-        )
-    html.append('</tr></thead><tbody>')
-    # data rows
-    for r in rows:
-        html.append('<tr>')
-        for cell in r:
-            html.append(f'<td>{cell}</td>')
-        html.append('</tr>')
-    html.append('</tbody></table>')
-
-    return "".join(html)
+    return _build_table_html(col_names, rows)
     
 def check_task_hijack(manifest):
     """
@@ -14776,16 +14842,18 @@ def print_banner():
       -u, --usb           Run dynamic Frida USB checks
       -i, --include-libs  Include third-party/library code in scans
       -a, --all-tests     Run all tests without interactive selection
-      -l, --load-script   Custom Frida JS file injected into every dynamic test session
+      -l, --load-script   Additional Frida JS file appended to every dynamic test session
 
     Notes:
      ensure adb devices identifes the connected devices 
      while the -u requires Frida to be running on rooted android device connected via usb
      verify frida-ps -Uai finds the app before using this option
+     use -l to load an additional Frida script during dynamic tests
 
     Usage:
       python3 securitytest.py -f /path/to/app.apk -u -a
       python3 securitytest.py -d /path/to/decompiled -u -a
+      python3 securitytest.py -d /path/to/decompiled -u -l /path/to/extra_hooks.js -a
       python3 securitytest.py --help
 
     Requirements:  These must be on your $PATH
@@ -15102,14 +15170,27 @@ def extract_lib_paths_from_checksec_output(checksec_output):
     Returns: set of library paths (str)
     """
     lib_paths = set()
-    # Pattern to match checksec output lines ending with .so paths
-    # Example: "Full RELRO  Canary found  NX enabled  DSO  No RPATH  No RUNPATH  No Symbols  Yes  42  0  /home/user/lib/arm64/libtest.so"
-    pattern = r'(?:Full|Partial|No)\s+RELRO.*?(/[^\s]+\.so)\s*$'
+    # Patterns for:
+    # 1) legacy checksec row: "... Full RELRO ... /path/lib.so"
+    # 2) checksec.rs row: "... | File: /path/lib.so"
+    legacy_pattern = r'(?:Full|Partial|No)\s+RELRO.*?(/[^\s]+\.so)\s*$'
+    rs_pattern = r'\|\s*File:\s*(/[^\s|]+\.so)\s*$'
 
     for line in checksec_output.splitlines():
-        match = re.search(pattern, line)
-        if match:
-            lib_paths.add(match.group(1))
+        rs_match = re.search(rs_pattern, line)
+        if rs_match:
+            lib_paths.add(rs_match.group(1))
+            continue
+
+        legacy_match = re.search(legacy_pattern, line)
+        if legacy_match:
+            lib_paths.add(legacy_match.group(1))
+            continue
+
+        # Safe fallback for unknown checksec variants that still end with /path/*.so
+        generic_match = re.search(r'(/[^\s|]+\.so)\s*$', line)
+        if generic_match:
+            lib_paths.add(generic_match.group(1))
 
     return lib_paths
 
@@ -15438,7 +15519,7 @@ def main():
     parser.add_argument('-i','--include-libs', action='store_true', help='Include third-party/library code in scans')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     parser.add_argument('-l','--load-script', dest='load_script', default=None,
-                        help='Path to a custom Frida JS file to inject alongside every dynamic test')
+                        help='Path to an additional Frida JS file to append during every dynamic test')
     args = parser.parse_args()
 
     global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT
