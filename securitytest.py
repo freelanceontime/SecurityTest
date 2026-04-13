@@ -37,29 +37,93 @@ __version__ = "5.1.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Optional user-supplied JS to append to every Frida session
-CUSTOM_FRIDA_SCRIPT_MODE = "safe"  # safe=skip high-conflict tests, force=inject everywhere
+CUSTOM_FRIDA_SCRIPT_MODE = "safe"  # safe=auto conflict handling, force=inject everywhere
+
+# Context-specific keywords used for lightweight conflict detection between built-in
+# dynamic-test hooks and user-provided -l scripts.
+CUSTOM_SCRIPT_CONFLICT_KEYWORDS = {
+    "CERT_PINNING_ANALYSIS": (
+        "certificatepinner", "networksecuritytrustmanager", "trustmanagerimpl",
+        "x509trustmanager", "sslcontext", "hostnameverifier",
+        "sslpeerunverifiedexception", "usercertificatesource",
+        "openconnection", "webviewclient.onreceivedsslerror",
+    ),
+    "TLS_NEGOTIATION": (
+        "sslcontext", "sslsocket", "setenabledprotocols", "okhttp",
+        "trustmanager", "hostnameverifier", "openconnection",
+    ),
+    "DYNAMIC_LOGGING": (
+        "android.util.log", "log.", "timber", "openconnection",
+    ),
+}
 
 
-def _build_frida_js(jscode: str, context: str = "") -> str:
+def _detect_custom_script_conflicts(context: str) -> list:
+    if not CUSTOM_FRIDA_SCRIPT or not context:
+        return []
+
+    keywords = CUSTOM_SCRIPT_CONFLICT_KEYWORDS.get(context, ())
+    if not keywords:
+        return []
+
+    script_l = CUSTOM_FRIDA_SCRIPT.lower()
+    return [kw for kw in keywords if kw in script_l]
+
+
+def _resolve_custom_script_strategy(context: str) -> tuple:
     """
-    Return jscode with the user's custom script appended (if one was supplied via -l).
-    In safe mode, skip injecting into known high-conflict dynamic tests.
+    Decide how to combine built-in dynamic-test hooks with the user -l script.
+    Returns: (strategy, conflicts)
+      - "append": append custom script to built-in script
+      - "skip": do not inject custom script for this context
+      - "custom_only": run only custom script for this context (used for cert test)
+      - "none": no custom script configured
+    """
+    if not CUSTOM_FRIDA_SCRIPT:
+        return ("none", [])
+
+    if CUSTOM_FRIDA_SCRIPT_MODE == "force":
+        return ("append", [])
+
+    conflicts = _detect_custom_script_conflicts(context)
+    if not conflicts:
+        return ("append", [])
+
+    # Cert-pinning test often requires app-specific bypass script to launch/reach network.
+    # For this context, prefer custom-only mode when conflicts are detected.
+    if context == "CERT_PINNING_ANALYSIS":
+        return ("custom_only", conflicts)
+
+    # For other overlapping contexts, keep built-in test stable.
+    if context in ("TLS_NEGOTIATION", "DYNAMIC_LOGGING"):
+        return ("skip", conflicts)
+
+    return ("append", conflicts)
+
+
+def _build_frida_js(jscode: str, context: str = "", allow_custom_only: bool = False) -> str:
+    """
+    Return jscode combined with user custom script according to the selected strategy.
     """
     if not CUSTOM_FRIDA_SCRIPT:
         return jscode
 
-    # These tests already install broad SSL/network hooks; app-level bypass scripts often
-    # hook the same APIs and can crash the process due to hook collisions.
-    risky_contexts = {
-        "CERT_PINNING_ANALYSIS",
-        "TLS_NEGOTIATION",
-        "DYNAMIC_LOGGING",
-    }
+    strategy, conflicts = _resolve_custom_script_strategy(context)
 
-    if CUSTOM_FRIDA_SCRIPT_MODE != "force" and context in risky_contexts:
-        print(f"[!] Custom Frida script skipped for {context} (safe mode)")
-        print("[*] Reason: this test has overlapping low-level hooks and may crash when combined.")
-        print("[*] Use --load-script-mode force to inject into every dynamic test.")
+    if strategy == "skip":
+        print(f"[!] Custom Frida script skipped for {context} (safe mode, hook overlap detected)")
+        if conflicts:
+            print(f"[*] Overlap keywords: {', '.join(conflicts[:6])}")
+        print("[*] Use --load-script-mode force to inject anyway.")
+        return jscode
+
+    if strategy == "custom_only":
+        if allow_custom_only:
+            print(f"[*] Custom-only mode for {context} (safe mode, hook overlap detected)")
+            if conflicts:
+                print(f"[*] Overlap keywords: {', '.join(conflicts[:6])}")
+            return CUSTOM_FRIDA_SCRIPT
+        print(f"[!] Custom-only recommended for {context}, but this test does not allow it; skipping -l.")
         return jscode
 
     if context:
@@ -10869,9 +10933,9 @@ def check_frida_pinning(base, wait_secs=15):
     )
 
     # 4) inline JS detection script with hostname extraction
-    # If user supplied -l in safe mode, run custom script only for this test
-    # to avoid collisions with built-in broad SSL/network hooks.
-    use_custom_only = bool(CUSTOM_FRIDA_SCRIPT) and CUSTOM_FRIDA_SCRIPT_MODE == "safe"
+    # In safe mode, cert-pinning can fall back to custom-only if overlapping hooks are detected.
+    script_strategy, _ = _resolve_custom_script_strategy("CERT_PINNING_ANALYSIS")
+    use_custom_only = script_strategy == "custom_only"
     if use_custom_only:
         jscode = r"""
         setImmediate(function install(){
@@ -11093,8 +11157,14 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 5) spawn Frida CLI with our script
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    script_context = "CERT_PINNING_CUSTOM_ONLY" if use_custom_only else "CERT_PINNING_ANALYSIS"
-    tmp.write(_build_frida_js(jscode, context=script_context).encode()); tmp.flush(); tmp.close()
+    tmp.write(
+        _build_frida_js(
+            jscode,
+            context="CERT_PINNING_ANALYSIS",
+            allow_custom_only=True
+        ).encode()
+    )
+    tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
@@ -14921,8 +14991,8 @@ def print_banner():
      while the -u requires Frida to be running on rooted android device connected via usb
      verify frida-ps -Uai finds the app before using this option
      use -l to load an additional Frida script during dynamic tests
-     safe mode skips -l for high-conflict SSL/network tests to avoid Frida hook crashes
-     in safe mode, cert-pinning test runs your -l script in custom-only mode (built-in hooks disabled)
+     safe mode auto-detects likely hook overlap with built-in dynamic tests
+     cert-pinning uses custom-only mode when overlap is detected; some other overlapping tests may skip -l
      use --load-script-mode force to inject -l into every dynamic test
 
     Usage:
@@ -15597,7 +15667,7 @@ def main():
     parser.add_argument('-l','--load-script', dest='load_script', default=None,
                         help='Path to an additional Frida JS file for dynamic tests (behavior controlled by --load-script-mode)')
     parser.add_argument('--load-script-mode', choices=['safe', 'force'], default='safe',
-                        help='safe: skip -l for high-conflict dynamic tests; force: inject -l into all dynamic tests')
+                        help='safe: auto conflict handling for -l per test context; force: inject -l into all dynamic tests')
     args = parser.parse_args()
 
     global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_MODE
