@@ -38,6 +38,7 @@ __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Optional user-supplied JS to append to every Frida session
 CUSTOM_FRIDA_SCRIPT_MODE = "safe"  # safe=auto conflict handling, force=inject everywhere
+CUSTOM_FRIDA_SCRIPT_ID = ""  # short hash/id for visibility in logs
 
 # Context-specific keywords used for lightweight conflict detection between built-in
 # dynamic-test hooks and user-provided -l scripts.
@@ -109,6 +110,10 @@ def _build_frida_js(jscode: str, context: str = "", allow_custom_only: bool = Fa
         return jscode
 
     strategy, conflicts = _resolve_custom_script_strategy(context)
+    label = context or "UNSCOPED"
+    sid = CUSTOM_FRIDA_SCRIPT_ID or "custom"
+
+    print(f"[*] -l strategy for {label}: {strategy} (script={sid})")
 
     if strategy == "skip":
         print(f"[!] Custom Frida script skipped for {context} (safe mode, hook overlap detected)")
@@ -122,20 +127,29 @@ def _build_frida_js(jscode: str, context: str = "", allow_custom_only: bool = Fa
             print(f"[*] Custom-only mode for {context} (safe mode, hook overlap detected)")
             if conflicts:
                 print(f"[*] Overlap keywords: {', '.join(conflicts[:6])}")
-            return CUSTOM_FRIDA_SCRIPT
+            return (
+                f'console.log("[securitytest] -l loaded ({label}, mode=custom_only, id={sid})");\n'
+                + CUSTOM_FRIDA_SCRIPT
+            )
         print(f"[!] Custom-only recommended for {context}, but this test does not allow it; skipping -l.")
         return jscode
 
     if context:
         return (
             jscode
+            + f'\nconsole.log("[securitytest] -l loaded ({label}, mode=append, id={sid})");\n'
             + f"\n\n// ===== Custom script (-l) | Context: {context} =====\n"
             + CUSTOM_FRIDA_SCRIPT
         )
 
     # Default behavior for callers that don't provide a context.
     if CUSTOM_FRIDA_SCRIPT:
-        return jscode + "\n\n// ===== Custom script (-l) =====\n" + CUSTOM_FRIDA_SCRIPT
+        return (
+            jscode
+            + f'\nconsole.log("[securitytest] -l loaded ({label}, mode=append, id={sid})");\n'
+            + "\n\n// ===== Custom script (-l) =====\n"
+            + CUSTOM_FRIDA_SCRIPT
+        )
     return jscode
 LIB_PATHS = (
     '/androidx/', '/android/support/',
@@ -15699,7 +15713,7 @@ def main():
                         help='safe: auto conflict handling for -l per test context; force: inject -l into all dynamic tests')
     args = parser.parse_args()
 
-    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_MODE
+    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_MODE, CUSTOM_FRIDA_SCRIPT_ID
     INCLUDE_LIBS = args.include_libs
     CUSTOM_FRIDA_SCRIPT_MODE = args.load_script_mode
 
@@ -15709,7 +15723,9 @@ def main():
             sys.exit(1)
         with open(args.load_script, 'r', encoding='utf-8') as fh:
             CUSTOM_FRIDA_SCRIPT = fh.read()
+        CUSTOM_FRIDA_SCRIPT_ID = hashlib.sha1(CUSTOM_FRIDA_SCRIPT.encode('utf-8', errors='ignore')).hexdigest()[:10]
         print(f"[+] Custom Frida script loaded: {args.load_script}")
+        print(f"[*] Custom Frida script id: {CUSTOM_FRIDA_SCRIPT_ID}")
         print(f"[*] Custom script mode: {CUSTOM_FRIDA_SCRIPT_MODE}")
 
     # Run pre-flight checks
