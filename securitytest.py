@@ -89,13 +89,13 @@ def _resolve_custom_script_strategy(context: str) -> tuple:
     if not conflicts:
         return ("append", [])
 
-    # Cert-pinning test often requires app-specific bypass script to launch/reach network.
-    # For this context, prefer custom-only mode when conflicts are detected.
-    if context == "CERT_PINNING_ANALYSIS":
+    # Some tests often require app-specific bypass script to launch/reach network.
+    # For these contexts, prefer custom-only mode when conflicts are detected.
+    if context in ("CERT_PINNING_ANALYSIS", "DYNAMIC_LOGGING"):
         return ("custom_only", conflicts)
 
     # For other overlapping contexts, keep built-in test stable.
-    if context in ("TLS_NEGOTIATION", "DYNAMIC_LOGGING"):
+    if context in ("TLS_NEGOTIATION",):
         return ("skip", conflicts)
 
     return ("append", conflicts)
@@ -11712,6 +11712,10 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     )
 
     # 3) Frida script to hook all Log methods with filtering
+    # In safe mode, logging can fall back to custom-only if overlapping hooks are detected.
+    script_strategy, _ = _resolve_custom_script_strategy("DYNAMIC_LOGGING")
+    use_custom_only = script_strategy == "custom_only"
+
     jscode = r"""
     Java.perform(function(){
       var Log = Java.use("android.util.Log");
@@ -11793,7 +11797,14 @@ def check_frida_dynamic_logging(base, wait_secs=15):
 
     # 4) Write script to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode, context="DYNAMIC_LOGGING").encode()); tmp.flush(); tmp.close()
+    tmp.write(
+        _build_frida_js(
+            jscode,
+            context="DYNAMIC_LOGGING",
+            allow_custom_only=True
+        ).encode()
+    )
+    tmp.flush(); tmp.close()
 
     # 5) Launch Frida with large buffer to handle high-volume output
     proc = subprocess.Popen(
@@ -11812,6 +11823,8 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         "Login, authentication, API calls, data operations, etc.",
         "App Log.v/d/i/w/e calls will be captured (system logs filtered out)"
     ]
+    if use_custom_only:
+        instructions.append("Custom -l script is active in custom-only mode for this test")
     logs = interactive_frida_monitor(proc, "DYNAMIC LOGGING", instructions, send_exit_on_stop=True)
 
     # 7) Parse captured logs for sensitive data
@@ -11857,6 +11870,21 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0003/' target='_blank'>MASTG-TEST-0003: Testing Logs for Sensitive Data</a></div>"
 
     if not captured_logs:
+        if use_custom_only:
+            detail_parts = [
+                "<div><strong>Custom Frida script mode active</strong></div>",
+                "<div>Built-in dynamic logging hooks were disabled for this test to avoid collisions with your <code>-l</code> script.</div>",
+                "<div>This mode prioritizes app launch/root-bypass behavior.</div>",
+            ]
+            if logs:
+                detail_parts.append(
+                    "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+                    "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+                    + html.escape("\n".join(logs[-600:])) +
+                    "\n</pre></details>"
+                )
+            return 'INFO', "".join(detail_parts) + mastg_ref
+
         return 'INFO', f"<div>No log calls captured during monitoring session</div>{mastg_ref}"
 
     report_lines = []
@@ -14992,7 +15020,8 @@ def print_banner():
      verify frida-ps -Uai finds the app before using this option
      use -l to load an additional Frida script during dynamic tests
      safe mode auto-detects likely hook overlap with built-in dynamic tests
-     cert-pinning uses custom-only mode when overlap is detected; some other overlapping tests may skip -l
+     cert-pinning and dynamic-logging use custom-only mode when overlap is detected
+     some other overlapping tests (for example TLS negotiation) may skip -l
      use --load-script-mode force to inject -l into every dynamic test
 
     Usage:
