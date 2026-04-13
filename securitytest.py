@@ -10869,7 +10869,20 @@ def check_frida_pinning(base, wait_secs=15):
     )
 
     # 4) inline JS detection script with hostname extraction
-    jscode = r"""
+    # If user supplied -l in safe mode, run custom script only for this test
+    # to avoid collisions with built-in broad SSL/network hooks.
+    use_custom_only = bool(CUSTOM_FRIDA_SCRIPT) and CUSTOM_FRIDA_SCRIPT_MODE == "safe"
+    if use_custom_only:
+        jscode = r"""
+        setImmediate(function install(){
+          if (!Java.available) return setTimeout(install,100);
+          Java.perform(function(){
+            send("[securitytest] Custom script mode active for cert-pinning test; built-in hooks disabled");
+          });
+        });
+        """
+    else:
+        jscode = r"""
     setImmediate(function install(){
       if (!Java.available) return setTimeout(install,100);
       Java.perform(function(){
@@ -11080,7 +11093,8 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 5) spawn Frida CLI with our script
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode, context="CERT_PINNING_ANALYSIS").encode()); tmp.flush(); tmp.close()
+    script_context = "CERT_PINNING_CUSTOM_ONLY" if use_custom_only else "CERT_PINNING_ANALYSIS"
+    tmp.write(_build_frida_js(jscode, context=script_context).encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
@@ -11094,6 +11108,8 @@ def check_frida_pinning(base, wait_secs=15):
         "Try features that connect to servers (login, sync, API calls)",
         "Collecting both pinned and non-pinned network activity..."
     ]
+    if use_custom_only:
+        instructions.append("Custom -l script is active in custom-only mode for this test")
     all_output = interactive_frida_monitor(proc, "CERTIFICATE PINNING ANALYSIS", instructions)
 
     # Parse collected logs
@@ -11182,6 +11198,22 @@ def check_frida_pinning(base, wait_secs=15):
         detail_parts.append("\n</pre></details>")
 
     if not pinned_hosts and not non_pinned_hosts and not pinning_methods:
+        if use_custom_only:
+            detail_parts = [
+                "<div><strong>Custom Frida script mode active</strong></div>",
+                "<div>Built-in pinning detection hooks were disabled for this test to avoid collisions with your <code>-l</code> script.</div>",
+                "<div>Use this mode to validate app launch/root-bypass behavior while the custom script runs.</div>",
+            ]
+            if logs:
+                detail_parts.append("<br>")
+                detail_parts.append(
+                    "<details style='margin-top:8px'><summary style='cursor:pointer; font-size:11px; color:#0066cc'>View full Frida output</summary>"
+                    "<pre style='white-space:pre-wrap; font-size:9px; max-height:300px; overflow-y:auto; background:#f5f5f5; padding:6px'>\n"
+                )
+                detail_parts.append("\n".join(logs[-600:]))
+                detail_parts.append("\n</pre></details>")
+            return 'INFO', "".join(detail_parts)
+
         return 'INFO', "No network activity or pinning methods observed during test."
 
     detail = "".join(detail_parts)
@@ -14890,6 +14922,7 @@ def print_banner():
      verify frida-ps -Uai finds the app before using this option
      use -l to load an additional Frida script during dynamic tests
      safe mode skips -l for high-conflict SSL/network tests to avoid Frida hook crashes
+     in safe mode, cert-pinning test runs your -l script in custom-only mode (built-in hooks disabled)
      use --load-script-mode force to inject -l into every dynamic test
 
     Usage:
