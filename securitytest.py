@@ -37,10 +37,39 @@ __version__ = "5.1.2"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Optional user-supplied JS to append to every Frida session
+CUSTOM_FRIDA_SCRIPT_MODE = "safe"  # safe=skip high-conflict tests, force=inject everywhere
 
 
-def _build_frida_js(jscode: str) -> str:
-    """Return jscode with the user's custom script appended (if one was supplied via -l)."""
+def _build_frida_js(jscode: str, context: str = "") -> str:
+    """
+    Return jscode with the user's custom script appended (if one was supplied via -l).
+    In safe mode, skip injecting into known high-conflict dynamic tests.
+    """
+    if not CUSTOM_FRIDA_SCRIPT:
+        return jscode
+
+    # These tests already install broad SSL/network hooks; app-level bypass scripts often
+    # hook the same APIs and can crash the process due to hook collisions.
+    risky_contexts = {
+        "CERT_PINNING_ANALYSIS",
+        "TLS_NEGOTIATION",
+        "DYNAMIC_LOGGING",
+    }
+
+    if CUSTOM_FRIDA_SCRIPT_MODE != "force" and context in risky_contexts:
+        print(f"[!] Custom Frida script skipped for {context} (safe mode)")
+        print("[*] Reason: this test has overlapping low-level hooks and may crash when combined.")
+        print("[*] Use --load-script-mode force to inject into every dynamic test.")
+        return jscode
+
+    if context:
+        return (
+            jscode
+            + f"\n\n// ===== Custom script (-l) | Context: {context} =====\n"
+            + CUSTOM_FRIDA_SCRIPT
+        )
+
+    # Default behavior for callers that don't provide a context.
     if CUSTOM_FRIDA_SCRIPT:
         return jscode + "\n\n// ===== Custom script (-l) =====\n" + CUSTOM_FRIDA_SCRIPT
     return jscode
@@ -461,6 +490,16 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 print(line.rstrip())
                 # Store log line
                 logs.append(line.rstrip())
+
+                # Stop early on app crash to avoid massive tombstone spam.
+                if "Process crashed:" in line:
+                    print("[!] Target process crashed. Stopping this dynamic test early.")
+                    break
+
+            # If Frida exited and there's no new output, stop monitoring.
+            if proc.poll() is not None and not line:
+                print("[!] Frida process exited unexpectedly. Stopping monitor.")
+                break
 
             # Small delay to prevent CPU spinning
             if is_windows:
@@ -10666,7 +10705,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
 
     # 4) write JS, launch frida (send Enter to resume the spawned app)
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="TLS_NEGOTIATION").encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
         ['frida', '-l', tmp.name, '-U', '-f', spawn_name],
@@ -11041,7 +11080,7 @@ def check_frida_pinning(base, wait_secs=15):
 
     # 5) spawn Frida CLI with our script
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="CERT_PINNING_ANALYSIS").encode()); tmp.flush(); tmp.close()
 
     proc = subprocess.Popen(
       ['frida','-l', tmp.name, '-U','-f', spawn_name],
@@ -11208,7 +11247,7 @@ def check_frida_file_reads(base, wait_secs=7):
 
     # 5) write to temp file and launch frida CLI
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="FILE_READS").encode()); tmp.flush(); tmp.close()
     proc = subprocess.Popen(
         ['frida','-l', tmp.name, '-U','-f', spawn_name],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
@@ -11334,7 +11373,7 @@ def check_frida_strict_mode(base, wait_secs=7):
     });
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="STRICT_MODE").encode()); tmp.flush(); tmp.close()
 
     # 4) launch Frida CLI
     proc = subprocess.Popen(
@@ -11652,7 +11691,7 @@ def check_frida_dynamic_logging(base, wait_secs=15):
 
     # 4) Write script to temp file
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="DYNAMIC_LOGGING").encode()); tmp.flush(); tmp.close()
 
     # 5) Launch Frida with large buffer to handle high-volume output
     proc = subprocess.Popen(
@@ -11911,7 +11950,7 @@ def check_frida_task_hijack(base, manifest,
 
     # ── 3) write JS to temp file ────────────────────────────────────
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode()); tmp.flush(); tmp.close()
+    tmp.write(_build_frida_js(jscode, context="EXPORTED_ACTIVITY").encode()); tmp.flush(); tmp.close()
 
     # ── 4) launch Frida CLI ────────────────────────────────────────
     proc = subprocess.Popen(
@@ -12674,7 +12713,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode())
+    tmp.write(_build_frida_js(jscode, context="SHAREDPREFS_DATASTORE").encode())
     tmp.flush()
     tmp.close()
 
@@ -13070,7 +13109,7 @@ def check_frida_external_storage(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode())
+    tmp.write(_build_frida_js(jscode, context="EXTERNAL_STORAGE").encode())
     tmp.flush()
     tmp.close()
 
@@ -13321,7 +13360,7 @@ def check_frida_pending_intent(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode())
+    tmp.write(_build_frida_js(jscode, context="PENDING_INTENT").encode())
     tmp.flush()
     tmp.close()
 
@@ -13501,7 +13540,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode())
+    tmp.write(_build_frida_js(jscode, context="CRYPTO_KEYS").encode())
     tmp.flush()
     tmp.close()
 
@@ -13645,7 +13684,7 @@ def check_frida_clipboard(base, wait_secs=10):
     """
 
     tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
-    tmp.write(_build_frida_js(jscode).encode())
+    tmp.write(_build_frida_js(jscode, context="CLIPBOARD").encode())
     tmp.flush()
     tmp.close()
 
@@ -14842,18 +14881,22 @@ def print_banner():
       -u, --usb           Run dynamic Frida USB checks
       -i, --include-libs  Include third-party/library code in scans
       -a, --all-tests     Run all tests without interactive selection
-      -l, --load-script   Additional Frida JS file appended to every dynamic test session
+      -l, --load-script   Additional Frida JS file for dynamic tests
+      --load-script-mode  safe (default) or force
 
     Notes:
      ensure adb devices identifes the connected devices 
      while the -u requires Frida to be running on rooted android device connected via usb
      verify frida-ps -Uai finds the app before using this option
      use -l to load an additional Frida script during dynamic tests
+     safe mode skips -l for high-conflict SSL/network tests to avoid Frida hook crashes
+     use --load-script-mode force to inject -l into every dynamic test
 
     Usage:
       python3 securitytest.py -f /path/to/app.apk -u -a
       python3 securitytest.py -d /path/to/decompiled -u -a
       python3 securitytest.py -d /path/to/decompiled -u -l /path/to/extra_hooks.js -a
+      python3 securitytest.py -d /path/to/decompiled -u -l /path/to/extra_hooks.js --load-script-mode force -a
       python3 securitytest.py --help
 
     Requirements:  These must be on your $PATH
@@ -15519,11 +15562,14 @@ def main():
     parser.add_argument('-i','--include-libs', action='store_true', help='Include third-party/library code in scans')
     parser.add_argument('-a','--all-tests', action='store_true', help='Run all tests without interactive selection')
     parser.add_argument('-l','--load-script', dest='load_script', default=None,
-                        help='Path to an additional Frida JS file to append during every dynamic test')
+                        help='Path to an additional Frida JS file for dynamic tests (behavior controlled by --load-script-mode)')
+    parser.add_argument('--load-script-mode', choices=['safe', 'force'], default='safe',
+                        help='safe: skip -l for high-conflict dynamic tests; force: inject -l into all dynamic tests')
     args = parser.parse_args()
 
-    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT
+    global INCLUDE_LIBS, CUSTOM_FRIDA_SCRIPT, CUSTOM_FRIDA_SCRIPT_MODE
     INCLUDE_LIBS = args.include_libs
+    CUSTOM_FRIDA_SCRIPT_MODE = args.load_script_mode
 
     if args.load_script:
         if not os.path.isfile(args.load_script):
@@ -15532,6 +15578,7 @@ def main():
         with open(args.load_script, 'r', encoding='utf-8') as fh:
             CUSTOM_FRIDA_SCRIPT = fh.read()
         print(f"[+] Custom Frida script loaded: {args.load_script}")
+        print(f"[*] Custom script mode: {CUSTOM_FRIDA_SCRIPT_MODE}")
 
     # Run pre-flight checks
     success, errors = run_preflight_checks(check_device=args.usb)
