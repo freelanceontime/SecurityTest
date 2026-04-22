@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Literal, List, Optional, Dict
 from datetime import datetime
 import platform
+from pathlib import Path
 
 # Platform-specific imports
 if platform.system() == 'Windows':
@@ -16289,7 +16290,9 @@ def main():
             kpi_pass=kpi_pass,
             sections=sections
         ))
-    print(f'[+] Report generated: {report_filename}')
+    report_path = Path(report_filename).resolve()
+    report_uri = report_path.as_uri()
+    print(f'[+] Report generated: {report_uri}')
 
     # Display summary
     duration = finish_timestamp - start_timestamp
