@@ -70,6 +70,8 @@ def _build_frida_command(builtin_script_path: str, spawn_name: str, context: str
 LIB_PATHS = (
     '/androidx/', '/android/support/',
     '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
+    '/com/google/android/libraries/',  # Google SDK libraries (Places, Maps, etc.)
+    '/com/google/maps/android/',       # Google Maps Android SDK
     '/okhttp3/', '/retrofit2/', '/com/squareup/',
     '/com/facebook/', '/kotlin/', '/kotlinx/',
     '/io/reactivex/', '/rx/', '/dagger/',
@@ -84,6 +86,10 @@ LIB_PATHS = (
     '/com/badlogic/gdx/',  # libGDX game engine
     '/com/fredporciuncula/flow/preferences/',  # flow-preferences library
     '/com/pierfrancescosoffritti/',  # Android YouTube Player library
+    '/com/bumptech/glide/',  # Glide image loading library
+    '/io/ktor/',             # Ktor HTTP/WebSocket client
+    '/com/neovisionaries/',  # nv-websocket-client (used by Twilio SDK)
+    '/com/twilio/',          # Twilio Conversations / Twilsock SDK
     '/lib/', '/jetified-'
 )
 
@@ -2782,8 +2788,18 @@ def check_x509(base):
         'androidx/', 'android/support/', 'com/google/',
         'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
         'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/',
-        'org/conscrypt/'  # Google's Conscrypt TLS/crypto provider (standalone version)
+        'org/conscrypt/',        # Google's Conscrypt TLS/crypto provider (standalone)
+        'com/neovisionaries/',   # nv-websocket-client — implements its own OkHostnameVerifier post-handshake
+        'com/twilio/',           # Twilio SDK (uses nv-websocket-client internally)
+        'io/ktor/',              # Ktor HTTP client
+        'com/bumptech/glide/',   # Glide image loader
     ]
+
+    # Patterns that indicate a manual equivalent of endpoint identification is present:
+    # the method calls verifyHostname, OkHostnameVerifier, or any HostnameVerifier.verify
+    manual_hostname_verify_re = re.compile(
+        r'(verifyHostname|OkHostnameVerifier|HostnameVerifier|->verify\(.*SSLSession|checkHostname)'
+    )
 
     files_to_scan = []
     for root, _, files in os.walk(base):
@@ -2910,17 +2926,23 @@ def check_x509(base):
 
                 # -- SSLSocket endpoint identification check --
                 elif sslsocket_init_re.search(line):
-                    # Check if setEndpointIdentificationAlgorithm is called in the next 30 lines
+                    # Check if setEndpointIdentificationAlgorithm is called in the next 30 lines,
+                    # OR if a manual equivalent (verifyHostname / OkHostnameVerifier / HostnameVerifier.verify)
+                    # is present anywhere in the surrounding method body (within 60 lines).
+                    # Manual post-handshake verification is functionally equivalent to JSSE endpoint ID.
                     has_endpoint_id = False
-                    for k in range(i, min(i+30, len(lines))):
+                    has_manual_verify = False
+                    for k in range(i, min(i+60, len(lines))):
                         if endpoint_algo_re.search(lines[k]):
                             has_endpoint_id = True
                             break
+                        if manual_hostname_verify_re.search(lines[k]):
+                            has_manual_verify = True
                         # Stop at end of method
                         if lines[k].startswith('.end method'):
                             break
 
-                    if not has_endpoint_id:
+                    if not has_endpoint_id and not has_manual_verify:
                         key = (rel, i)
                         if key not in seen:
                             seen.add(key)
@@ -5136,6 +5158,7 @@ def check_http_uris(base):
         "http://example.org",
         "http://test.com",
         "http://undefined",
+        "http://www.slf4j.org",  # SLF4J logging framework — documentation/error message URLs only
     )
 
     false_positive_patterns = [
@@ -9964,6 +9987,8 @@ def check_insecure_randomness(base):
         '/androidx/', '/android/support/',
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
         '/com/google/android/material/',  # Material Design Components library
+        '/com/google/android/libraries/',  # Google SDK libraries (Places, Maps utils, etc.)
+        '/com/google/maps/android/',       # Google Maps Android SDK (KmlStyle, clustering, etc.)
         '/com/google/common/', '/com/google/crypto/tink/',  # Google Tink cryptographic library
         '/okhttp3/', '/okio/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
@@ -9974,6 +9999,10 @@ def check_insecure_randomness(base):
         '/com/mux/',  # Mux video analytics SDK (non-crypto random for analytics)
         '/org/apache/',  # Apache Commons libraries (math operations)
         '/com/badlogic/gdx/',  # libGDX game engine (non-crypto random for game logic)
+        '/com/bumptech/glide/',  # Glide image loading library (non-crypto random for cache keys)
+        '/io/ktor/',             # Ktor HTTP/WebSocket client (non-crypto random for protocol)
+        '/com/neovisionaries/',  # nv-websocket-client WebSocket library
+        '/com/twilio/',          # Twilio Conversations SDK
         '/lib/', '/jetified-'
     )
 
