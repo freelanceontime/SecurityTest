@@ -4606,14 +4606,22 @@ def check_browsable_deeplinks(manifest):
 
 def check_deep_link_misconfiguration(manifest):
     """
-    Detect intent filters with multiple separate <data> tags that create
-    unintended URL patterns via Cartesian product.
+    Detect intent filters whose <data> tag configuration produces unintended URI patterns.
 
-    CRITICAL: Each <data> tag creates a SEPARATE URI pattern in Android.
-    If ANY <data> tag lacks a host attribute, it accepts traffic from ANY domain.
-    ALL <data> tags must have host restrictions for the intent filter to be secure.
+    Android pools all <data> attributes within one intent-filter into shared scheme,
+    host, and path sets. A URI matches if it satisfies ALL sets simultaneously.
+    Splitting one URI pattern across multiple <data> tags (one scheme tag, one host
+    tag, one path tag) is safe — they combine into a single pattern.
 
-    Also resolves @string references to accurately assess the configuration.
+    Two genuine vulnerability patterns are checked:
+
+    1. No host anywhere in the filter — the scheme is accepted with any host.
+    2. Multiple distinct hosts AND multiple distinct paths in the same filter —
+       Android's Cartesian product matches every host × path combination, producing
+       patterns the developer did not intend.
+
+    Test commands use implicit intents (no -n flag) so Android must resolve the
+    intent via filter matching. An explicit -n flag bypasses filters entirely.
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028: Testing Deep Links</a></div>"
 
@@ -4669,10 +4677,6 @@ def check_deep_link_misconfiguration(manifest):
             paths = []
             paths_raw = []
 
-            # Track which data tags have host restrictions
-            data_tags_with_hosts = 0
-            data_tags_without_hosts = []
-
             for idx, d in enumerate(data_tags):
                 scheme = d.get(ns('scheme'))
                 host = d.get(ns('host'))
@@ -4686,59 +4690,82 @@ def check_deep_link_misconfiguration(manifest):
                     hosts_raw.append(host)
                     resolved_host = resolve_string(host, manifest)
                     hosts.append(resolved_host)
-                    data_tags_with_hosts += 1
-                else:
-                    # This data tag has NO host - potential vulnerability
-                    data_tags_without_hosts.append(idx)
 
                 if path:
                     paths_raw.append(path)
                     resolved_path = resolve_string(path, manifest)
                     paths.append(resolved_path)
 
-            # CRITICAL CHECK: Each <data> tag creates a separate URI pattern in Android.
-            # If ANY <data> tag lacks a host attribute, it accepts traffic from ANY domain.
-            # ALL <data> tags must have host restrictions for the intent filter to be secure.
-            if not data_tags_without_hosts:
-                # All data tags have host restrictions - SECURE
+            # Android pools all <data> attributes across tags in the same intent-filter.
+            # A URI must satisfy the ENTIRE pool simultaneously (scheme AND host AND path).
+            # Splitting one URI pattern across multiple <data> tags is safe as long as
+            # the combined pool produces only the intended patterns.
+            #
+            # Vulnerability 1 — No host anywhere in the filter:
+            #   The filter accepts any host for the given scheme(s).
+            #
+            # Vulnerability 2 — Multiple distinct hosts AND multiple distinct paths:
+            #   Android's Cartesian product matches every host × path combination,
+            #   producing unintended URI patterns (e.g. host-A with path-B).
+            #
+            # NOT a vulnerability: one scheme tag + one host tag + one path tag split
+            # across separate <data> elements — they combine into a single pattern.
+
+            unique_schemes = list(dict.fromkeys(schemes))  # preserve order, dedupe
+            unique_hosts   = list(dict.fromkeys(hosts))
+            unique_paths   = list(dict.fromkeys(paths))
+
+            custom_schemes = [s for s in unique_schemes if s not in ('http', 'https')]
+
+            no_host_vuln        = bool(custom_schemes) and not unique_hosts
+            cartesian_vuln      = len(unique_hosts) > 1 and len(unique_paths) > 1
+
+            if not no_host_vuln and not cartesian_vuln:
                 continue
 
-            # VULNERABILITY DETECTED: At least one <data> tag has no host restriction
             auto_verify = intent_filter.get(ns('autoVerify'), 'false')
+            example_scheme = unique_schemes[0] if unique_schemes else 'https'
+            example_path   = unique_paths[0] if unique_paths else '/'
+
+            if no_host_vuln:
+                vuln_summary = (
+                    f"<strong>CRITICAL: No Host Restriction:</strong> Intent filter declares "
+                    f"scheme(s) <code>{', '.join(unique_schemes)}</code> but no host. "
+                    f"Any URI matching <code>{example_scheme}://</code> is accepted regardless of host."
+                )
+                impact = (
+                    f"An attacker can use <code>{example_scheme}://attacker.com{example_path}</code> "
+                    f"to trigger this activity from any context."
+                )
+            else:
+                vuln_summary = (
+                    f"<strong>Cartesian Product Vulnerability:</strong> Intent filter has "
+                    f"{len(unique_hosts)} distinct host(s) and {len(unique_paths)} distinct path(s). "
+                    f"Android matches every host × path combination, including unintended ones."
+                )
+                combos = [f"<code>{example_scheme}://{h}{p}</code>"
+                          for h in unique_hosts for p in unique_paths]
+                impact = (
+                    f"All {len(combos)} host/path combinations are accepted: "
+                    f"{', '.join(combos[:6])}{'…' if len(combos) > 6 else ''}."
+                )
 
             issue_msg = (
                 f"<strong>{activity_name}</strong><br>"
-                f"<strong>CRITICAL: Cartesian Product Vulnerability:</strong> Intent filter has "
-                f"{len(data_tags)} &lt;data&gt; tags, but <strong>{len(data_tags_without_hosts)} "
-                f"lack host restrictions</strong>.<br>"
-            )
-
-            if schemes:
-                issue_msg += f"<strong>Schemes found:</strong> {', '.join(set(schemes))}<br>"
-
-            if hosts:
-                issue_msg += f"<strong>Hosts found:</strong> {', '.join(set(hosts))} (in {data_tags_with_hosts}/{len(data_tags)} tags)<br>"
-                issue_msg += f"<strong>Vulnerable tags:</strong> <span style='color:#d32f2f;'>{len(data_tags_without_hosts)} &lt;data&gt; tags without host → accept ANY domain</span><br>"
-            else:
-                issue_msg += f"<strong>Hosts:</strong> <span style='color:#d32f2f;'>NONE (accepts any domain)</span><br>"
-            if paths:
-                issue_msg += f"<strong>Paths:</strong> {', '.join(paths)}<br>"
-
-            example_path = paths[0] if paths else '/malicious'
-            example_scheme = schemes[0] if schemes else 'https'
-            issue_msg += (
-                f"<br><strong>Impact:</strong> Each &lt;data&gt; tag without a host creates a separate URI pattern. "
-                f"<strong>{len(data_tags_without_hosts)} tag(s) accept arbitrary domains</strong>. "
-                f"An attacker can use <code>{example_scheme}://evil.com{example_path}</code> to trigger this activity.<br>"
+                f"{vuln_summary}<br>"
+                f"<strong>Schemes:</strong> {', '.join(unique_schemes) if unique_schemes else '(none)'}<br>"
+                f"<strong>Hosts:</strong> {', '.join(unique_hosts) if unique_hosts else '<span style=\"color:#d32f2f;\">NONE — any host accepted</span>'}<br>"
+                f"<strong>Paths:</strong> {', '.join(unique_paths) if unique_paths else '(none)'}<br>"
                 f"<strong>AutoVerify:</strong> {auto_verify}<br>"
-                f"<br><strong>Fix:</strong> Combine all attributes in a SINGLE &lt;data&gt; tag (prevents Cartesian product):<br>"
+                f"<br><strong>Impact:</strong> {impact}<br>"
+                f"<br><strong>Fix:</strong> Combine all attributes in a SINGLE &lt;data&gt; tag per intended URI pattern:<br>"
                 f"<code>&lt;data android:scheme=\"{example_scheme}\" "
-                f"android:host=\"your-domain.com\" "
-                f"android:pathPrefix=\"{paths[0] if paths else '/path'}\" /&gt;</code><br>"
-                f"OR add host to EVERY &lt;data&gt; tag if you need multiple patterns.<br>"
-                f"<br><strong>Test command (verify vulnerability):</strong><br>"
-                f"<pre>adb shell am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -n {pkg}/{activity_name} -d '{example_scheme}://attacker.com{example_path}'</pre>"
-                f"<em>If the app opens, vulnerability is confirmed.</em><br>"
+                f"android:host=\"your-host.com\" "
+                f"android:pathPrefix=\"{example_path}\" /&gt;</code><br>"
+                f"<br><strong>Test command (implicit intent — tests actual filter matching):</strong><br>"
+                f"<pre>adb shell am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{example_scheme}://attacker.com{example_path}'</pre>"
+                f"<em>Note: omit -n so Android must resolve the intent via filter matching. "
+                f"If the app opens, the vulnerability is confirmed. If it errors with 'unable to resolve', the filter is working correctly.</em><br>"
                 f"<br><strong>OWASP Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>MASTG-TEST-0028</a>"
             )
 
