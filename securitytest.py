@@ -2415,8 +2415,51 @@ def check_checksec(lib_dir):
     if so_count == 0:
         return True, "No native libraries found (no .so files in lib directory)"
 
-    # Run checksec and suppress any warnings/errors
-    out = run_cmd(f"checksec --dir={lib_dir} 2>/dev/null")
+    def _run_checksec(args):
+        try:
+            res = subprocess.run(args, capture_output=True, text=True, timeout=120)
+            return (res.stdout or "") + (res.stderr or ""), res.returncode
+        except Exception as e:
+            return str(e), 1
+
+    def _is_dir_flag_error(output: str) -> bool:
+        lower = (output or "").lower()
+        # Covers common argparse/clap-style errors from checksec variants.
+        error_markers = (
+            "unexpected argument",
+            "unrecognized option",
+            "unknown option",
+            "found argument",
+            "invalid option",
+        )
+        return any(m in lower for m in error_markers) and ("--dir" in lower or "-d" in lower)
+
+    def _detect_checksec_dir_args() -> Optional[list]:
+        help_text = ""
+        for probe in (["checksec", "--help"], ["checksec", "-h"]):
+            probe_out, _ = _run_checksec(probe)
+            if probe_out:
+                help_text += "\n" + probe_out
+            if probe_out:
+                break
+
+        lower = help_text.lower()
+        if "--dir" in lower or "--directory" in lower:
+            return ["checksec", f"--dir={lib_dir}"]
+
+        for line in lower.splitlines():
+            if "-d" in line and ("dir" in line or "directory" in line):
+                return ["checksec", "-d", lib_dir]
+
+        return None
+
+    # Detect supported flag up front when possible.
+    checksec_args = _detect_checksec_dir_args() or ["checksec", f"--dir={lib_dir}"]
+    out, rc = _run_checksec(checksec_args)
+    # Safety net for ambiguous help output or odd checksec variants.
+    if rc != 0 and _is_dir_flag_error(out):
+        out, rc = _run_checksec(["checksec", "-d", lib_dir])
+
     text = re.sub(r"\x1b\[[0-9;]*m", "", out)
     text = re.sub(r"[^\x20-\x7E\n]", "", text)
     # Remove excessive blank lines
