@@ -2791,7 +2791,6 @@ def check_dependency_vulnerability_scan(base):
         'composer.lock'
     }
 
-    print("[Dependency Vulnerability Scan] Building file index...")
     total_files_to_scan = 0
     for _, _, files in os.walk(base):
         total_files_to_scan += len(files)
@@ -2799,7 +2798,7 @@ def check_dependency_vulnerability_scan(base):
     with ScanProgress(
         "Dependency Vulnerability Scan",
         total_files_to_scan,
-        persist_on_complete=True,
+        persist_on_complete=False,
         percent_step=1
     ) as scan_progress:
         for root, _, files in os.walk(base):
