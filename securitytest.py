@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import json
 import frida
 import html
 import xml.etree.ElementTree as ET
@@ -2461,6 +2462,445 @@ def check_debug_symbols(lib_dir):
         ],
         mastg_ref_html=mastg_ref,
         findings=findings,
+    )
+
+def check_dependency_vulnerability_scan(base):
+    """
+    Discover versioned third-party dependencies/frameworks in the scan directory
+    and query OSV (https://api.osv.dev) to match known vulnerabilities/CVEs.
+    """
+    show_progress_quick('Dependency Vulnerability Scan')
+
+    osv_api_url = "https://api.osv.dev/v1/query"
+    data_source_html = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0272/' target='_blank'>"
+        "MASTG-TEST-0272: Identify Dependencies with Known Vulnerabilities in the Android Project"
+        "</a></div>"
+        "<div><strong>Data source:</strong> "
+        "<a href='https://api.osv.dev/' target='_blank'>OSV API</a> "
+        "(live vulnerability data, includes CVE aliases when available)</div>"
+    )
+
+    version_rx = re.compile(
+        r'^(?:v)?\d+(?:[._-]\d+)*(?:[._-]?(?:alpha|beta|rc|final|release|snapshot|preview)\d*)?(?:[+._-][0-9A-Za-z]+)*$',
+        re.IGNORECASE,
+    )
+    gradle_coord_rx = re.compile(
+        r'["\']([A-Za-z0-9_.\-]+):([A-Za-z0-9_.\-]+):([^"\']+)["\']'
+    )
+
+    discovered = {}  # (ecosystem, lower-name, version) -> {ecosystem,name,version,evidence:set}
+    scanned_files = 0
+    parsed_files = 0
+    query_errors = 0
+
+    def _normalize_version(v):
+        if not v:
+            return ""
+        v = str(v).strip().strip('"').strip("'")
+        if '=' in v and v.lower().startswith('version'):
+            v = v.split('=', 1)[1].strip()
+        if v.startswith('v') and len(v) > 1 and v[1].isdigit():
+            v = v[1:]
+        return v.strip()
+
+    def _is_valid_version(v):
+        if not v:
+            return False
+        low = v.lower()
+        if any(x in v for x in ('${', '}', '$(')):
+            return False
+        if low in {
+            'latest', 'release', 'unspecified', 'main', 'master',
+            'latest.release', 'latest.integration'
+        }:
+            return False
+        if len(v) > 80 or not any(ch.isdigit() for ch in v):
+            return False
+        return bool(version_rx.match(v))
+
+    def _add_dep(ecosystem, name, version, evidence):
+        version = _normalize_version(version)
+        if not ecosystem or not name or not _is_valid_version(version):
+            return
+        name = str(name).strip()
+        if not name or len(name) > 180:
+            return
+        key = (ecosystem, name.lower(), version)
+        if key not in discovered:
+            discovered[key] = {
+                'ecosystem': ecosystem,
+                'name': name,
+                'version': version,
+                'evidence': set(),
+            }
+        if evidence and len(discovered[key]['evidence']) < 5:
+            discovered[key]['evidence'].add(evidence)
+
+    def _read_text(path):
+        try:
+            return open(path, 'r', encoding='utf-8', errors='ignore').read()
+        except Exception:
+            return ""
+
+    def _parse_simple_properties(content):
+        out = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, v = line.split('=', 1)
+            out[k.strip()] = v.strip()
+        return out
+
+    def _parse_pom_properties(content, rel):
+        props = _parse_simple_properties(content)
+        group_id = props.get('groupId')
+        artifact_id = props.get('artifactId')
+        version = props.get('version')
+        if group_id and artifact_id and version:
+            _add_dep('Maven', f"{group_id}:{artifact_id}", version, rel)
+
+    def _parse_meta_inf_version(content, rel, filename):
+        version = content.splitlines()[0].strip() if content else ""
+        if '=' in version:
+            version = version.split('=', 1)[1].strip()
+        stem = filename[:-8] if filename.endswith('.version') else filename
+        if '_' not in stem:
+            return
+        group, artifact = stem.rsplit('_', 1)
+        if group and artifact and '.' in group:
+            _add_dep('Maven', f"{group}:{artifact}", version, rel)
+
+    def _parse_gradle(content, rel):
+        for match in gradle_coord_rx.finditer(content):
+            group_id, artifact_id, version = match.groups()
+            _add_dep('Maven', f"{group_id}:{artifact_id}", version, rel)
+
+    def _parse_requirements_txt(content, rel):
+        req_rx = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*==\s*([^\s;#]+)')
+        for line in content.splitlines():
+            m = req_rx.match(line)
+            if m:
+                _add_dep('PyPI', m.group(1), m.group(2), rel)
+
+    def _parse_poetry_lock(content, rel):
+        blocks = content.split('[[package]]')
+        name_rx = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.MULTILINE)
+        ver_rx = re.compile(r'^\s*version\s*=\s*"([^"]+)"', re.MULTILINE)
+        for block in blocks[1:]:
+            name_m = name_rx.search(block)
+            ver_m = ver_rx.search(block)
+            if name_m and ver_m:
+                _add_dep('PyPI', name_m.group(1), ver_m.group(1), rel)
+
+    def _parse_cargo_lock(content, rel):
+        blocks = content.split('[[package]]')
+        name_rx = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.MULTILINE)
+        ver_rx = re.compile(r'^\s*version\s*=\s*"([^"]+)"', re.MULTILINE)
+        for block in blocks[1:]:
+            name_m = name_rx.search(block)
+            ver_m = ver_rx.search(block)
+            if name_m and ver_m:
+                _add_dep('crates.io', name_m.group(1), ver_m.group(1), rel)
+
+    def _parse_go_mod(content, rel):
+        single_rx = re.compile(r'^\s*require\s+([^\s]+)\s+v?([^\s]+)\s*$', re.MULTILINE)
+        block_item_rx = re.compile(r'^\s*([^\s]+)\s+v?([^\s]+)\s*$', re.MULTILINE)
+        for m in single_rx.finditer(content):
+            _add_dep('Go', m.group(1), m.group(2), rel)
+        block_m = re.search(r'require\s*\((.*?)\)', content, re.DOTALL)
+        if block_m:
+            for m in block_item_rx.finditer(block_m.group(1)):
+                if m.group(1).startswith('//'):
+                    continue
+                _add_dep('Go', m.group(1), m.group(2), rel)
+
+    def _parse_gemfile_lock(content, rel):
+        spec = False
+        gem_rx = re.compile(r'^\s{4}([A-Za-z0-9_.\-]+)\s+\(([^)]+)\)')
+        for line in content.splitlines():
+            if line.strip() == "specs:":
+                spec = True
+                continue
+            if spec and line and not line.startswith(' '):
+                break
+            if spec:
+                m = gem_rx.match(line)
+                if m:
+                    _add_dep('RubyGems', m.group(1), m.group(2), rel)
+
+    def _parse_packages_config(content, rel):
+        try:
+            root = ET.fromstring(content)
+            for pkg in root.findall('.//package'):
+                name = pkg.attrib.get('id', '').strip()
+                version = pkg.attrib.get('version', '').strip()
+                if name and version:
+                    _add_dep('NuGet', name, version, rel)
+        except Exception:
+            return
+
+    def _parse_package_lock_json(content, rel):
+        try:
+            data = json.loads(content)
+        except Exception:
+            return
+        deps = data.get('dependencies', {})
+        if isinstance(deps, dict):
+            for name, meta in deps.items():
+                if isinstance(meta, dict):
+                    _add_dep('npm', name, meta.get('version', ''), rel)
+
+    def _parse_pipfile_lock(content, rel):
+        try:
+            data = json.loads(content)
+        except Exception:
+            return
+        for section in ('default', 'develop'):
+            deps = data.get(section, {})
+            if not isinstance(deps, dict):
+                continue
+            for name, meta in deps.items():
+                version = ""
+                if isinstance(meta, dict):
+                    version = meta.get('version', '')
+                elif isinstance(meta, str):
+                    version = meta
+                version = version[2:] if str(version).startswith('==') else version
+                _add_dep('PyPI', name, version, rel)
+
+    def _parse_packages_lock_json(content, rel):
+        try:
+            data = json.loads(content)
+        except Exception:
+            return
+        deps = data.get('dependencies', {})
+        if isinstance(deps, dict):
+            for name, meta in deps.items():
+                if isinstance(meta, dict):
+                    _add_dep('NuGet', name, meta.get('resolved', '') or meta.get('version', ''), rel)
+
+    def _parse_composer_lock(content, rel):
+        try:
+            data = json.loads(content)
+        except Exception:
+            return
+        for section in ('packages', 'packages-dev'):
+            arr = data.get(section, [])
+            if not isinstance(arr, list):
+                continue
+            for item in arr:
+                if isinstance(item, dict):
+                    _add_dep('Packagist', item.get('name', ''), item.get('version', ''), rel)
+
+    interesting_exact = {
+        'pom.properties', 'build.gradle', 'build.gradle.kts',
+        'package-lock.json', 'pipfile.lock', 'poetry.lock',
+        'requirements.txt', 'cargo.lock', 'go.mod',
+        'gemfile.lock', 'packages.config', 'packages.lock.json',
+        'composer.lock'
+    }
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            scanned_files += 1
+            rel = os.path.relpath(os.path.join(root, fn), base)
+            rel_norm = rel.replace('\\', '/').lower()
+            full_path = os.path.join(root, fn)
+            fn_low = fn.lower()
+
+            should_parse = False
+            if fn_low in interesting_exact:
+                should_parse = True
+            elif rel_norm.startswith('meta-inf/') and (fn_low.endswith('.version') or fn_low == 'pom.properties'):
+                should_parse = True
+
+            if not should_parse:
+                continue
+
+            content = _read_text(full_path)
+            if not content:
+                continue
+            parsed_files += 1
+
+            if fn_low == 'pom.properties':
+                _parse_pom_properties(content, rel)
+            elif fn_low.endswith('.version') and rel_norm.startswith('meta-inf/'):
+                _parse_meta_inf_version(content, rel, fn)
+            elif fn_low in ('build.gradle', 'build.gradle.kts'):
+                _parse_gradle(content, rel)
+            elif fn_low == 'requirements.txt':
+                _parse_requirements_txt(content, rel)
+            elif fn_low == 'poetry.lock':
+                _parse_poetry_lock(content, rel)
+            elif fn_low == 'cargo.lock':
+                _parse_cargo_lock(content, rel)
+            elif fn_low == 'go.mod':
+                _parse_go_mod(content, rel)
+            elif fn_low == 'gemfile.lock':
+                _parse_gemfile_lock(content, rel)
+            elif fn_low == 'packages.config':
+                _parse_packages_config(content, rel)
+            elif fn_low == 'package-lock.json':
+                _parse_package_lock_json(content, rel)
+            elif fn_low == 'pipfile.lock':
+                _parse_pipfile_lock(content, rel)
+            elif fn_low == 'packages.lock.json':
+                _parse_packages_lock_json(content, rel)
+            elif fn_low == 'composer.lock':
+                _parse_composer_lock(content, rel)
+
+    if not discovered:
+        return TestResult(
+            name="Dependency Vulnerability Scan",
+            status="INFO",
+            summary_lines=[
+                "No versioned third-party dependencies detected in scanned files",
+                f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}",
+            ],
+            mastg_ref_html=data_source_html,
+        )
+
+    dep_list = sorted(discovered.values(), key=lambda x: (x['ecosystem'], x['name'], x['version']))
+    max_queries = 120
+    if len(dep_list) > max_queries:
+        dep_list = dep_list[:max_queries]
+
+    findings_html = []
+    vuln_dep_count = 0
+    total_vulns = 0
+    unique_cves = set()
+    max_details_per_dep = 12
+
+    for dep in dep_list:
+        payload = {
+            "package": {"ecosystem": dep['ecosystem'], "name": dep['name']},
+            "version": dep['version'],
+        }
+
+        dep_vulns = []
+        page_token = None
+        page_guard = 0
+
+        while page_guard < 5:
+            page_guard += 1
+            if page_token:
+                payload["page_token"] = page_token
+            else:
+                payload.pop("page_token", None)
+
+            try:
+                req = urllib.request.Request(
+                    osv_api_url,
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                data = json.loads(body) if body else {}
+            except Exception:
+                query_errors += 1
+                break
+
+            vulns = data.get('vulns', [])
+            if isinstance(vulns, list):
+                dep_vulns.extend(vulns)
+            page_token = data.get('next_page_token')
+            if not page_token:
+                break
+
+        if not dep_vulns:
+            continue
+
+        vuln_dep_count += 1
+        total_vulns += len(dep_vulns)
+
+        rows = []
+        for v in dep_vulns[:max_details_per_dep]:
+            vid = v.get('id', 'UNKNOWN')
+            summary = v.get('summary', '') or "No summary"
+            aliases = v.get('aliases', []) if isinstance(v.get('aliases', []), list) else []
+            cves = [a for a in aliases if isinstance(a, str) and a.upper().startswith('CVE-')]
+            for c in cves:
+                unique_cves.add(c.upper())
+
+            severity_parts = []
+            sev_arr = v.get('severity', [])
+            if isinstance(sev_arr, list):
+                for sev in sev_arr:
+                    if isinstance(sev, dict):
+                        stype = sev.get('type')
+                        score = sev.get('score')
+                        if stype and score:
+                            severity_parts.append(f"{stype}:{score}")
+
+            osv_link = f"https://osv.dev/vulnerability/{vid}"
+            cve_html = ", ".join(html.escape(c) for c in sorted(set(cves))) if cves else "None listed"
+            sev_html = html.escape(", ".join(severity_parts)) if severity_parts else "Not provided"
+            rows.append(
+                "<tr>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'><a href='{html.escape(osv_link)}' target='_blank'>{html.escape(vid)}</a></td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(summary[:180])}</td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{cve_html}</td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{sev_html}</td>"
+                "</tr>"
+            )
+
+        evidence_lines = sorted(dep['evidence'])[:3]
+        evidence_html = "<br>".join(html.escape(x) for x in evidence_lines) if evidence_lines else "Unknown source"
+
+        findings_html.append(
+            "<div style='margin:14px 0; padding:10px; border:1px solid #dee2e6; border-left:4px solid #dc3545; border-radius:4px;'>"
+            f"<div style='font-weight:700; margin-bottom:6px;'>{html.escape(dep['ecosystem'])} / {html.escape(dep['name'])} @ {html.escape(dep['version'])}</div>"
+            f"<div style='font-size:11px; color:#666; margin-bottom:8px;'><strong>Evidence:</strong> {evidence_html}</div>"
+            "<div style='overflow-x:auto;'>"
+            "<table style='width:100%; border-collapse:collapse; font-size:11px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Vuln ID</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Summary</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>CVE(s)</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Severity</th>"
+            "</tr></thead><tbody>"
+            + "".join(rows) +
+            "</tbody></table></div>"
+            + (f"<div style='margin-top:6px; font-size:11px; color:#666;'>Showing first {max_details_per_dep} of {len(dep_vulns)} vulnerabilities for this dependency.</div>" if len(dep_vulns) > max_details_per_dep else "")
+            + "</div>"
+        )
+
+    if vuln_dep_count == 0:
+        status = "PASS" if query_errors == 0 else "INFO"
+        lines = [
+            f"Dependencies checked against OSV: {len(dep_list)}",
+            "No known vulnerabilities matched for detected dependency versions",
+            f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}",
+        ]
+        if query_errors:
+            lines.append(f"OSV query errors: {query_errors} (network/API issues)")
+        return TestResult(
+            name="Dependency Vulnerability Scan",
+            status=status,
+            summary_lines=lines,
+            mastg_ref_html=data_source_html,
+        )
+
+    summary_lines = [
+        f"Dependencies checked against OSV: {len(dep_list)}",
+        f"Dependencies with known vulnerabilities: {vuln_dep_count}",
+        f"Total vulnerability records matched: {total_vulns}",
+        f"Unique CVE aliases found: {len(unique_cves)}",
+    ]
+    if query_errors:
+        summary_lines.append(f"OSV query errors: {query_errors}")
+
+    return TestResult(
+        name="Dependency Vulnerability Scan",
+        status="FAIL",
+        summary_lines=summary_lines,
+        mastg_ref_html=data_source_html,
+        raw_html="".join(findings_html),
     )
 
 def check_s3_bucket_security(base):
@@ -15101,6 +15541,7 @@ HTML_SPECIAL_CHECKS = {
     "DataStore Encryption",     "Room Database Encryption",
     "Anti-Debugging",
     "GMS Security Provider",
+    "Dependency Vulnerability Scan",
     "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
 }
 
@@ -15124,6 +15565,7 @@ SUMMARY_BUILDERS = {
     "Dangerous Permissions": summary_with_count("Dangerous permissions"),
     "DataStore Encryption": summary_with_count("Unencrypted DataStore files"),
     "Room Database Encryption": summary_with_count("Unencrypted Room databases"),
+    "Dependency Vulnerability Scan": summary_with_count("Dependencies with known vulnerabilities"),
     "S3 Bucket Security": summary_with_count("Misconfigured buckets"),
 }
 
@@ -15800,6 +16242,7 @@ def main():
                 "Insecure Fingerprint API",
                 "Raw SQL Queries",
                 "Insecure Package Context",
+                "Dependency Vulnerability Scan",
             ]
         },
         "MASVS-RESILIENCE": {
@@ -15947,6 +16390,7 @@ def main():
         make_check("Room Database Encryption", lambda: check_room_encryption(base)),
         make_check("Anti-Debugging",          lambda: check_anti_debugging(base)),
         make_check("GMS Security Provider",   lambda: check_gms_security_provider(base)),
+        make_check("Dependency Vulnerability Scan", lambda: check_dependency_vulnerability_scan(base)),
         make_check("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
 
