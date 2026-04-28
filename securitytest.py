@@ -21,6 +21,7 @@ import curses
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Literal, List, Optional, Dict
 from datetime import datetime
@@ -2479,7 +2480,10 @@ def check_dependency_vulnerability_scan(base):
         "</a></div>"
         "<div><strong>Data source:</strong> "
         "<a href='https://api.osv.dev/' target='_blank'>OSV API</a> "
-        "(live vulnerability data, includes CVE aliases when available)</div>"
+        "(manifest/dependency metadata matching)</div>"
+        "<div><strong>Data source:</strong> "
+        "<a href='https://services.nvd.nist.gov/rest/json/cves/2.0' target='_blank'>NVD CVE API v2.0</a> "
+        "(native .so binary string/version matching)</div>"
     )
 
     version_rx = re.compile(
@@ -2494,6 +2498,9 @@ def check_dependency_vulnerability_scan(base):
     scanned_files = 0
     parsed_files = 0
     query_errors = 0
+    native_candidates = {}  # (name, version) -> {name, version, evidence:set}
+    native_files_scanned = 0
+    nvd_query_errors = 0
 
     def _normalize_version(v):
         if not v:
@@ -2537,6 +2544,75 @@ def check_dependency_vulnerability_scan(base):
             }
         if evidence and len(discovered[key]['evidence']) < 5:
             discovered[key]['evidence'].add(evidence)
+
+    def _add_native_candidate(name, version, evidence):
+        version = _normalize_version(version)
+        if not name or not _is_valid_version(version):
+            return
+        name = str(name).strip().lower()
+        if len(name) < 2 or len(name) > 80:
+            return
+        key = (name, version)
+        if key not in native_candidates:
+            native_candidates[key] = {
+                'name': name,
+                'version': version,
+                'evidence': set(),
+            }
+        if evidence and len(native_candidates[key]['evidence']) < 5:
+            native_candidates[key]['evidence'].add(evidence)
+
+    def _extract_ascii_strings(bin_path, max_bytes=5 * 1024 * 1024):
+        """
+        Lightweight, cross-platform `strings` equivalent.
+        Reads up to max_bytes and extracts printable ASCII runs (len >= 6).
+        """
+        try:
+            with open(bin_path, 'rb') as f:
+                blob = f.read(max_bytes)
+        except Exception:
+            return []
+        out = []
+        for m in re.finditer(rb'[\x20-\x7e]{6,160}', blob):
+            try:
+                s = m.group(0).decode('ascii', errors='ignore').strip()
+            except Exception:
+                continue
+            if s:
+                out.append(s)
+            if len(out) >= 2500:
+                break
+        return out
+
+    native_string_patterns = [
+        ('openssl', re.compile(r'\bOpenSSL\s+(\d+\.\d+\.\d+[a-z]?)\b', re.IGNORECASE)),
+        ('zlib', re.compile(r'\bzlib(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('libpng', re.compile(r'\blibpng(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('sqlite', re.compile(r'\bSQLite(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('curl', re.compile(r'\b(?:libcurl|curl)/(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('libxml2', re.compile(r'\blibxml2(?:\s+|/)(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('expat', re.compile(r'\bexpat[_\s-]?(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('nghttp2', re.compile(r'\bnghttp2/(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+    ]
+
+    def _scan_native_binary_versions(full_path, rel_path):
+        fn_low = os.path.basename(rel_path).lower()
+
+        # Filename patterns: libssl.so.1.1.1k or libfoo-1.2.3.so
+        m = re.search(r'lib([a-z0-9_+\-]+)\.so\.(\d+(?:\.\d+){1,3}[a-z]?)', fn_low, re.IGNORECASE)
+        if m:
+            _add_native_candidate(m.group(1), m.group(2), f"{rel_path} (filename)")
+        m = re.search(r'lib([a-z0-9_+\-]+)[-_]v?(\d+\.\d+(?:\.\d+){0,3}[a-z]?)\.so$', fn_low, re.IGNORECASE)
+        if m:
+            _add_native_candidate(m.group(1), m.group(2), f"{rel_path} (filename)")
+
+        strings_out = _extract_ascii_strings(full_path)
+        if not strings_out:
+            return
+        joined = "\n".join(strings_out)
+        for lib_name, rx in native_string_patterns:
+            for hit in rx.finditer(joined):
+                _add_native_candidate(lib_name, hit.group(1), f"{rel_path} (binary strings)")
 
     def _read_text(path):
         try:
@@ -2718,6 +2794,9 @@ def check_dependency_vulnerability_scan(base):
                 should_parse = True
 
             if not should_parse:
+                if fn_low.endswith('.so'):
+                    native_files_scanned += 1
+                    _scan_native_binary_versions(full_path, rel)
                 continue
 
             content = _read_text(full_path)
@@ -2752,13 +2831,13 @@ def check_dependency_vulnerability_scan(base):
             elif fn_low == 'composer.lock':
                 _parse_composer_lock(content, rel)
 
-    if not discovered:
+    if not discovered and not native_candidates:
         return TestResult(
             name="Dependency Vulnerability Scan",
             status="INFO",
             summary_lines=[
                 "No versioned third-party dependencies detected in scanned files",
-                f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}",
+                f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}, native binaries scanned: {native_files_scanned}",
             ],
             mastg_ref_html=data_source_html,
         )
@@ -2870,15 +2949,123 @@ def check_dependency_vulnerability_scan(base):
             + "</div>"
         )
 
-    if vuln_dep_count == 0:
-        status = "PASS" if query_errors == 0 else "INFO"
+    # Native .so evidence path: extract version strings and query NVD by keyword.
+    nvd_vuln_lib_count = 0
+    total_nvd_cves = 0
+    nvd_cache = {}
+    nvd_url_base = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    native_list = sorted(native_candidates.values(), key=lambda x: (x['name'], x['version']))
+    if len(native_list) > 80:
+        native_list = native_list[:80]
+
+    for cand in native_list:
+        name = cand['name']
+        version = cand['version']
+        keyword = f"{name} {version}"
+        if keyword in nvd_cache:
+            nvd_data = nvd_cache[keyword]
+        else:
+            params = {
+                'keywordSearch': keyword,
+                'keywordExactMatch': '',
+                'noRejected': '',
+                'resultsPerPage': '25',
+            }
+            req_url = f"{nvd_url_base}?{urllib.parse.urlencode(params)}"
+            try:
+                with urllib.request.urlopen(req_url, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                nvd_data = json.loads(body) if body else {}
+                nvd_cache[keyword] = nvd_data
+            except Exception:
+                nvd_query_errors += 1
+                continue
+
+        vulns_arr = nvd_data.get('vulnerabilities', [])
+        if not isinstance(vulns_arr, list) or not vulns_arr:
+            continue
+
+        matched_rows = []
+        for item in vulns_arr:
+            cve = item.get('cve', {}) if isinstance(item, dict) else {}
+            cve_id = cve.get('id', '')
+            descriptions = cve.get('descriptions', [])
+            desc_text = ""
+            if isinstance(descriptions, list):
+                for d in descriptions:
+                    if isinstance(d, dict) and d.get('lang') == 'en':
+                        desc_text = d.get('value', '') or ""
+                        break
+                if not desc_text and descriptions and isinstance(descriptions[0], dict):
+                    desc_text = descriptions[0].get('value', '') or ""
+
+            # Reduce noisy keyword matches by requiring both name and version in description.
+            low_desc = desc_text.lower()
+            if name.lower() not in low_desc or version.lower() not in low_desc:
+                continue
+
+            metrics = cve.get('metrics', {})
+            severity = "Not provided"
+            if isinstance(metrics, dict):
+                for metric_key in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
+                    arr = metrics.get(metric_key, [])
+                    if isinstance(arr, list) and arr:
+                        md = arr[0].get('cvssData', {}) if isinstance(arr[0], dict) else {}
+                        base_score = md.get('baseScore')
+                        base_sev = md.get('baseSeverity')
+                        if base_score is not None or base_sev:
+                            severity = f"{base_sev or 'UNKNOWN'} ({base_score})" if base_score is not None else str(base_sev)
+                            break
+
+            if cve_id:
+                unique_cves.add(cve_id.upper())
+            link = f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id else "https://nvd.nist.gov/"
+            matched_rows.append(
+                "<tr>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'><a href='{html.escape(link)}' target='_blank'>{html.escape(cve_id or 'UNKNOWN')}</a></td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(desc_text[:180] or 'No description')}</td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(cve_id or 'N/A')}</td>"
+                f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(str(severity))}</td>"
+                "</tr>"
+            )
+
+        if not matched_rows:
+            continue
+
+        nvd_vuln_lib_count += 1
+        total_nvd_cves += len(matched_rows)
+        evidence_lines = sorted(cand['evidence'])[:3]
+        evidence_html = "<br>".join(html.escape(x) for x in evidence_lines) if evidence_lines else "Unknown source"
+        findings_html.append(
+            "<div style='margin:14px 0; padding:10px; border:1px solid #dee2e6; border-left:4px solid #fd7e14; border-radius:4px;'>"
+            f"<div style='font-weight:700; margin-bottom:6px;'>native/.so / {html.escape(name)} @ {html.escape(version)}</div>"
+            f"<div style='font-size:11px; color:#666; margin-bottom:8px;'><strong>Evidence:</strong> {evidence_html}</div>"
+            "<div style='overflow-x:auto;'>"
+            "<table style='width:100%; border-collapse:collapse; font-size:11px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>CVE ID</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Description</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Reference</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Severity</th>"
+            "</tr></thead><tbody>"
+            + "".join(matched_rows[:12]) +
+            "</tbody></table></div>"
+            + (f"<div style='margin-top:6px; font-size:11px; color:#666;'>Showing first 12 of {len(matched_rows)} CVE matches for this native library.</div>" if len(matched_rows) > 12 else "")
+            + "</div>"
+        )
+
+    if vuln_dep_count == 0 and nvd_vuln_lib_count == 0:
+        status = "PASS" if (query_errors == 0 and nvd_query_errors == 0) else "INFO"
         lines = [
             f"Dependencies checked against OSV: {len(dep_list)}",
+            f"Native libraries checked against NVD: {len(native_list)}",
             "No known vulnerabilities matched for detected dependency versions",
-            f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}",
+            f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}, native binaries scanned: {native_files_scanned}",
         ]
         if query_errors:
             lines.append(f"OSV query errors: {query_errors} (network/API issues)")
+        if nvd_query_errors:
+            lines.append(f"NVD query errors: {nvd_query_errors} (network/API issues)")
         return TestResult(
             name="Dependency Vulnerability Scan",
             status=status,
@@ -2888,12 +3075,17 @@ def check_dependency_vulnerability_scan(base):
 
     summary_lines = [
         f"Dependencies checked against OSV: {len(dep_list)}",
-        f"Dependencies with known vulnerabilities: {vuln_dep_count}",
-        f"Total vulnerability records matched: {total_vulns}",
-        f"Unique CVE aliases found: {len(unique_cves)}",
+        f"Dependencies with known vulnerabilities (OSV): {vuln_dep_count}",
+        f"Native libraries checked against NVD: {len(native_list)}",
+        f"Native libraries with CVE matches (NVD): {nvd_vuln_lib_count}",
+        f"Total vulnerability records matched (OSV+NVD): {total_vulns + total_nvd_cves}",
+        f"Unique CVE IDs/aliases found: {len(unique_cves)}",
+        f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}, native binaries scanned: {native_files_scanned}",
     ]
     if query_errors:
         summary_lines.append(f"OSV query errors: {query_errors}")
+    if nvd_query_errors:
+        summary_lines.append(f"NVD query errors: {nvd_query_errors}")
 
     return TestResult(
         name="Dependency Vulnerability Scan",
