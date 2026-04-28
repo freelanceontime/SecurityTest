@@ -1991,12 +1991,14 @@ class ScanProgress:
     completed tests don't leave extra console output.
     """
 
-    def __init__(self, test_name, total_files):
+    def __init__(self, test_name, total_files, persist_on_complete=False, percent_step=5):
         self.test_name = test_name
         self.total_files = total_files
         self.current = 0
         self.last_percent = -1
         self._last_line_len = 0
+        self.persist_on_complete = persist_on_complete
+        self.percent_step = max(1, min(100, int(percent_step)))
 
         if total_files > 0:
             self._write_line(f"[{test_name}] Scanning {total_files} files...")
@@ -2025,14 +2027,14 @@ class ScanProgress:
         # Always show 100% on the final update, otherwise throttle output.
         should_render = (
             self.current >= self.total_files
-            or self.current % max(1, self.total_files // 20) == 0
             or self.current % 100 == 0
         )
-        if not should_render:
-            return
-
         progress = int((self.current / self.total_files) * 100)
         progress = 100 if self.current >= self.total_files else progress
+        if progress >= (self.last_percent + self.percent_step):
+            should_render = True
+        if not should_render:
+            return
 
         if progress != self.last_percent:
             self._write_line(
@@ -2041,7 +2043,17 @@ class ScanProgress:
             self.last_percent = progress
 
     def complete(self):
-        """Clear the progress line so it doesn't remain in console output."""
+        """Finalize the progress line."""
+        if self.persist_on_complete:
+            if self.total_files > 0:
+                self._write_line(
+                    f"[{self.test_name}] Scanning... 100% ({min(self.current, self.total_files)}/{self.total_files})"
+                )
+                print("", flush=True)
+            self._last_line_len = 0
+            return
+
+        # Default behavior: clear the progress line.
         if self._last_line_len > 0:
             print("\r" + (" " * self._last_line_len) + "\r", end="", flush=True)
             self._last_line_len = 0
@@ -2784,7 +2796,12 @@ def check_dependency_vulnerability_scan(base):
     for _, _, files in os.walk(base):
         total_files_to_scan += len(files)
 
-    with ScanProgress("Dependency Vulnerability Scan", total_files_to_scan) as scan_progress:
+    with ScanProgress(
+        "Dependency Vulnerability Scan",
+        total_files_to_scan,
+        persist_on_complete=True,
+        percent_step=1
+    ) as scan_progress:
         for root, _, files in os.walk(base):
             for fn in files:
                 scan_progress.update()
@@ -16109,16 +16126,16 @@ def run_preflight_checks(check_device=False):
                 c.isdigit() for c in output
             ))
             if ok:
-                print(f"  âœ“ {tool} found ({purpose})")
+                print(f"  [OK] {tool} found ({purpose})")
             else:
                 errors.append(f"{tool} not working properly")
-                print(f"  âœ— {tool} not working properly")
+                print(f"  [FAIL] {tool} not working properly")
         except FileNotFoundError:
             errors.append(f"{tool} not found in PATH")
-            print(f"  âœ— {tool} not found - required for: {purpose}")
+            print(f"  [FAIL] {tool} not found - required for: {purpose}")
         except Exception as e:
             warnings.append(f"{tool} check failed: {e}")
-            print(f"  âš  {tool} check failed: {e}")
+            print(f"  [WARN] {tool} check failed: {e}")
 
     # Check dynamic tools only if -u flag is used
     if check_device:
@@ -16132,16 +16149,16 @@ def run_preflight_checks(check_device=False):
                     result = subprocess.run([tool, '--version'], capture_output=True, timeout=15)
 
                 if result.returncode == 0:
-                    print(f"  âœ“ {tool} found ({purpose})")
+                    print(f"  [OK] {tool} found ({purpose})")
                 else:
                     errors.append(f"{tool} not available")
-                    print(f"  âœ— {tool} not available - required for dynamic tests")
+                    print(f"  [FAIL] {tool} not available - required for dynamic tests")
             except FileNotFoundError:
                 errors.append(f"{tool} not found in PATH")
-                print(f"  âœ— {tool} not found - required for: {purpose}")
+                print(f"  [FAIL] {tool} not found - required for: {purpose}")
             except Exception as e:
                 errors.append(f"{tool} check failed: {e}")
-                print(f"  âœ— {tool} check failed: {e}")
+                print(f"  [FAIL] {tool} check failed: {e}")
 
     # Check optional tools (warnings only)
     for tool, purpose in optional_tools.items():
@@ -16161,16 +16178,16 @@ def run_preflight_checks(check_device=False):
                 result = subprocess.run([tool, '--version'], capture_output=True, timeout=15)
 
             if result.returncode == 0 or (tool == 'apksigner' and result.returncode == 1):
-                print(f"  âœ“ {tool} found ({purpose})")
+                print(f"  [OK] {tool} found ({purpose})")
             else:
                 warnings.append(f"{tool} not available - {purpose}")
-                print(f"  âš  {tool} not available - {purpose}")
+                print(f"  [WARN] {tool} not available - {purpose}")
         except FileNotFoundError:
             warnings.append(f"{tool} not found - {purpose}")
-            print(f"  âš  {tool} not found - {purpose}")
+            print(f"  [WARN] {tool} not found - {purpose}")
         except Exception as e:
             warnings.append(f"{tool} check failed - {purpose}")
-            print(f"  âš  {tool} check failed - {purpose}")
+            print(f"  [WARN] {tool} check failed - {purpose}")
 
     # Check device connection if requested
     if check_device:
@@ -16185,19 +16202,19 @@ def run_preflight_checks(check_device=False):
             devices = [line for line in result.stdout.split('\n') if '\tdevice' in line]
 
             if devices:
-                print(f"  âœ“ {len(devices)} device(s) detected")
+                print(f"  [OK] {len(devices)} device(s) detected")
                 for dev in devices:
-                    print(f"    â€¢ {dev.split()[0]}")
+                    print(f"    - {dev.split()[0]}")
             else:
                 errors.append("No Android devices detected via ADB")
-                print("  âœ— No devices detected")
+                print("  [FAIL] No devices detected")
                 print("    Run 'adb devices' to check connection")
         except FileNotFoundError:
             errors.append("adb not found - cannot check device")
-            print("  âœ— adb not found - cannot check device")
+            print("  [FAIL] adb not found - cannot check device")
         except Exception as e:
             warnings.append(f"Device check failed: {e}")
-            print(f"  âš  Device check failed: {e}")
+            print(f"  [WARN] Device check failed: {e}")
 
         # Check Frida server if device is connected
         if not errors:
@@ -16211,31 +16228,31 @@ def run_preflight_checks(check_device=False):
                 )
 
                 if result.returncode == 0 and 'PID' in result.stdout:
-                    print("  âœ“ Frida server responding")
+                    print("  [OK] Frida server responding")
                 else:
                     errors.append("Frida server not responding")
-                    print("  âœ— Frida server not responding")
+                    print("  [FAIL] Frida server not responding")
                     print("    Make sure frida-server is running on the device")
             except FileNotFoundError:
                 errors.append("frida-ps not found")
-                print("  âœ— frida-ps not found - install with: pip install frida-tools")
+                print("  [FAIL] frida-ps not found - install with: pip install frida-tools")
             except subprocess.TimeoutExpired:
                 errors.append("Frida connection timed out")
-                print("  âœ— Frida connection timed out")
+                print("  [FAIL] Frida connection timed out")
             except Exception as e:
                 warnings.append(f"Frida check failed: {e}")
-                print(f"  âš  Frida check failed: {e}")
+                print(f"  [WARN] Frida check failed: {e}")
 
     # Summary
     print("\n" + "="*60)
     if errors:
         print(f"[!] Pre-flight checks FAILED with {len(errors)} error(s):")
         for err in errors:
-            print(f"    â€¢ {err}")
+            print(f"    - {err}")
         if warnings:
             print(f"\n[!] Additional warnings ({len(warnings)}):")
             for warn in warnings:
-                print(f"    â€¢ {warn}")
+                print(f"    - {warn}")
         print("\n[!] Cannot continue - please install missing required tools")
         print("="*60)
         return False, errors
@@ -16243,12 +16260,12 @@ def run_preflight_checks(check_device=False):
         print(f"[*] Pre-flight checks passed with {len(warnings)} warning(s)")
         print(f"    Some tests may be skipped due to missing optional tools:")
         for warn in warnings:
-            print(f"    â€¢ {warn}")
+            print(f"    - {warn}")
         print("\n[*] Continuing with available tools...")
         print("="*60)
         return True, []
     else:
-        print("[âœ“] All pre-flight checks passed!")
+        print("[OK] All pre-flight checks passed!")
         print("="*60)
         return True, []
 
@@ -16311,7 +16328,7 @@ def main():
         if os.path.exists(base):
             shutil.rmtree(base)
         os.makedirs(base)
-        print(f"[+] Decompiling {apk_path} â†’ {base}")
+        print(f"[+] Decompiling {apk_path} -> {base}")
 
         # Detect available memory and set appropriate heap size
         try:
@@ -16482,7 +16499,7 @@ def main():
     ungrouped = []
 
     # 1) Initial static checks - checksec at the very top
-    print("[*] Running checksecâ€¦")
+    print("[*] Running checksec...")
     _, css = check_checksec(os.path.join(base, 'lib'))
     checksec_block = (
         "<h4>Checksec Results</h4>"
@@ -16497,7 +16514,7 @@ def main():
 
     # 2) APK signature schemes
     if apk_path:
-        print("[*] Checking APK signature schemesâ€¦")
+        print("[*] Checking APK signature schemes...")
         ok, det = check_signature_schemes(apk_path)
         # Handle skipped case (ok is None when APK file not found)
         if ok is None:
@@ -16525,7 +16542,7 @@ def main():
         print("[*] Skipping signature check (no APK source)")
 
  # 3) Manifest load
-    print("[*] Loading AndroidManifest.xmlâ€¦")
+    print("[*] Loading AndroidManifest.xml...")
     manifest = os.path.join(base, 'AndroidManifest.xml')
 
     # Helper to run Storage Analysis as a selectable dynamic test
@@ -16646,7 +16663,7 @@ def main():
     # 5) Execute main checks
     print("[*] Executing individual checks:")
     for name, fn in checks:
-        print(f"    - {name}â€¦", flush=True)
+        print(f"    - {name}...", flush=True)
         try:
             tr = fn()
         except Exception as e:
@@ -16752,7 +16769,7 @@ def main():
             print("="*70 + "\n")
 
         for name, fn in frida_checks:
-            print(f"[*] Running {name}â€¦")
+            print(f"[*] Running {name}...")
             key_name = name
             res = None
             ok = None
@@ -16839,7 +16856,7 @@ def main():
     # 7.5) Parse previous report for comparison (if exists)
     previous_info = None
     if metadata['package']:
-        print("[*] Checking for previous scan reportâ€¦")
+        print("[*] Checking for previous scan report...")
         previous_info = parse_previous_report(metadata['package'], reports_dir='.')
         if previous_info:
             print(f"[+] Found previous scan: version {previous_info['version']} ({previous_info['apk_size_mb']:.1f} MB)")
