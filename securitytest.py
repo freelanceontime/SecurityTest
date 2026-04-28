@@ -4750,11 +4750,12 @@ def check_deep_link_misconfiguration(manifest):
                     f"{', '.join(combos[:6])}{'…' if len(combos) > 6 else ''}."
                 )
 
+            hosts_display = ', '.join(unique_hosts) if unique_hosts else '<span style="color:#d32f2f;">NONE — any host accepted</span>'
             issue_msg = (
                 f"<strong>{activity_name}</strong><br>"
                 f"{vuln_summary}<br>"
                 f"<strong>Schemes:</strong> {', '.join(unique_schemes) if unique_schemes else '(none)'}<br>"
-                f"<strong>Hosts:</strong> {', '.join(unique_hosts) if unique_hosts else '<span style=\"color:#d32f2f;\">NONE — any host accepted</span>'}<br>"
+                f"<strong>Hosts:</strong> {hosts_display}<br>"
                 f"<strong>Paths:</strong> {', '.join(unique_paths) if unique_paths else '(none)'}<br>"
                 f"<strong>AutoVerify:</strong> {auto_verify}<br>"
                 f"<br><strong>Impact:</strong> {impact}<br>"
