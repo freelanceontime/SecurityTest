@@ -350,19 +350,27 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
     global FRIDA_LAST_STOP_REASON
     FRIDA_LAST_STOP_REASON = None
 
-    # Import threading/queue for Windows
-    if is_windows:
-        import threading
-        import queue
+    import threading
+    import queue
+
+    # Single persistent reader thread drains proc.stdout into a shared queue.
+    # Avoids per-iteration thread spawning which causes BufferedReader lock
+    # contention, pipe buffer overflow, and [Errno 11] BlockingIOError.
+    stdout_queue = queue.Queue()
+
+    def _stdout_reader():
+        try:
+            for line in proc.stdout:
+                stdout_queue.put(line)
+        except Exception:
+            pass
+
+    reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    reader_thread.start()
 
     # Platform-specific setup
     if not is_windows:
-        # Unix: Make stdout non-blocking
-        fd = proc.stdout.fileno()
-        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
-        # Unix: Also make stdin non-blocking for better input detection
+        # Unix: Make stdin non-blocking for input detection
         stdin_fd = sys.stdin.fileno()
         stdin_fl = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
         fcntl.fcntl(stdin_fd, fcntl.F_SETFL, stdin_fl | os.O_NONBLOCK)
@@ -400,58 +408,20 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 if send_exit_on_stop and proc.poll() is None:
                     print("[*] Sending exit command to Frida...")
                     try:
-                        # First, drain any pending output to prevent blocking
-                        if is_windows:
-                            # Windows: quick non-blocking drain
+                        # Drain anything already queued by the reader thread
+                        while True:
                             try:
-                                import queue
-                                import threading
-                                def drain_output(q):
-                                    try:
-                                        while True:
-                                            l = proc.stdout.readline()
-                                            if not l:
-                                                break
-                                            q.put(l)
-                                    except:
-                                        pass
-                                q = queue.Queue()
-                                t = threading.Thread(target=drain_output, args=(q,))
-                                t.daemon = True
-                                t.start()
-                                t.join(timeout=0.5)
-                                # Collect drained lines
-                                while not q.empty():
-                                    try:
-                                        line = q.get_nowait()
-                                        logs.append(line.rstrip())
-                                    except:
-                                        break
-                            except:
-                                pass
-                        else:
-                            # Unix: drain using select with short timeout
-                            try:
-                                fd = proc.stdout.fileno()
-                                while True:
-                                    r, _, _ = select.select([fd], [], [], 0.1)
-                                    if not r:
-                                        break
-                                    line = proc.stdout.readline()
-                                    if line:
-                                        logs.append(line.rstrip())
-                            except:
-                                pass
+                                logs.append(stdout_queue.get_nowait().rstrip())
+                            except queue.Empty:
+                                break
 
                         # Now try to send exit command
                         proc.stdin.write('exit\n')
                         proc.stdin.flush()
                     except BlockingIOError:
-                        # If write still blocks, just terminate the process
                         print("[!] Cannot send exit command (buffer full), terminating process...")
                         proc.terminate()
                     except Exception as e:
-                        # Any other error, just terminate
                         print(f"[!] Error sending exit command: {e}, terminating process...")
                         proc.terminate()
                 break
@@ -461,43 +431,12 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 time.sleep(0.05)
                 continue
 
-            # Collect Frida output (platform-specific)
+            # Collect Frida output — drain the shared queue (filled by persistent reader thread)
             line = None
-            if is_windows:
-                # Windows: Poll stdout without blocking
-                # Check if process has data available
-                if proc.poll() is None:  # Process is still running
-                    try:
-                        # Try to read with short timeout using threading
-                        def read_line(q):
-                            try:
-                                l = proc.stdout.readline()
-                                if l:
-                                    q.put(l)
-                            except:
-                                pass
-
-                        q = queue.Queue()
-                        t = threading.Thread(target=read_line, args=(q,))
-                        t.daemon = True
-                        t.start()
-                        t.join(timeout=0.01)  # Fast polling for responsive output
-
-                        try:
-                            line = q.get_nowait()
-                        except queue.Empty:
-                            pass
-                    except:
-                        pass
-            else:
-                # Unix: Use select on file descriptor
-                fd = proc.stdout.fileno()
-                r, _, _ = select.select([fd], [], [], 0.01)  # Fast polling for responsive output
-                if r:
-                    try:
-                        line = proc.stdout.readline()
-                    except:
-                        pass
+            try:
+                line = stdout_queue.get_nowait()
+            except queue.Empty:
+                pass
 
             if line:
                 # Print RAW to console for real-time feedback
@@ -524,9 +463,9 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 print("[*] Press ENTER to continue to result analysis.")
                 stop_notice_shown = True
 
-            # Small delay to prevent CPU spinning
-            if is_windows:
-                time.sleep(0.01)  # Reduced to 10ms for faster output
+            # Small delay to prevent CPU spinning (both platforms use the queue now)
+            if not line:
+                time.sleep(0.01)
 
     except KeyboardInterrupt:
         print("\n[!] Test interrupted by user")
@@ -559,17 +498,17 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
             except:
                 proc.kill()
 
-        # Now read ALL remaining output (Frida has exited so all output is available)
+        # Drain any remaining lines buffered by the reader thread
         print("[*] Reading all remaining output...")
-        try:
-            # Read everything that's left in the pipe
-            remaining = proc.stdout.read()
-            if remaining:
-                for line in remaining.splitlines():
-                    print(line)
-                    logs.append(line)
-        except:
-            pass
+        reader_thread.join(timeout=3)
+        while True:
+            try:
+                line = stdout_queue.get_nowait()
+                line = line.rstrip()
+                print(line)
+                logs.append(line)
+            except queue.Empty:
+                break
 
     return logs
 
