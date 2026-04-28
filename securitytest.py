@@ -2475,14 +2475,13 @@ def check_s3_bucket_security(base):
     # Find S3 bucket references
     bucket_patterns = [
         r's3://([a-zA-Z0-9.\-]+)',  # s3://bucket-name
-        r'([a-zA-Z0-9.\-]+)\.s3\.amazonaws\.com',  # bucket-name.s3.amazonaws.com
-        r's3\.amazonaws\.com/([a-zA-Z0-9.\-]+)',  # s3.amazonaws.com/bucket-name
-        r'([a-zA-Z0-9.\-]+)\.s3-([a-z0-9\-]+)\.amazonaws\.com',  # bucket-name.s3-region.amazonaws.com
+        r'([a-zA-Z0-9.\-]+)\.s3(?:[.-][a-z0-9\-]+)?\.amazonaws\.com',  # bucket-name.s3.amazonaws.com OR bucket-name.s3.<region>.amazonaws.com
+        r'https?://s3(?:[.-][a-z0-9\-]+)?\.amazonaws\.com/([a-zA-Z0-9.\-]+)',  # path-style URL: s3.amazonaws.com/bucket-name/...
     ]
     bucket_regexes = [re.compile(pat, re.IGNORECASE) for pat in bucket_patterns]
 
     buckets_found = set()
-    bucket_locations = {}
+    bucket_locations = defaultdict(set)
 
     scan_exts = ('.smali', '.xml', '.json', '.properties', '.txt', '.cfg', '.conf', '.config')
     files_to_scan = []
@@ -2506,11 +2505,11 @@ def check_s3_bucket_security(base):
                     for match in rx.finditer(content):
                         bucket_name = match.group(1)
                         # Filter out obvious false positives
+                        if bucket_name:
+                            bucket_name = bucket_name.strip().lower()
                         if bucket_name and not bucket_name.startswith('.') and len(bucket_name) > 3:
                             buckets_found.add(bucket_name)
-                            if bucket_name not in bucket_locations:
-                                bucket_locations[bucket_name] = []
-                            bucket_locations[bucket_name].append(
+                            bucket_locations[bucket_name].add(
                                 f"{rel}:{content[:match.start()].count(chr(10)) + 1}"
                             )
             except Exception:
@@ -2533,7 +2532,7 @@ def check_s3_bucket_security(base):
 
     for bucket in sorted(buckets_found):
         # Get locations where this bucket was found
-        locations = bucket_locations.get(bucket, [])
+        locations = sorted(bucket_locations.get(bucket, set()))
 
         # Test 1: Try to write a file
         write_result = ""
@@ -2698,7 +2697,7 @@ def check_s3_bucket_security(base):
         )
 
     summary_lines = [
-        f"Found {len(buckets_found)} S3 bucket reference(s) in static code"
+        f"Found {len(buckets_found)} unique S3 bucket(s) in static code"
     ]
 
     # Build raw HTML with all findings
