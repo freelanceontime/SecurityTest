@@ -13070,12 +13070,12 @@ def check_frida_task_hijack(base, manifest,
     # ── 8) taskAffinity runtime check via dumpsys ────────────────────────────
     # MASTG-TEST-0029 requires verifying the actual task affinity at runtime,
     # not just the manifest declaration. `dumpsys activity activities` shows
-    # the live task stack with each task’s affinity string — if it matches the
+    # the live task stack with each task's affinity string — if it matches the
     # package name the app is targetable by a StrandHogg-style attack.
     affinity_findings = []
     try:
         dumpsys = subprocess.check_output(
-            [‘adb’, ‘shell’, ‘dumpsys’, ‘activity’, ‘activities’],
+            ['adb', 'shell', 'dumpsys', 'activity', 'activities'],
             stderr=subprocess.DEVNULL, universal_newlines=True, timeout=10
         )
         # Match lines like:  * TaskRecord{... affinity=com.phe.couchto5K ...}
@@ -13083,96 +13083,96 @@ def check_frida_task_hijack(base, manifest,
         for line in dumpsys.splitlines():
             if pkg not in line:
                 continue
-            m_aff = re.search(r’affinity=([^\s\}]+)’, line)
+            m_aff = re.search(r'affinity=([^\s\}]+)', line)
             if not m_aff:
                 continue
             affinity = m_aff.group(1)
             if affinity == pkg:
                 # Default affinity = package name → predictable, targetable
                 affinity_findings.append(
-                    f’<strong style=”color:#dc3545;”>Task affinity is the package name ‘
-                    f’(<code>{affinity}</code>)</strong> — a malicious app can set its own ‘
-                    f’<code>taskAffinity</code> to this value to insert itself into the task ‘
-                    f’stack (StrandHogg / CVE-2020-0267 on Android &lt; 11).<br><br>’
+                    f'<strong style="color:#dc3545;">Task affinity is the package name '
+                    f'(<code>{affinity}</code>)</strong> — a malicious app can set its own '
+                    f'<code>taskAffinity</code> to this value to insert itself into the task '
+                    f'stack (StrandHogg / CVE-2020-0267 on Android &lt; 11).<br><br>'
 
-                    f’<strong>Manual verification — craft a malicious task:</strong><br>’
-                    f’Create a companion test app with the following ‘
-                    f’<code>AndroidManifest.xml</code> activity declaration:<br>’
-                    f’<pre style=”background:#f8f9fa;padding:10px;border-left:3px solid #dc3545;’
-                    f’font-size:12px;overflow-x:auto;”>’
-                    f’&lt;activity\n’
-                    f’    android:name=”.MaliciousActivity”\n’
-                    f’    android:taskAffinity=”{affinity}”\n’
-                    f’    android:launchMode=”singleTask”\n’
-                    f’    android:exported=”true”&gt;\n’
-                    f’    &lt;intent-filter&gt;\n’
-                    f’        &lt;action android:name=”android.intent.action.MAIN”/&gt;\n’
-                    f’        &lt;category android:name=”android.intent.category.LAUNCHER”/&gt;\n’
-                    f’    &lt;/intent-filter&gt;\n’
-                    f’&lt;/activity&gt;</pre>’
+                    f'<strong>Manual verification — craft a malicious task:</strong><br>'
+                    f'Create a companion test app with the following '
+                    f'<code>AndroidManifest.xml</code> activity declaration:<br>'
+                    f'<pre style="background:#f8f9fa;padding:10px;border-left:3px solid #dc3545;'
+                    f'font-size:12px;overflow-x:auto;">'
+                    f'&lt;activity\n'
+                    f'    android:name=".MaliciousActivity"\n'
+                    f'    android:taskAffinity="{affinity}"\n'
+                    f'    android:launchMode="singleTask"\n'
+                    f'    android:exported="true"&gt;\n'
+                    f'    &lt;intent-filter&gt;\n'
+                    f'        &lt;action android:name="android.intent.action.MAIN"/&gt;\n'
+                    f'        &lt;category android:name="android.intent.category.LAUNCHER"/&gt;\n'
+                    f'    &lt;/intent-filter&gt;\n'
+                    f'&lt;/activity&gt;</pre>'
 
-                    f’<strong>Steps to confirm exploitation:</strong><br>’
-                    f’<ol style=”margin:4px 0;padding-left:20px;”>’
-                    f’<li>Install the companion test app on the device: ‘
-                    f’<code>adb install malicious.apk</code></li>’
-                    f’<li>Launch the companion app once so its task is registered with the system</li>’
-                    f’<li>Press Home, then tap the <strong>target app</strong> icon ‘
-                    f’(<code>{affinity}</code>)</li>’
-                    f’<li>If the companion app\’s activity appears instead of the target — ‘
-                    f’the attack succeeds</li>’
-                    f’<li>On Android 11+ (API 30) the attack is patched and should fail — ‘
-                    f’confirm by testing on a pre-Android-11 device or emulator if in scope</li>’
-                    f’</ol>’
+                    f'<strong>Steps to confirm exploitation:</strong><br>'
+                    f'<ol style="margin:4px 0;padding-left:20px;">'
+                    f'<li>Install the companion test app on the device: '
+                    f'<code>adb install malicious.apk</code></li>'
+                    f'<li>Launch the companion app once so its task is registered with the system</li>'
+                    f'<li>Press Home, then tap the <strong>target app</strong> icon '
+                    f'(<code>{affinity}</code>)</li>'
+                    f'<li>If the companion app\'s activity appears instead of the target — '
+                    f'the attack succeeds</li>'
+                    f'<li>On Android 11+ (API 30) the attack is patched and should fail — '
+                    f'confirm by testing on a pre-Android-11 device or emulator if in scope</li>'
+                    f'</ol>'
 
-                    f’<strong>Fix:</strong> add <code>android:taskAffinity=””</code> to the ‘
-                    f’<code>&lt;application&gt;</code> tag (covers all activities at once) or ‘
-                    f’to the launcher <code>&lt;activity&gt;</code> tag individually.<br>’
-                    f’<strong>CVE:</strong> ‘
-                    f’<a href=”https://nvd.nist.gov/vuln/detail/CVE-2020-0267” target=”_blank”>’
-                    f’CVE-2020-0267</a> &mdash; ‘
-                    f’<a href=”https://promon.co/security-news/strandhogg/” target=”_blank”>’
-                    f’StrandHogg research</a>’
+                    f'<strong>Fix:</strong> add <code>android:taskAffinity=""</code> to the '
+                    f'<code>&lt;application&gt;</code> tag (covers all activities at once) or '
+                    f'to the launcher <code>&lt;activity&gt;</code> tag individually.<br>'
+                    f'<strong>CVE:</strong> '
+                    f'<a href="https://nvd.nist.gov/vuln/detail/CVE-2020-0267" target="_blank">'
+                    f'CVE-2020-0267</a> &mdash; '
+                    f'<a href="https://promon.co/security-news/strandhogg/" target="_blank">'
+                    f'StrandHogg research</a>'
                 )
                 break
             elif affinity and affinity != pkg:
                 # Explicit non-package, non-empty affinity — unusual, flag it
                 affinity_findings.append(
-                    f’Task affinity is set to <code>{affinity}</code> (not the package ‘
-                    f’name and not empty). Verify this is intentional — a custom affinity ‘
-                    f’shared with another app can also be exploited if that app is malicious.’
+                    f'Task affinity is set to <code>{affinity}</code> (not the package '
+                    f'name and not empty). Verify this is intentional — a custom affinity '
+                    f'shared with another app can also be exploited if that app is malicious.'
                 )
                 break
     except Exception:
-        affinity_findings.append(‘Could not read task affinity from dumpsys — verify manually.’)
+        affinity_findings.append('Could not read task affinity from dumpsys — verify manually.')
 
     # ── 9) cleanup ───────────────────────────────────────────────────────────
     proc.terminate()
-    subprocess.run([‘adb’,’shell’,’am’,’force-stop’, pkg],
+    subprocess.run(['adb','shell','am','force-stop', pkg],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
     # ── 10) build HTML report ─────────────────────────────────────────────────
     rows, launches = [], 0
     for comp in bad:
-        simple = comp.split(‘.’)[-1]
+        simple = comp.split('.')[-1]
         if comp in seen:
             launches += 1
-            rows.append(f”- <code>{simple}</code> &rarr; <code>{seen[comp]}()</code>”)
+            rows.append(f"- <code>{simple}</code> &rarr; <code>{seen[comp]}()</code>")
         else:
-            rows.append(f”- <code>{simple}</code> not observed”)
+            rows.append(f"- <code>{simple}</code> not observed")
 
     detail_parts = []
     if rows:
-        detail_parts.append(“<br>\n”.join(rows))
+        detail_parts.append("<br>\n".join(rows))
     if affinity_findings:
         detail_parts.append(
-            “<br><strong>Task Affinity (StrandHogg) — runtime check:</strong><br>” +
-            “<br>”.join(affinity_findings)
+            "<br><strong>Task Affinity (StrandHogg) — runtime check:</strong><br>" +
+            "<br>".join(affinity_findings)
         )
 
-    detail = “<br><br>”.join(detail_parts) if detail_parts else “No issues observed.”
+    detail = "<br><br>".join(detail_parts) if detail_parts else "No issues observed."
     # FAIL if any activity launched OR if taskAffinity is exploitable
-    fail = launches > 0 or bool(affinity_findings and ‘package name’ in affinity_findings[0])
+    fail = launches > 0 or bool(affinity_findings and 'package name' in affinity_findings[0])
     return (not fail), detail
 
 
