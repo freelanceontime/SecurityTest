@@ -433,7 +433,7 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 time.sleep(0.05)
                 continue
 
-            # Collect Frida output â€” drain the shared queue (filled by persistent reader thread)
+            # Collect Frida output - drain the shared queue (filled by persistent reader thread)
             line = None
             try:
                 line = stdout_queue.get_nowait()
@@ -1728,7 +1728,7 @@ function sortTable(colIndex) {{
   table.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
   table.querySelectorAll('.chevron').forEach(c => c.textContent = '');
   table.tHead.rows[1].cells[colIndex]
-       .querySelector('.chevron').textContent = asc ? 'â–²' : 'â–¼';
+       .querySelector('.chevron').textContent = asc ? '' : '';
 }}
 
 // Filter rows by dropdowns
@@ -3173,7 +3173,7 @@ def check_s3_bucket_security(base):
     if not buckets_found:
         note = "<div>No S3 bucket references found in static code analysis</div>"
         note += "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:10px;'>"
-        note += "<strong>ðŸ’¡ Tip:</strong> Check the <strong>Dynamic Cert Pinning</strong> test results for runtime-discovered S3 buckets that may not appear in static code."
+        note += "<strong>[TIP] Tip:</strong> Check the <strong>Dynamic Cert Pinning</strong> test results for runtime-discovered S3 buckets that may not appear in static code."
         note += "</div>"
         return True, note
 
@@ -3309,7 +3309,7 @@ def check_s3_bucket_security(base):
                         end = min(len(lines), line_num + 2)
                         context_lines = []
                         for j in range(start, end):
-                            prefix = "â†’ " if j == line_num - 1 else "  "
+                            prefix = "-> " if j == line_num - 1 else "  "
                             context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
                         code_snippet = "\n".join(context_lines)
                     except:
@@ -3334,7 +3334,7 @@ def check_s3_bucket_security(base):
                     # Expandable code block (matching FindingBlock style)
                     escaped_code = html.escape(code_snippet)
                     finding_html.append("<details style='margin:10px 0;' open>")
-                    finding_html.append("<summary style='cursor:pointer; padding:8px; background:#e9ecef; border-left:4px solid #495057; font-weight:600; font-size:11px; color:#495057;'>â–¼ Show Code</summary>")
+                    finding_html.append("<summary style='cursor:pointer; padding:8px; background:#e9ecef; border-left:4px solid #495057; font-weight:600; font-size:11px; color:#495057;'>Show Code</summary>")
                     finding_html.append(f"<pre style='background:#f8f9fa; padding:12px; margin:8px 0; overflow-x:auto; border:1px solid #dee2e6; font-size:12px; line-height:1.5;'><code class='language-{lang}'>{escaped_code}</code></pre>")
                     finding_html.append("</details>")
 
@@ -3395,9 +3395,9 @@ def check_x509(base):
 
     mastg_refs = (
         "<br><div><strong>References:</strong><br>"
-        "â€¢ <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0282/' target='_blank'>MASTG-TEST-0282: Testing Endpoint Identity Verification</a><br>"
-        "â€¢ <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0283/' target='_blank'>MASTG-TEST-0283: Testing Custom Certificate Stores and Certificate Pinning</a><br>"
-        "â€¢ <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0234/' target='_blank'>MASTG-TEST-0234: Testing Data Encryption on the Network</a>"
+        "- <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0282/' target='_blank'>MASTG-TEST-0282: Testing Endpoint Identity Verification</a><br>"
+        "- <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0283/' target='_blank'>MASTG-TEST-0283: Testing Custom Certificate Stores and Certificate Pinning</a><br>"
+        "- <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0234/' target='_blank'>MASTG-TEST-0234: Testing Data Encryption on the Network</a>"
         "</div>"
     )
 
@@ -3434,7 +3434,7 @@ def check_x509(base):
         'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
         'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/',
         'org/conscrypt/',        # Google's Conscrypt TLS/crypto provider (standalone)
-        'com/neovisionaries/',   # nv-websocket-client â€” implements its own OkHostnameVerifier post-handshake
+        'com/neovisionaries/',   # nv-websocket-client - implements its own OkHostnameVerifier post-handshake
         'com/twilio/',           # Twilio SDK (uses nv-websocket-client internally)
         'io/ktor/',              # Ktor HTTP client
         'com/bumptech/glide/',   # Glide image loader
@@ -3537,14 +3537,14 @@ def check_x509(base):
                             # Add specific warning for Xamarin TrustManagers
                             if is_xamarin:
                                 issues.append(
-                                    f"{link} â€“ <strong style='color:#dc2626;'>{name}()</strong> Xamarin TrustManager vulnerability<br>"
-                                    f"<em>âš ï¸ Method never throws CertificateException - accepts ANY certificate (self-signed, expired, etc.)</em><br>"
+                                    f"{link} - <strong style='color:#dc2626;'>{name}()</strong> Xamarin TrustManager vulnerability<br>"
+                                    f"<em>[WARNING] Method never throws CertificateException - accepts ANY certificate (self-signed, expired, etc.)</em><br>"
                                     f"<em>Risk: Man-in-the-middle attacks can intercept HTTPS traffic</em><br>"
                                     f"<pre>{snippet_html}</pre>"
                                 )
                             else:
                                 issues.append(
-                                    f"{link} â€“ <strong>{name}()</strong> missing validation<br>"
+                                    f"{link} - <strong>{name}()</strong> missing validation<br>"
                                     f"<pre>{snippet_html}</pre>"
                                 )
                     i = j
@@ -3562,7 +3562,7 @@ def check_x509(base):
                                     f'{html.escape(rel)}:{k+1}</a>'
                                 )
                                 issues.append(
-                                    f"{link} â€“ <strong>HostnameVerifier.verify()</strong> always returns true<br>"
+                                    f"{link} - <strong>HostnameVerifier.verify()</strong> always returns true<br>"
                                     f"<code>{snippet}</code>"
                                 )
                                 break
@@ -3597,7 +3597,7 @@ def check_x509(base):
                                 f'{html.escape(rel)}:{i+1}</a>'
                             )
                             issues.append(
-                                f"{link} â€“ <strong>SSLSocket</strong> created without endpoint identification algorithm<br>"
+                                f"{link} - <strong>SSLSocket</strong> created without endpoint identification algorithm<br>"
                                 f"<code>{snippet}</code><br>"
                                 f"<em>Missing: SSLParameters.setEndpointIdentificationAlgorithm(\"HTTPS\")</em>"
                             )
@@ -3994,12 +3994,12 @@ def check_uri_scheme(manifest):
     result += f"<strong>Schemes:</strong> {', '.join(f'<code>{s}://</code>' for s in unique_schemes)}<br>"
 
     if oauth_count > 0:
-        result += f"<strong>âš  OAuth Indicators:</strong> {oauth_count} instance(s) may be used for OAuth (high risk for account takeover)<br>"
+        result += f"<strong>[WARNING] OAuth Indicators:</strong> {oauth_count} instance(s) may be used for OAuth (high risk for account takeover)<br>"
 
     result += "<br><strong>Vulnerable Activities:</strong><br>"
     for info in issues:
-        oauth_marker = " ðŸ”´ OAuth" if info['is_oauth'] else ""
-        result += f"<div>â€¢ <code>{info['activity']}</code> - <code>{info['scheme']}://{info['host']}</code>{oauth_marker}</div>"
+        oauth_marker = " [OAuth] OAuth" if info['is_oauth'] else ""
+        result += f"<div>- <code>{info['activity']}</code> - <code>{info['scheme']}://{info['host']}</code>{oauth_marker}</div>"
 
     result += "<br><strong>Vulnerability:</strong> Custom URI schemes can be hijacked by malicious apps to intercept intents/tokens.<br>"
 
@@ -4244,7 +4244,7 @@ def check_logging(base):
                                             any(kw in line_lower for kw in found_keywords)):
                                             # Add line number prefix for context
                                             actual_line_no = start_idx + i + 1
-                                            prefix = "â†’ " if actual_line_no == line_num + 1 else "  "
+                                            prefix = "-> " if actual_line_no == line_num + 1 else "  "
                                             relevant_lines.append(f"{prefix}L{actual_line_no}: {ctx_line.strip()}")
 
                                     # If we found relevant lines, use them; otherwise fall back to full context
@@ -4291,7 +4291,7 @@ def check_logging(base):
     lines.append(f"<div style='margin:10px 0'><strong>Potentially Sensitive Logs:</strong> {total_sensitive} <span style='color:#6c757d; font-size:12px;'>(app code only - filtered by keywords & entropy)</span></div>")
 
     if total_sensitive == 0:
-        lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745;'><strong>âœ“ No sensitive data detected in logs</strong><br>All log statements appear to be non-sensitive.</div>")
+        lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745;'><strong>No sensitive data detected in logs</strong><br>All log statements appear to be non-sensitive.</div>")
         return 'WARN', "\n".join(lines) + mastg_ref, 0
 
     # Generate table ID
@@ -4412,14 +4412,14 @@ def check_updates(base):
     Checks for update implementation by searching for either:
 
     METHOD 1 - Google Play In-App Updates (official API):
-      â€¢ AppUpdateManager (Google Play Core library)
-      â€¢ updateAvailability (checking for available updates)
-      â€¢ startUpdateFlowForResult (initiating update flow)
+      - AppUpdateManager (Google Play Core library)
+      - updateAvailability (checking for available updates)
+      - startUpdateFlowForResult (initiating update flow)
 
     METHOD 2 - Custom server-side updates (alternative pattern):
-      â€¢ UpdateAppDialog / showUpdateDialog (custom update dialog)
-      â€¢ latestVersion / minimumVersion (version comparison fields)
-      â€¢ market://details (Play Store redirect intent)
+      - UpdateAppDialog / showUpdateDialog (custom update dialog)
+      - latestVersion / minimumVersion (version comparison fields)
+      - market://details (Play Store redirect intent)
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0036/' target='_blank'>MASTG-TEST-0036: Testing Enforced Updating</a></div>"
 
@@ -4561,22 +4561,22 @@ def check_updates(base):
     # Show library-only detections if present
     if google_found_library or custom_found_library:
         summary_lines.append("")
-        summary_lines.append("âš  Library code detections (excluded from app analysis):")
+        summary_lines.append("[WARNING] Library code detections (excluded from app analysis):")
         for pattern in google_found_library:
             desc = google_play_patterns[pattern]
-            summary_lines.append(f"  â€¢ {pattern} ({desc}) - found in library")
+            summary_lines.append(f"  - {pattern} ({desc}) - found in library")
         for pattern in custom_found_library:
             desc = custom_update_patterns[pattern]
-            summary_lines.append(f"  â€¢ {pattern} ({desc}) - found in library")
+            summary_lines.append(f"  - {pattern} ({desc}) - found in library")
 
     # Add status explanation
     if status == "WARN":
         summary_lines.append("")
         if has_library_only:
-            summary_lines.append("âš  WARNING: Update patterns found only in library code, not in app implementation.")
+            summary_lines.append("[WARNING] WARNING: Update patterns found only in library code, not in app implementation.")
             summary_lines.append("  Investigate: The app may be using these libraries but not implementing updates.")
         elif has_weak_custom:
-            summary_lines.append("âš  WARNING: Only partial custom update implementation detected.")
+            summary_lines.append("[WARNING] WARNING: Only partial custom update implementation detected.")
             summary_lines.append("  Investigate: Verify if this is a complete update mechanism.")
 
     # Build FindingBlocks only for FOUND patterns with code snippets
@@ -4596,7 +4596,7 @@ def check_updates(base):
                 end = min(len(lines), line_num + 2)
                 context_lines = []
                 for j in range(start, end):
-                    prefix = "â†’ " if j == line_num - 1 else "  "
+                    prefix = "-> " if j == line_num - 1 else "  "
                     context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
                 code_snippet = "\n".join(context_lines)
             else:
@@ -4627,7 +4627,7 @@ def check_updates(base):
                 end = min(len(lines), line_num + 2)
                 context_lines = []
                 for j in range(start, end):
-                    prefix = "â†’ " if j == line_num - 1 else "  "
+                    prefix = "-> " if j == line_num - 1 else "  "
                     context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
                 code_snippet = "\n".join(context_lines)
             else:
@@ -4637,7 +4637,7 @@ def check_updates(base):
 
             findings.append(
                 FindingBlock(
-                    title=f"âš  Library: {rel_path}",
+                    title=f"[WARNING] Library: {rel_path}",
                     subtitle=f"{pattern} ({desc}) Â· Line {line_num} [Library code - not app implementation]",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
@@ -4671,7 +4671,7 @@ def check_memtag(manifest):
 
 def check_min_sdk(manifest, apk_path=None, threshold=28):
     """
-    Ensures android:minSdkVersion is declared and â‰¥ threshold.
+    Ensures android:minSdkVersion is declared and >= threshold.
 
     1) Parse the decompiled XML <uses-sdk> if present.
     2) Otherwise fall back to `aapt dump badging` on the APK.
@@ -4724,7 +4724,7 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
             status = "FAIL"
         else:
             status = "PASS"
-            summary.append(f"Meets recommended threshold (â‰¥ {threshold})")
+            summary.append(f"Meets recommended threshold (>= {threshold})")
     else:
         summary.append("minSdkVersion not found in manifest or aapt badging")
 
@@ -4960,7 +4960,7 @@ def check_serialize(base):
                         snippet = html.escape(line.strip())
 
                         hits.append(
-                            f"{link} â€“ <strong style='color:#dc2626;'>Insecure ObjectInputStream deserialization</strong><br>"
+                            f"{link} - <strong style='color:#dc2626;'>Insecure ObjectInputStream deserialization</strong><br>"
                             f"<code>{snippet}</code><br>"
                             f"<em>Risk: Remote Code Execution via malicious serialized objects</em>"
                         )
@@ -4974,7 +4974,7 @@ def check_serialize(base):
                         snippet = html.escape(line.strip())
 
                         hits.append(
-                            f"{link} â€“ <strong style='color:#d97706;'>WARNING: Custom readObject implementation</strong><br>"
+                            f"{link} - <strong style='color:#d97706;'>WARNING: Custom readObject implementation</strong><br>"
                             f"<code>{snippet}</code><br>"
                             f"<em>Review for unsafe deserialization logic</em>"
                         )
@@ -5009,7 +5009,7 @@ def check_serialize(base):
                         context = "FAIL: No version check or type safety"
 
                     hits.append(
-                        f"{link} â€“ {context}<br>"
+                        f"{link} - {context}<br>"
                         f"<code>{snippet}</code>"
                     )
 
@@ -5096,7 +5096,7 @@ def check_browsable_deeplinks(manifest):
                 url = 'http://example.com/'
                 cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                 issues.append(
-                    f'<strong>{name}</strong>: BROWSABLE filter with no &lt;data&gt; â†’ matches everything<br>'
+                    f'<strong>{name}</strong>: BROWSABLE filter with no &lt;data&gt; -> matches everything<br>'
                     f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
                     f'<strong>Fix:</strong> Add specific &lt;data&gt; tags with scheme and host restrictions<br><br>'
                 )
@@ -5135,7 +5135,7 @@ def check_browsable_deeplinks(manifest):
                 url = f"{example_scheme}://attacker.com{example_path}"
                 cmd = f'adb shell am start -a android.intent.action.VIEW -n {pkg}/{name} -d "{url}"'
                 issues.append(
-                    f'<strong>{name}</strong>: <code>{example_scheme}://</code> with NO host restriction â†’ matches any domain<br>'
+                    f'<strong>{name}</strong>: <code>{example_scheme}://</code> with NO host restriction -> matches any domain<br>'
                     f'<strong>Schemes:</strong> {", ".join(sorted(schemes))}<br>'
                     f'<strong>Paths:</strong> {", ".join(paths) if paths else "none"}<br>'
                     f'<strong>Test with:</strong><br><pre>{cmd}</pre>'
@@ -5212,12 +5212,12 @@ def check_deep_link_misconfiguration(manifest):
     Android pools all <data> attributes within one intent-filter into shared scheme,
     host, and path sets. A URI matches if it satisfies ALL sets simultaneously.
     Splitting one URI pattern across multiple <data> tags (one scheme tag, one host
-    tag, one path tag) is safe â€” they combine into a single pattern.
+    tag, one path tag) is safe - they combine into a single pattern.
 
     Two genuine vulnerability patterns are checked:
 
-    1. No host anywhere in the filter â€” the scheme is accepted with any host.
-    2. Multiple distinct hosts AND multiple distinct paths in the same filter â€”
+    1. No host anywhere in the filter - the scheme is accepted with any host.
+    2. Multiple distinct hosts AND multiple distinct paths in the same filter -
        Android's Cartesian product matches every host Ã— path combination, producing
        patterns the developer did not intend.
 
@@ -5302,15 +5302,15 @@ def check_deep_link_misconfiguration(manifest):
             # Splitting one URI pattern across multiple <data> tags is safe as long as
             # the combined pool produces only the intended patterns.
             #
-            # Vulnerability 1 â€” No host anywhere in the filter:
+            # Vulnerability 1 - No host anywhere in the filter:
             #   The filter accepts any host for the given scheme(s).
             #
-            # Vulnerability 2 â€” Multiple distinct hosts AND multiple distinct paths:
+            # Vulnerability 2 - Multiple distinct hosts AND multiple distinct paths:
             #   Android's Cartesian product matches every host Ã— path combination,
             #   producing unintended URI patterns (e.g. host-A with path-B).
             #
             # NOT a vulnerability: one scheme tag + one host tag + one path tag split
-            # across separate <data> elements â€” they combine into a single pattern.
+            # across separate <data> elements - they combine into a single pattern.
 
             unique_schemes = list(dict.fromkeys(schemes))  # preserve order, dedupe
             unique_hosts   = list(dict.fromkeys(hosts))
@@ -5348,10 +5348,10 @@ def check_deep_link_misconfiguration(manifest):
                           for h in unique_hosts for p in unique_paths]
                 impact = (
                     f"All {len(combos)} host/path combinations are accepted: "
-                    f"{', '.join(combos[:6])}{'â€¦' if len(combos) > 6 else ''}."
+                    f"{', '.join(combos[:6])}{'...' if len(combos) > 6 else ''}."
                 )
 
-            hosts_display = ', '.join(unique_hosts) if unique_hosts else '<span style="color:#d32f2f;">NONE â€” any host accepted</span>'
+            hosts_display = ', '.join(unique_hosts) if unique_hosts else '<span style="color:#d32f2f;">NONE - any host accepted</span>'
             issue_msg = (
                 f"<strong>{activity_name}</strong><br>"
                 f"{vuln_summary}<br>"
@@ -5364,7 +5364,7 @@ def check_deep_link_misconfiguration(manifest):
                 f"<code>&lt;data android:scheme=\"{example_scheme}\" "
                 f"android:host=\"your-host.com\" "
                 f"android:pathPrefix=\"{example_path}\" /&gt;</code><br>"
-                f"<br><strong>Test command (implicit intent â€” tests actual filter matching):</strong><br>"
+                f"<br><strong>Test command (implicit intent - tests actual filter matching):</strong><br>"
                 f"<pre>adb shell am start -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d '{example_scheme}://attacker.com{example_path}'</pre>"
                 f"<em>Note: omit -n so Android must resolve the intent via filter matching. "
                 f"If the app opens, the vulnerability is confirmed. If it errors with 'unable to resolve', the filter is working correctly.</em><br>"
@@ -5780,11 +5780,11 @@ def check_task_hijack(manifest, apk_path=None):
 def check_network_security_config(base):
     """
     Tests:
-      â€¢ android:usesCleartextTraffic must be explicitly "false" (FAIL if missing/wrong)
-      â€¢ Manifest reference @xml/network_security_config (WARN if missing)
-      â€¢ res/xml/network_security_config.xml exists (WARN if missing)
-      â€¢ No <debug-overrides> in the config (FAIL if found)
-      â€¢ Every <domain-config> must have cleartextTrafficPermitted="false" and include a <pin-set> (FAIL if wrong)
+      - android:usesCleartextTraffic must be explicitly "false" (FAIL if missing/wrong)
+      - Manifest reference @xml/network_security_config (WARN if missing)
+      - res/xml/network_security_config.xml exists (WARN if missing)
+      - No <debug-overrides> in the config (FAIL if found)
+      - Every <domain-config> must have cleartextTrafficPermitted="false" and include a <pin-set> (FAIL if wrong)
     """
     manifest = os.path.join(base, 'AndroidManifest.xml')
     cfg_path = os.path.join(base, 'res', 'xml', 'network_security_config.xml')
@@ -5899,7 +5899,7 @@ def check_http_uris(base):
         "http://example.org",
         "http://test.com",
         "http://undefined",
-        "http://www.slf4j.org",  # SLF4J logging framework â€” documentation/error message URLs only
+        "http://www.slf4j.org",  # SLF4J logging framework - documentation/error message URLs only
     )
 
     false_positive_patterns = [
@@ -5947,7 +5947,7 @@ def check_http_uris(base):
                     end = min(len(lines), lineno + 2)
                     context = []
                     for idx in range(start, end):
-                        prefix = "â†’ " if idx == lineno - 1 else "  "
+                        prefix = "-> " if idx == lineno - 1 else "  "
                         context.append(f"{prefix}{idx+1:4d} | {lines[idx]}")
                     findings.append(
                         FindingBlock(
@@ -6032,13 +6032,13 @@ def check_debuggable(manifest, base):
 def check_root_detection(manifest, base):
     """
     PASS if any root-detection code is present in smali or Java:
-      â€¢ smali method signatures like Lâ€¦;->isRoot()Z or Lâ€¦;->isRooted()Z
-      â€¢ RootBeer instantiation or isRooted()/isRoot() calls
-      â€¢ RootChecker usage
-      â€¢ checkRootFiles()/checkRootPackages()
-      â€¢ Runtime.getRuntime().exec("su")
-      â€¢ java.io.File("/system/bin/su")
-      â€¢ Build.TAGS.contains("test-keys")
+      - smali method signatures like L...;->isRoot()Z or L...;->isRooted()Z
+      - RootBeer instantiation or isRooted()/isRoot() calls
+      - RootChecker usage
+      - checkRootFiles()/checkRootPackages()
+      - Runtime.getRuntime().exec("su")
+      - java.io.File("/system/bin/su")
+      - Build.TAGS.contains("test-keys")
     FAIL otherwise. Reports ALL detection methods found, not just the first.
     """
     # Patterns tuned for smali and Java
@@ -6156,16 +6156,16 @@ def check_allow_backup(manifest, base):
     Check if app has properly configured backup rules according to MASTG-TEST-0262.
 
     PASS if:
-      â€¢ android:allowBackup="false" (backups disabled), OR
-      â€¢ android:allowBackup="true" but has proper backup rules:
+      - android:allowBackup="false" (backups disabled), OR
+      - android:allowBackup="true" but has proper backup rules:
         - fullBackupContent="@xml/backup_rules" (Android â‰¤11) OR
-        - dataExtractionRules="@xml/data_extraction_rules" (Android â‰¥12)
+        - dataExtractionRules="@xml/data_extraction_rules" (Android >=12)
         - AND the XML file exists and excludes sensitive data
 
     FAIL if:
-      â€¢ allowBackup="true" (or missing, defaults to true) AND
-      â€¢ No fullBackupContent/dataExtractionRules attributes AND
-      â€¢ No backup rules XML files exist
+      - allowBackup="true" (or missing, defaults to true) AND
+      - No fullBackupContent/dataExtractionRules attributes AND
+      - No backup rules XML files exist
 
     Reference: MASTG-TEST-0262
     """
@@ -6189,7 +6189,7 @@ def check_allow_backup(manifest, base):
     full_backup_match = re.search(r'<application\b[^>]*\bandroid:fullBackupContent="([^"]+)"', txt)
     full_backup_content = full_backup_match.group(1) if full_backup_match else None
 
-    # Step 4: Check for dataExtractionRules (Android â‰¥12)
+    # Step 4: Check for dataExtractionRules (Android >=12)
     data_extraction_match = re.search(r'<application\b[^>]*\bandroid:dataExtractionRules="([^"]+)"', txt)
     data_extraction_rules = data_extraction_match.group(1) if data_extraction_match else None
 
@@ -6313,7 +6313,7 @@ def check_notification_sensitive_data(manifest, base):
         end = min(len(lines), idx + 1)
         snippet_lines = []
         for i in range(start, end):
-            prefix = "â†’ " if i == idx else "  "
+            prefix = "-> " if i == idx else "  "
             snippet_lines.append(f"{prefix}{i+1:4d} | {lines[i]}")
         return "\n".join(snippet_lines)
 
@@ -6440,13 +6440,13 @@ def check_notification_sensitive_data(manifest, base):
 def check_safe_browsing(manifest, base):
     """
     PASS if:
-      â€¢ No WebView usage, or
-      â€¢ No explicit opt-out found (default ON on API 26+), or
-      â€¢ Code explicitly enables Safe Browsing.
+      - No WebView usage, or
+      - No explicit opt-out found (default ON on API 26+), or
+      - Code explicitly enables Safe Browsing.
     FAIL if:
-      â€¢ Manifest sets android.webkit.WebView.EnableSafeBrowsing=false, or
-      â€¢ Code calls setSafeBrowsingEnabled(false), or
-      â€¢ App calls SafeBrowsingResponse.proceed(...) inside its own onSafeBrowsingHit(...).
+      - Manifest sets android.webkit.WebView.EnableSafeBrowsing=false, or
+      - Code calls setSafeBrowsingEnabled(false), or
+      - App calls SafeBrowsingResponse.proceed(...) inside its own onSafeBrowsingHit(...).
     INFO-ish PASS note if target/min < 26.
     Special handling for React Native apps (setSafeBrowsingEnabled not available).
     """
@@ -6605,7 +6605,7 @@ def check_safe_browsing(manifest, base):
             pass
         return f'<a href="file://{os.path.abspath(full)}">{html.escape(rel)}</a>'
 
-    # if any explicit disables â†’ FAIL
+    # if any explicit disables -> FAIL
     if disable_hits:
         links = []
         for rel in sorted(set(disable_hits)):
@@ -6638,7 +6638,7 @@ def check_safe_browsing(manifest, base):
                         end = min(len(lines), line_no + 2)
                         context_lines = []
                         for i in range(start, end):
-                            prefix = "â†’ " if i == line_no - 1 else "  "
+                            prefix = "-> " if i == line_no - 1 else "  "
                             context_lines.append(f"{prefix}{i+1:4d} | {lines[i].rstrip()}")
                         code_snippet = "\n".join(context_lines)
                         hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
@@ -6672,7 +6672,7 @@ def check_safe_browsing(manifest, base):
                         end = min(len(lines), start_ln + 4)
                         context_lines = []
                         for i in range(start, end):
-                            prefix = "â†’ " if i == start_ln - 1 else "  "
+                            prefix = "-> " if i == start_ln - 1 else "  "
                             context_lines.append(f"{prefix}{i+1:4d} | {lines[i].rstrip()}")
                         code_snippet = "\n".join(context_lines)
                         hit_html += f'<pre style="background:#f8f9fa; padding:8px; margin-top:4px; font-size:10px; color:#212529; border-left:3px solid #dc3545; overflow-x:auto; line-height:1.4;">{html.escape(code_snippet)}</pre>'
@@ -6687,7 +6687,7 @@ def check_safe_browsing(manifest, base):
             + "".join(links) + mastg_ref
         )
 
-    # explicit enable â†’ PASS
+    # explicit enable -> PASS
     if enable_hits:
         return True, "Safe Browsing enabled at runtime via code" + mastg_ref
 
@@ -6765,7 +6765,7 @@ def check_exported_components(manifest, base=None):
                         return True
         return False
 
-    # 1) Build a map of declared permissions â†’ protectionLevel
+    # 1) Build a map of declared permissions -> protectionLevel
     perm_protection = {}
     for perm in root.findall('permission'):
         name = perm.get(ns('name'))
@@ -6789,8 +6789,8 @@ def check_exported_components(manifest, base=None):
             if   exp_attr == 'true':   is_exported = True
             elif exp_attr == 'false':  is_exported = False
             else:  # no explicit exported
-                # Android <12: any intent-filter â†’ exported
-                # Android â‰¥12: must explicitly opt-in, but for static we assume intent-filter still means export
+                # Android <12: any intent-filter -> exported
+                # Android >=12: must explicitly opt-in, but for static we assume intent-filter still means export
                 is_exported = has_if
 
             if not is_exported:
@@ -6867,9 +6867,9 @@ def check_exported_components(manifest, base=None):
 def check_sql_injection(base, manifest):
     """
     MASTG-TEST-0025 (Injection flaws):
-      â€¢ Detect exported ContentProviders
-      â€¢ Link them to vulnerable SQL code (appendWhere, rawQuery)
-      â€¢ Provide concrete exploitation examples
+      - Detect exported ContentProviders
+      - Link them to vulnerable SQL code (appendWhere, rawQuery)
+      - Provide concrete exploitation examples
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0025/' target='_blank'>MASTG-TEST-0025: Testing for Injection Flaws</a></div>"
 
@@ -6988,7 +6988,7 @@ def check_sql_injection(base, manifest):
                 issues.append("<div style='margin-top:4px;'><strong>Vulnerable Code:</strong></div>")
                 for vuln_type, file_path in vp['vulnerable_code']:
                     full = os.path.join(base, file_path)
-                    issues.append(f"<div style='margin-left:20px;'>â€¢ <a href='file://{full}'>{html.escape(file_path)}</a> uses <code>{vuln_type}()</code></div>")
+                    issues.append(f"<div style='margin-left:20px;'>- <a href='file://{full}'>{html.escape(file_path)}</a> uses <code>{vuln_type}()</code></div>")
 
             # Provide exploitation examples
             # Use detected paths or show generic example
@@ -7026,7 +7026,7 @@ def check_sql_injection(base, manifest):
         issues.append("<div style='margin-top:12px;'><strong>Other SQL Injection Risks (not linked to exported providers):</strong></div>")
         for vuln_type, rel in unlinked_vuln[:10]:
             full = os.path.join(base, rel)
-            issues.append(f"<div>â€¢ <a href='file://{full}'>{html.escape(rel)}</a> uses <code>{vuln_type}()</code></div>")
+            issues.append(f"<div>- <a href='file://{full}'>{html.escape(rel)}</a> uses <code>{vuln_type}()</code></div>")
         if len(unlinked_vuln) > 10:
             issues.append(f"<div><em>...and {len(unlinked_vuln) - 10} more files</em></div>")
 
@@ -7155,7 +7155,7 @@ def check_raw_sql_queries(base):
         return 'PASS', f"<div>No raw SQL injection risks detected</div><div>Scanned {scanned_files} files</div>" + mastg_ref
 
     lines = []
-    lines.append(f"<div style='margin:2px 0'><strong>Scanned:</strong> {scanned_files} smali files â€¢ <strong>Total:</strong> {total} findings</div>")
+    lines.append(f"<div style='margin:2px 0'><strong>Scanned:</strong> {scanned_files} smali files - <strong>Total:</strong> {total} findings</div>")
 
     # Show findings by severity with collapsible sections
     severity_config = {
@@ -7305,17 +7305,17 @@ def check_insecure_webview(base):
     Comprehensive WebView security check based on OWASP MASTG-KNOW-0018.
 
     Checks for:
-      â€¢ JavaScript enabled (setJavaScriptEnabled)
-      â€¢ JavaScript interfaces (addJavascriptInterface)
-      â€¢ File access configurations (setAllowFileAccess, setAllowUniversalAccessFromFileURLs, etc.)
-      â€¢ Content provider access (setAllowContentAccess)
-      â€¢ WebView debugging (setWebContentsDebuggingEnabled)
-      â€¢ SSL/TLS error bypassing (onReceivedSslError with proceed())
-      â€¢ URL loading from user input (XSS risks)
-      â€¢ Mixed content mode (setMixedContentMode ALWAYS_ALLOW)
-      â€¢ Storage and geolocation permissions
-      â€¢ Custom protocol handlers without validation
-      â€¢ Missing WebView cleanup
+      - JavaScript enabled (setJavaScriptEnabled)
+      - JavaScript interfaces (addJavascriptInterface)
+      - File access configurations (setAllowFileAccess, setAllowUniversalAccessFromFileURLs, etc.)
+      - Content provider access (setAllowContentAccess)
+      - WebView debugging (setWebContentsDebuggingEnabled)
+      - SSL/TLS error bypassing (onReceivedSslError with proceed())
+      - URL loading from user input (XSS risks)
+      - Mixed content mode (setMixedContentMode ALWAYS_ALLOW)
+      - Storage and geolocation permissions
+      - Custom protocol handlers without validation
+      - Missing WebView cleanup
 
     MASVS: MASVS-PLATFORM-2
     MASTG: MASTG-KNOW-0018, MASTG-TEST-0027, MASTG-TEST-0031, MASTG-TEST-0032,
@@ -7602,7 +7602,7 @@ def check_keyboard_cache(base, manifest):
                         )
 
                         for desc in vulnerability_desc:
-                            issue += f"&nbsp;&nbsp;â€¢ {desc}<br>"
+                            issue += f"&nbsp;&nbsp;- {desc}<br>"
 
                         if input_type:
                             issue += f"<strong>Current inputType:</strong> <code>{input_type}</code><br>"
@@ -7821,8 +7821,8 @@ def check_os_command_injection(base):
 def check_weak_crypto(base):
     """
     FAIL if any use of weak crypto is detected:
-      â€¢ Any literal "MD5" | "SHA-1" | "SHA1" | "HmacMD5" | "HmacSHA1"
-      â€¢ Any Cipher.getInstance(...DES...) or (...ECB...)
+      - Any literal "MD5" | "SHA-1" | "SHA1" | "HmacMD5" | "HmacSHA1"
+      - Any Cipher.getInstance(...DES...) or (...ECB...)
     Returns TestResult with findings grouped by algorithm type.
     Filters out library code to show only app code issues.
     """
@@ -7891,7 +7891,7 @@ def check_weak_crypto(base):
                         end = min(len(lines), lineno + 2)
                         context_lines = []
                         for j in range(start, end):
-                            prefix = "â†’ " if j == lineno - 1 else "  "
+                            prefix = "-> " if j == lineno - 1 else "  "
                             context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
                         code_snippet = "\n".join(context_lines)
 
@@ -8158,9 +8158,9 @@ def check_package_context(base):
 def check_certificate_pinning(base):
     """
     Certificate pinning detection (static only), with:
-      â€¢ PASS if known-library APIs or SSLSocketFactory overrides are found
-      â€¢ WARN if only manual/resource patterns or HostnameVerifier stubs are found
-      â€¢ FAIL if nothing is found
+      - PASS if known-library APIs or SSLSocketFactory overrides are found
+      - WARN if only manual/resource patterns or HostnameVerifier stubs are found
+      - FAIL if nothing is found
     Emits clickable links, line numbers, and snippets.
     """
 
@@ -8317,7 +8317,7 @@ def check_certificate_pinning(base):
                         if rx.search(ln):
                             snippet = html.escape(ln.strip())
                             link = f'<a href="{href}">{html.escape(rel)}:{idx}</a>'
-                            out.append(f"{link} â€“ <code>{snippet}</code>")
+                            out.append(f"{link} - <code>{snippet}</code>")
                             break
                     if snippet:
                         break
@@ -8379,7 +8379,7 @@ def check_certificate_pinning(base):
         # only heuristics found -> warn
         warn_banner = (
             "<em class='warn'>"
-            "No definitive pinning API found; heuristic patterns detected â€” "
+            "No definitive pinning API found; heuristic patterns detected - "
             "please review above.</em><br><br>"
         )
         return True, warn_banner + detail_html + mastg_ref
@@ -8570,7 +8570,7 @@ def check_sharedprefs_encryption(base):
     # Add section header for unencrypted usage (security issues)
     finding_blocks.append(
         FindingBlock(
-            title="âš  UNENCRYPTED SharedPreferences Usage (Insecure)",
+            title="[WARNING] UNENCRYPTED SharedPreferences Usage (Insecure)",
             subtitle=f"Found {unencrypted_count} instance(s) - REQUIRES ATTENTION",
             code="These store data in plaintext. Migrate sensitive values to Keystore-backed encryption (for SharedPreferences) or encrypted DataStore; avoid introducing deprecated EncryptedSharedPreferences in new code.",
             code_language="",
@@ -8927,14 +8927,17 @@ def check_manifest_storage_flags(manifest, base):
     fragile_display = html.escape(str(fragile_raw)) if fragile_raw is not None else "not set"
     target_display = str(target_sdk) if target_sdk is not None else "unknown"
 
+    lines.append("<div><strong>Manifest Storage Summary</strong></div>")
+    lines.append("<div style='margin-left:14px'>")
     lines.append(f"<div><strong>android:requestLegacyExternalStorage:</strong> {request_display}</div>")
     lines.append(f"<div><strong>android:hasFragileUserData:</strong> {fragile_display}</div>")
     lines.append(f"<div><strong>targetSdkVersion:</strong> {target_display}</div>")
+    lines.append("</div>")
 
     if request_legacy is True:
         status = 'WARN'
         issue_count += 1
-        lines.append("<div><strong>WARNING:</strong> requestLegacyExternalStorage=true is set.</div>")
+        lines.append("<div style='margin-top:8px'><strong>WARNING:</strong> requestLegacyExternalStorage=true is set.</div>")
         if target_sdk is not None and target_sdk >= 30:
             lines.append("<div>This flag is ignored on Android 11+ when targetSdkVersion >= 30.</div>")
         elif target_sdk == 29:
@@ -8942,9 +8945,9 @@ def check_manifest_storage_flags(manifest, base):
         else:
             lines.append("<div>Target SDK is unknown from manifest; treat this as legacy hardening debt unless required.</div>")
     elif request_legacy is False:
-        lines.append("<div>requestLegacyExternalStorage is explicitly disabled.</div>")
+        lines.append("<div style='margin-top:8px'>requestLegacyExternalStorage is explicitly disabled.</div>")
     else:
-        lines.append("<div>requestLegacyExternalStorage is not declared (scoped-storage default behavior).</div>")
+        lines.append("<div style='margin-top:8px'>requestLegacyExternalStorage is not declared (scoped-storage default behavior).</div>")
 
     if has_fragile is True:
         status = 'WARN'
@@ -8959,32 +8962,47 @@ def check_manifest_storage_flags(manifest, base):
     if storage_permissions:
         status = 'WARN'
         issue_count += 1
-        lines.append("<div><strong>Storage permissions declared:</strong></div>")
+        lines.append("<div style='margin-top:8px'><strong>Storage permissions declared:</strong></div>")
         for perm in sorted(storage_permissions):
-            lines.append(f"<div>{html.escape(perm)}</div>")
+            lines.append(f"<div style='margin-left:14px'>{html.escape(perm)}</div>")
     else:
-        lines.append("<div>No broad external storage permissions declared.</div>")
+        lines.append("<div style='margin-top:8px'>No broad external storage permissions declared.</div>")
 
     if legacy_hits:
         status = 'WARN'
         issue_count += 1
-        lines.append(f"<div><strong>Legacy external storage patterns in app code:</strong> {len(legacy_hits)} file(s)</div>")
+        lines.append(f"<div style='margin-top:10px'><strong>Legacy external storage patterns in app code:</strong> {len(legacy_hits)} file(s)</div>")
         for rel in sorted(legacy_hits)[:10]:
             full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            lines.append(f'<div style="margin-left:14px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
             for line_num, code_line, pat_name in legacy_hits[rel]:
-                lines.append(f"<div>Line {line_num} ({html.escape(pat_name)})</div>")
-                lines.append(f'<pre><code>{html.escape(code_line)}</code></pre>')
+                lines.append(f"<div style='margin-left:28px'>Line {line_num} ({html.escape(pat_name)})</div>")
+                lines.append(
+                    "<pre style='margin:4px 0 8px 28px; padding:6px; background:#f8f9fa; border-left:3px solid #e5e7eb; "
+                    "white-space:pre-wrap; word-break:break-word;'><code>"
+                    f"{html.escape(code_line)}</code></pre>"
+                )
         if len(legacy_hits) > 10:
-            lines.append(f"<div>...and {len(legacy_hits) - 10} more</div>")
+            lines.append(f"<div style='margin-left:14px'>...and {len(legacy_hits) - 10} more</div>")
     else:
-        lines.append("<div>No legacy external path/API usage detected in app code.</div>")
+        lines.append("<div style='margin-top:10px'>No legacy external path/API usage detected in app code.</div>")
 
     if scoped_hits:
-        lines.append(f"<div><em>Scoped external storage usage detected:</em> {len(scoped_hits)} file(s)</div>")
-        for rel in sorted(scoped_hits)[:5]:
+        lines.append(f"<div style='margin-top:10px'><strong>Scoped external storage usage detected:</strong> {len(scoped_hits)} file(s)</div>")
+        for rel in sorted(scoped_hits)[:10]:
             full = os.path.abspath(os.path.join(base, rel))
-            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            lines.append(f'<div style="margin-left:14px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
+            for line_num, code_line, pat_name in scoped_hits[rel]:
+                lines.append(f"<div style='margin-left:28px'>Line {line_num} ({html.escape(pat_name)})</div>")
+                lines.append(
+                    "<pre style='margin:4px 0 8px 28px; padding:6px; background:#f8f9fa; border-left:3px solid #e5e7eb; "
+                    "white-space:pre-wrap; word-break:break-word;'><code>"
+                    f"{html.escape(code_line)}</code></pre>"
+                )
+        if len(scoped_hits) > 10:
+            lines.append(f"<div style='margin-left:14px'>...and {len(scoped_hits) - 10} more</div>")
+    else:
+        lines.append("<div style='margin-top:10px'>No scoped external storage API usage detected in app code.</div>")
 
     lines.append(mastg_ref)
     return status, "\n".join(lines), issue_count
@@ -9355,7 +9373,7 @@ def check_hardcoded_keys(base):
     table_id = f"hardcoded_keys_table_{random.randint(1000, 9999)}"
 
     lines = []
-    lines.append(f"<div style='margin:10px 0'><strong>Scanned:</strong> {scanned_files} app files â€¢ <strong>Total:</strong> {total_findings} findings</div>")
+    lines.append(f"<div style='margin:10px 0'><strong>Scanned:</strong> {scanned_files} app files - <strong>Total:</strong> {total_findings} findings</div>")
 
     # Add filter and search controls
     lines.append(f'''
@@ -9762,8 +9780,8 @@ def check_biometric_auth(base):
         ]
 
         for link, snippet in null_crypto_files[:15]:
-            # e.g. smali_classes3/.../BiometricPromptManager.smali:256 â†’ invoke-virtual {...}
-            lines.append(f"{link} â†’ <code>{snippet}</code>")
+            # e.g. smali_classes3/.../BiometricPromptManager.smali:256 -> invoke-virtual {...}
+            lines.append(f"{link} -> <code>{snippet}</code>")
 
         # Link to the MASTG test case
         lines.append(
@@ -9939,7 +9957,7 @@ def check_flag_secure(base, manifest):
     if app_disabled:
         status = "FAIL"
         summary_lines = [
-            f"âš  FLAG_SECURE is being DISABLED/CLEARED in {len(app_disabled)} app file(s)",
+            f"[WARNING] FLAG_SECURE is being DISABLED/CLEARED in {len(app_disabled)} app file(s)",
             "Risk: Explicitly disabling FLAG_SECURE allows screenshots and screen recording of sensitive data.",
             ""
         ]
@@ -9951,7 +9969,7 @@ def check_flag_secure(base, manifest):
             end = min(len(lines), line_num + 3)
             context_lines = []
             for j in range(start, end):
-                prefix = "â†’ " if j == line_num - 1 else "  "
+                prefix = "-> " if j == line_num - 1 else "  "
                 context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
             code_snippet = "\n".join(context_lines)
 
@@ -9972,7 +9990,7 @@ def check_flag_secure(base, manifest):
     elif app_hits:
         status = "PASS"
         summary_lines = [
-            f"âœ“ FLAG_SECURE usage detected in {len(app_hits)} app file(s)"
+            f"FLAG_SECURE usage detected in {len(app_hits)} app file(s)"
         ]
 
         # Create findings for FLAG_SECURE usage in app code
@@ -9982,7 +10000,7 @@ def check_flag_secure(base, manifest):
             end = min(len(lines), line_num + 3)
             context_lines = []
             for j in range(start, end):
-                prefix = "â†’ " if j == line_num - 1 else "  "
+                prefix = "-> " if j == line_num - 1 else "  "
                 context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
             code_snippet = "\n".join(context_lines)
 
@@ -9991,7 +10009,7 @@ def check_flag_secure(base, manifest):
             findings.append(
                 FindingBlock(
                     title=rel_path,
-                    subtitle=f"FLAG_SECURE usage in app code Â· Line {line_num}",
+                    subtitle=f"FLAG_SECURE usage in app code - Line {line_num}",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
                     code_language=lang,
@@ -10007,7 +10025,7 @@ def check_flag_secure(base, manifest):
                 f"FLAG_SECURE found in {len(library_hits)} library file(s) only (not in app code)",
                 f"Total activities: {activity_count}",
                 "",
-                "âš  WARNING: FLAG_SECURE detected only in library code, not in app implementation.",
+                "WARNING: FLAG_SECURE detected only in library code, not in app implementation.",
                 "Recommendation: Implement FLAG_SECURE in your app's activities that display sensitive data",
                 "(payment info, credentials, personal data) to prevent screenshots and screen recording."
             ]
@@ -10028,7 +10046,7 @@ def check_flag_secure(base, manifest):
             end = min(len(lines), line_num + 3)
             context_lines = []
             for j in range(start, end):
-                prefix = "â†’ " if j == line_num - 1 else "  "
+                prefix = "-> " if j == line_num - 1 else "  "
                 context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
             code_snippet = "\n".join(context_lines)
 
@@ -10036,8 +10054,8 @@ def check_flag_secure(base, manifest):
 
             findings.append(
                 FindingBlock(
-                    title=f"âš  Library: {rel_path}",
-                    subtitle=f"FLAG_SECURE in library code Â· Line {line_num} [Not app implementation]",
+                    title=f"Library: {rel_path}",
+                    subtitle=f"FLAG_SECURE in library code - Line {line_num} [Not app implementation]",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
                     code_language=lang,
@@ -10053,7 +10071,7 @@ def check_flag_secure(base, manifest):
             end = min(len(lines), line_num + 3)
             context_lines = []
             for j in range(start, end):
-                prefix = "â†’ " if j == line_num - 1 else "  "
+                prefix = "-> " if j == line_num - 1 else "  "
                 context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
             code_snippet = "\n".join(context_lines)
 
@@ -10061,7 +10079,7 @@ def check_flag_secure(base, manifest):
 
             findings.append(
                 FindingBlock(
-                    title=f"âš  Library: {rel_path}",
+                    title=f"[WARNING] Library: {rel_path}",
                     subtitle=f"FLAG_SECURE disabled in library Â· Line {line_num} [Library code]",
                     link=f"file://{os.path.abspath(file_path)}:{line_num}",
                     code=code_snippet,
@@ -10460,9 +10478,9 @@ def check_clipboard_security(base):
                 f"<strong>Code:</strong><br>"
                 f"<pre>{html.escape(finding['context'])}</pre>"
                 f"<strong>Fix:</strong> Never copy sensitive authentication data to clipboard. Use secure alternatives:<br>"
-                f"â€¢ For OTP: Display on screen only, don't allow copy<br>"
-                f"â€¢ For passwords: Use password managers with autofill<br>"
-                f"â€¢ For tokens: Pass directly via secure Intent extras<br>"
+                f"- For OTP: Display on screen only, don't allow copy<br>"
+                f"- For passwords: Use password managers with autofill<br>"
+                f"- For tokens: Pass directly via secure Intent extras<br>"
                 f"<strong>MASVS:</strong> MASVS-STORAGE-2<br>"
                 f"</div><br>"
             )
@@ -10597,7 +10615,7 @@ def check_pii_location_info(base):
                             f'<a href="file://{html.escape(path)}">'
                             f'{html.escape(rel_path)}:{i}</a>'
                         )
-                        issues.append(f"{link} â€“ <code>{snippet}</code>")
+                        issues.append(f"{link} - <code>{snippet}</code>")
                         break
                 else:
                     continue
@@ -10663,7 +10681,7 @@ def check_pii_wifi_info(base):
                             f'<a href="file://{html.escape(path)}">'
                             f'{html.escape(rel)}:{i}</a>'
                         )
-                        issues.append(f"{link} â€“ <code>{snippet}</code>")
+                        issues.append(f"{link} - <code>{snippet}</code>")
                         break
                 else:
                     continue
@@ -10678,13 +10696,13 @@ def check_pii_wifi_info(base):
 def check_signature_schemes(apk_path):
     """
     Runs `apksigner verify --verbose --print-certs` on the APK and reports:
-      â€¢ which schemes (v1, v2, v3, v4) are present/missing
-      â€¢ checks for weak hash algorithms (SHA1withRSA, MD5 - vulnerable to collisions)
-      â€¢ flags Janus (CVE-2017-13156) correctly:
+      - which schemes (v1, v2, v3, v4) are present/missing
+      - checks for weak hash algorithms (SHA1withRSA, MD5 - vulnerable to collisions)
+      - flags Janus (CVE-2017-13156) correctly:
          - v1 ONLY: CRITICAL - vulnerable on all Android 5.0-8.0
          - v1 + v2/v3: WARNING - still vulnerable on Android 5.0-7.x
          - v2/v3 only (no v1): SECURE - but breaks Android < 7.0 compatibility
-      â€¢ Android 5.0-7.x do NOT properly enforce v2/v3, so v1 presence = vulnerability
+      - Android 5.0-7.x do NOT properly enforce v2/v3, so v1 presence = vulnerability
     """
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0224/' target='_blank'>MASTG-TEST-0224: Usage of Insecure Signature Version</a></div>"
     
@@ -10851,7 +10869,7 @@ def check_signature_schemes(apk_path):
     if "v1" in present:
         has_failures = True
         if present == ["v1"]:
-            # v1 only â†’ CRITICAL: vulnerable on ALL Android versions
+            # v1 only -> CRITICAL: vulnerable on ALL Android versions
             report_lines.append(
                 "<div style='margin-top:10px;'><strong style='color:#dc3545;'>FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
                 "<div style='margin-left:20px;'><strong>Severity:</strong> CRITICAL</div>"
@@ -10860,7 +10878,7 @@ def check_signature_schemes(apk_path):
                 "<div style='margin-left:20px;'><strong>Recommendation:</strong> Add v2 or v3 signing to mitigate.</div>"
             )
         else:
-            # v1 + v2/v3 â†’ WARNING: still vulnerable on Android 5.0-7.x
+            # v1 + v2/v3 -> WARNING: still vulnerable on Android 5.0-7.x
             report_lines.append(
                 "<div style='margin-top:10px;'><strong style='color:#fd7e14;'>FAIL: Janus Vulnerability (CVE-2017-13156)</strong></div>"
                 "<div style='margin-left:20px;'><strong>Severity:</strong> Partial (Android 5.0-7.x affected)</div>"
@@ -10893,10 +10911,10 @@ def check_signature_schemes(apk_path):
 def check_insecure_randomness(base):
     """
     FAIL if any code uses predictable randomness:
-      â€¢ java.util.Random (especially with predictable seed like currentTimeMillis)
-      â€¢ kotlin.random.Random (especially with predictable seed)
-      â€¢ Math.random()
-      â€¢ ThreadLocalRandom (insecure for crypto)
+      - java.util.Random (especially with predictable seed like currentTimeMillis)
+      - kotlin.random.Random (especially with predictable seed)
+      - Math.random()
+      - ThreadLocalRandom (insecure for crypto)
     Reports clickable file:// links with line numbers and code snippets.
     Filters out library code to show only app code issues.
     """
@@ -10959,11 +10977,11 @@ def check_insecure_randomness(base):
     # obfuscated package name. These cannot be excluded by path alone because
     # single-letter packages (x3/, y3/) could also contain developer code in other apps.
     #
-    # Pattern 1: class extends kotlin/random/* â€” it IS a Kotlin Random implementation
+    # Pattern 1: class extends kotlin/random/* - it IS a Kotlin Random implementation
     # Pattern 2: Random usage is inside initialValue() of a ThreadLocal subclass
-    #            â€” this is just a lazy-init factory, not direct use of insecure randomness
+    #            - this is just a lazy-init factory, not direct use of insecure randomness
     # Pattern 3: Random usage is inside getImpl() returning java.util.Random
-    #            â€” this is a Random provider/wrapper, not direct usage
+    #            - this is a Random provider/wrapper, not direct usage
     kotlin_random_super = re.compile(r'\.super\s+Lkotlin/random/')
     threadlocal_super   = re.compile(r'\.super\s+Ljava/lang/ThreadLocal;')
     in_initial_value    = re.compile(r'\.method.*initialValue\(\)')
@@ -10976,7 +10994,7 @@ def check_insecure_randomness(base):
         # ThreadLocal<Random> where the Random is created in initialValue()
         if threadlocal_super.search(file_content) and in_initial_value.search(file_content):
             return True
-        # Abstract adapter with getImpl() â€” Kotlin JVM Random bridge
+        # Abstract adapter with getImpl() - Kotlin JVM Random bridge
         if in_get_impl.search(file_content):
             return True
         return False
@@ -11018,9 +11036,9 @@ def check_insecure_randomness(base):
                         severity_color = "#dc3545" if is_predictable_seed else "#fd7e14"
 
                         issues.append(
-                            f"{link} â€“ "
+                            f"{link} - "
                             f'<span style="display:inline-block; padding:2px 6px; background:{severity_color}; color:white; border-radius:3px; font-size:10px; font-weight:600; margin-right:5px;">{severity}</span>'
-                            f"<code>{label} â†’ {snippet}</code>"
+                            f"<code>{label} -> {snippet}</code>"
                         )
                         break
                 else:
@@ -11268,8 +11286,8 @@ def check_insecure_fingerprint_api(base):
 def check_tls_versions(base):
     """
     FAIL only if app code (non-library) explicitly:
-      â€¢ SSLContext.getInstance("TLSv1" or "TLSv1.1"), or
-      â€¢ enables TLSv1/1.1 via setEnabledProtocols(...) / SSLParameters.setProtocols(...)
+      - SSLContext.getInstance("TLSv1" or "TLSv1.1"), or
+      - enables TLSv1/1.1 via setEnabledProtocols(...) / SSLParameters.setProtocols(...)
     PASS (Info) if matches are only in library code (okhttp/conscrypt/react/etc.).
     PASS if no suspicious usage found.
     """
@@ -11357,7 +11375,7 @@ def check_tls_versions(base):
                         end = min(len(lines), i + 2)
                         context_lines = []
                         for j in range(start, end):
-                            prefix = "â†’ " if j == i - 1 else "  "
+                            prefix = "-> " if j == i - 1 else "  "
                             context_lines.append(f"{prefix}{j+1:4d} | {lines[j]}")
                         code_snippet = "\n".join(context_lines)
                         break
@@ -11460,14 +11478,14 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     Results are informational only and depend on which network features were triggered.
 
     Reports:
-      â€¢ If TLS 1.0/1.1 was actually negotiated (red alert)
-      â€¢ If TLS 1.0/1.1 was enabled by app but not used (orange warning)
-      â€¢ If only modern TLS was observed (or no activity)
+      - If TLS 1.0/1.1 was actually negotiated (red alert)
+      - If TLS 1.0/1.1 was enabled by app but not used (orange warning)
+      - If only modern TLS was observed (or no activity)
 
     Hooks:
-      â€¢ OkHttp RealConnection.connectTls* (reports negotiated TLS)
-      â€¢ JSSE/Conscrypt SSLSocket.startHandshake & setEnabledProtocols
-      â€¢ Native BoringSSL SSL_do_handshake / SSL_connect (WebView/Chromium/Cronet)
+      - OkHttp RealConnection.connectTls* (reports negotiated TLS)
+      - JSSE/Conscrypt SSLSocket.startHandshake & setEnabledProtocols
+      - Native BoringSSL SSL_do_handshake / SSL_connect (WebView/Chromium/Cronet)
     """
     # 1) resolve installed package from manifest prefix
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -11482,7 +11500,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     subprocess.run(['adb','shell','am','force-stop', spawn_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # 3) Frida JS â€“ prints "VERDICT: â€¦" lines we parse below
+    # 3) Frida JS - prints "VERDICT: ..." lines we parse below
     #
     # MASVS-NETWORK-1 requires TLS 1.2+ only.
     # The correct test is NOT whether legacy TLS was negotiated (servers may reject it),
@@ -11499,7 +11517,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
           // PRIMARY TEST: capture getEnabledProtocols() before each handshake.
           // This tells us what the socket is WILLING to accept, regardless of
           // what the server ultimately negotiates. This is the MASVS-NETWORK-1
-          // relevant check â€” not what was negotiated but what is permitted.
+          // relevant check - not what was negotiated but what is permitted.
           // ----------------------------------------------------------------
           function hookPreHandshake(className) {
             safe(function () {
@@ -11728,14 +11746,14 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         summary_parts.append("<div style='color:#dc3545'><strong>FAIL: TLS 1.0/1.1 IS IN THE SOCKET'S ENABLED PROTOCOL SET</strong></div>")
         summary_parts.append(
             "<div><strong>How this was detected:</strong> <code>getEnabledProtocols()</code> was intercepted "
-            "<em>before</em> each TLS handshake. TLS 1.0 or 1.1 appeared in the enabled set â€” meaning the socket "
+            "<em>before</em> each TLS handshake. TLS 1.0 or 1.1 appeared in the enabled set - meaning the socket "
             "is willing to accept these versions even if modern servers reject them. A server configured to accept "
             "legacy TLS, or an active MitM attacker performing a downgrade, could exploit this.</div>"
         )
         if tls_v1_context > 0:
-            summary_parts.append(f"<div style='margin-top:5px;'>â€¢ <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code> detected</div>")
+            summary_parts.append(f"<div style='margin-top:5px;'>- <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code> detected</div>")
         summary_parts.append("<div style='margin-top:5px;'><strong>Risk:</strong> BEAST, POODLE, downgrade attacks (TLS 1.0/1.1 were deprecated by RFC 8996, 2021).</div>")
-        summary_parts.append("<div><strong>Fix:</strong> Ensure the app does not call <code>setEnabledProtocols()</code> with legacy versions. On Android 10+ the platform defaults to TLS 1.2+ â€” do not override this.</div>")
+        summary_parts.append("<div><strong>Fix:</strong> Ensure the app does not call <code>setEnabledProtocols()</code> with legacy versions. On Android 10+ the platform defaults to TLS 1.2+ - do not override this.</div>")
     else:
         # Check if actual network connections happened
         if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
@@ -11761,10 +11779,10 @@ def check_frida_tls_negotiation(base, wait_secs=12):
             "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:11px'>"
             "<strong>Test Incomplete:</strong> No network connections detected during monitoring.<br>"
             "<strong>Action Required:</strong> While the app is running in Frida, manually trigger actions that make network requests:<br>"
-            "â€¢ Login/logout<br>"
-            "â€¢ Load content/refresh feeds<br>"
-            "â€¢ Sync data<br>"
-            "â€¢ Any API calls<br>"
+            "- Login/logout<br>"
+            "- Load content/refresh feeds<br>"
+            "- Sync data<br>"
+            "- Any API calls<br>"
             "Then check if any VERDICT lines appear in the output."
             "</div>"
         )
@@ -11786,9 +11804,9 @@ def check_frida_tls_negotiation(base, wait_secs=12):
             "<div style='padding:8px; background:#f8d7da; border-left:3px solid #dc3545; font-size:11px'>"
             "<strong>No output captured</strong><br>"
             "Possible issues:<br>"
-            "â€¢ Frida hooks didn't attach (check if app uses native SSL)<br>"
-            "â€¢ App crashed on startup<br>"
-            "â€¢ ADB/USB connection issues<br>"
+            "- Frida hooks didn't attach (check if app uses native SSL)<br>"
+            "- App crashed on startup<br>"
+            "- ADB/USB connection issues<br>"
             "<br><strong>Try:</strong> Increase wait time or check Frida/ADB setup"
             "</div>" + mastg_ref
         )
@@ -11807,11 +11825,11 @@ def check_frida_tls_negotiation(base, wait_secs=12):
 def check_frida_pinning(base, wait_secs=15):
     """
     Dynamic pinning *detection* via USB+Frida CLI (inline JS):
-      â€¢ Discovers installed package
-      â€¢ Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      â€¢ Collects send({ev:â€¦, class:â€¦, method:â€¦, host:â€¦}) messages for wait_secs
-      â€¢ Monitors ALL network requests (pinned and non-pinned)
-      â€¢ Terminates Frida, stops app, returns ('INFO', HTML-report)
+      - Discovers installed package
+      - Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
+      - Collects send({ev:..., class:..., method:..., host:...}) messages for wait_secs
+      - Monitors ALL network requests (pinned and non-pinned)
+      - Terminates Frida, stops app, returns ('INFO', HTML-report)
     """
     # 1) pkg from manifest
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -11837,7 +11855,7 @@ def check_frida_pinning(base, wait_secs=15):
     setImmediate(function install(){
       if (!Java.available) return setTimeout(install,100);
       Java.perform(function(){
-        send("ðŸ”— Pinning detection + network monitoring hooks installed");
+        send("[Hook] Pinning detection + network monitoring hooks installed");
 
         // Extract hostname from URL string
         function extractHost(urlString) {
@@ -12157,10 +12175,10 @@ def check_frida_pinning(base, wait_secs=15):
 def check_frida_file_reads(base, wait_secs=7):
     """
     Dynamic File-read audit via USB+Frida CLI (inline JS):
-      â€¢ Discovers installed package
-      â€¢ Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      â€¢ Collects send({path:â€¦}) messages for wait_secs
-      â€¢ Terminates Frida, stops app, returns (ok, HTML-report)
+      - Discovers installed package
+      - Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
+      - Collects send({path:...}) messages for wait_secs
+      - Terminates Frida, stops app, returns (ok, HTML-report)
     """
     # 1) pkg prefix from manifest
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -12202,7 +12220,7 @@ def check_frida_file_reads(base, wait_secs=7):
               report(p); return this.$init(p);
             };
           } catch(e){}
-          send("ðŸ”— File-read hooks installed");
+          send("[Hook] File-read hooks installed");
         });
       } else {
         setTimeout(arguments.callee, 100);
@@ -12251,11 +12269,11 @@ def check_frida_file_reads(base, wait_secs=7):
 def check_frida_strict_mode(base, wait_secs=7):
     """
     Dynamic StrictMode usage check via USB+Frida CLI (inline JS):
-      â€¢ Discovers installed package
-      â€¢ Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      â€¢ Sends Enter to resume spawned app
-      â€¢ Monitors StrictMode calls with interactive user prompt
-      â€¢ Terminates Frida, stops app, returns (ok, HTML-report)
+      - Discovers installed package
+      - Force-stops, writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
+      - Sends Enter to resume spawned app
+      - Monitors StrictMode calls with interactive user prompt
+      - Terminates Frida, stops app, returns (ok, HTML-report)
     """
     # 1) find the real package name
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -12476,8 +12494,8 @@ def check_frida_strict_mode(base, wait_secs=7):
     report_lines = []
 
     if app_strictmode_calls:
-        report_lines.append("<div style='background:#ffe6e6; padding:8px; border-left:4px solid #dc3545; margin-bottom:10px;'><strong style='color:#721c24;'>âš  StrictMode in App Code: {} call(s) detected</strong></div>".format(len(app_strictmode_calls)))
-        report_lines.append("<details open><summary style='cursor:pointer; font-size:12px; color:#0066cc; font-weight:bold;'>ðŸ“‹ App StrictMode Calls - Click to expand/collapse</summary>")
+        report_lines.append("<div style='background:#ffe6e6; padding:8px; border-left:4px solid #dc3545; margin-bottom:10px;'><strong style='color:#721c24;'>[WARNING] StrictMode in App Code: {} call(s) detected</strong></div>".format(len(app_strictmode_calls)))
+        report_lines.append("<details open><summary style='cursor:pointer; font-size:12px; color:#0066cc; font-weight:bold;'>[Logs] App StrictMode Calls - Click to expand/collapse</summary>")
 
         # Format each call with clear separation and highlighting
         formatted_calls = []
@@ -12491,7 +12509,7 @@ def check_frida_strict_mode(base, wait_secs=7):
             for line in lines:
                 if app_package and app_package in line:
                     # Highlight the app code line
-                    highlighted_lines.append(f"<span style='background:#ffeb3b; color:#000; font-weight:bold;'>â†’ {html.escape(line)}</span>")
+                    highlighted_lines.append(f"<span style='background:#ffeb3b; color:#000; font-weight:bold;'>-> {html.escape(line)}</span>")
                 else:
                     highlighted_lines.append(html.escape(line))
 
@@ -12525,8 +12543,8 @@ def check_frida_strict_mode(base, wait_secs=7):
         severity_note += "StrictMode detected in <strong>APP CODE</strong> at runtime in production build.<br><br>"
         severity_note += "<strong>Risk:</strong> Information leakage - StrictMode logs implementation details and internal state that attackers can exploit.<br><br>"
         severity_note += "<strong>Remediation:</strong><br>"
-        severity_note += "â€¢ Wrap app StrictMode calls with <code>if (BuildConfig.DEBUG)</code> guards<br>"
-        severity_note += "â€¢ Ensure StrictMode is completely disabled in release builds<br>"
+        severity_note += "- Wrap app StrictMode calls with <code>if (BuildConfig.DEBUG)</code> guards<br>"
+        severity_note += "- Ensure StrictMode is completely disabled in release builds<br>"
         severity_note += "</div>"
 
         return 'FAIL', severity_note + detail
@@ -12731,7 +12749,7 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         report_lines.append("<div style='padding:10px; background:#d4edda; border-left:3px solid #28a745; margin:10px 0;'><strong>âœ“ No sensitive data detected in captured logs</strong></div>")
 
         # Show sample of captured logs
-        report_lines.append("<details><summary style='cursor:pointer; color:#0066cc; font-weight:bold; margin:10px 0;'>ðŸ“‹ Sample Captured Logs (first 10)</summary>")
+        report_lines.append("<details><summary style='cursor:pointer; color:#0066cc; font-weight:bold; margin:10px 0;'>[Logs] Sample Captured Logs (first 10)</summary>")
         report_lines.append("<div style='background:#f8f9fa; padding:10px; margin:10px 0; border:1px solid #dee2e6; font-family:monospace; font-size:11px;'>")
         for idx, log in enumerate(captured_logs[:10], 1):
             level_color = {'VERBOSE':'#6c757d', 'DEBUG':'#17a2b8', 'INFO':'#28a745', 'WARN':'#ffc107', 'ERROR':'#dc3545'}.get(log['level'], '#000')
@@ -12756,7 +12774,7 @@ def check_frida_dynamic_logging(base, wait_secs=15):
         return 'PASS', "\n".join(report_lines) + mastg_ref
 
     # Sensitive logs detected - show them with highlighting
-    report_lines.append("<div style='background:#ffe6e6; padding:10px; border-left:4px solid #dc3545; margin:10px 0;'><strong style='color:#721c24;'>âš  SENSITIVE DATA IN LOGS</strong></div>")
+    report_lines.append("<div style='background:#ffe6e6; padding:10px; border-left:4px solid #dc3545; margin:10px 0;'><strong style='color:#721c24;'>[WARNING] SENSITIVE DATA IN LOGS</strong></div>")
     report_lines.append("<div style='margin:10px 0;'>The following log statements contain sensitive keywords and may expose credentials, tokens, or personal data:</div>")
 
     # Table with sensitive logs
@@ -12808,9 +12826,9 @@ def check_frida_dynamic_logging(base, wait_secs=15):
     report_lines.append("<div style='background:#fff3cd; padding:10px; border-left:3px solid #ffc107; margin:10px 0;'>")
     report_lines.append("<strong>Recommendation:</strong> Remove or sanitize these log statements before production release. ")
     report_lines.append("Consider using:<br>")
-    report_lines.append("â€¢ <code>if (BuildConfig.DEBUG)</code> guards around debug logs<br>")
-    report_lines.append("â€¢ ProGuard/R8 rules to strip logging: <code>-assumenosideeffects class android.util.Log { *; }</code><br>")
-    report_lines.append("â€¢ Timber or other logging libraries with release-mode filtering")
+    report_lines.append("- <code>if (BuildConfig.DEBUG)</code> guards around debug logs<br>")
+    report_lines.append("- ProGuard/R8 rules to strip logging: <code>-assumenosideeffects class android.util.Log { *; }</code><br>")
+    report_lines.append("- Timber or other logging libraries with release-mode filtering")
     report_lines.append("</div>")
 
     return 'FAIL', "\n".join(report_lines) + mastg_ref
@@ -12823,11 +12841,11 @@ def check_frida_task_hijack(base, manifest,
                             final_wait=7):
     """
     Dynamic Exported-Activity check via USB+Frida CLI (inline JS + Python timeout):
-      â€¢ Parses manifest for exported+unprotected activities
-      â€¢ Writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
-      â€¢ Waits for "hooks installed" banner, then adb-starts each candidate
-      â€¢ Collects send({ev:'life',â€¦}) messages for final_wait seconds
-      â€¢ Terminates Frida, stops app, returns (ok, HTML-report)
+      - Parses manifest for exported+unprotected activities
+      - Writes JS to temp file, launches `frida -l tmp.js -U -f pkg`
+      - Waits for "hooks installed" banner, then adb-starts each candidate
+      - Collects send({ev:'life',...}) messages for final_wait seconds
+      - Terminates Frida, stops app, returns (ok, HTML-report)
     """
     # â”€â”€ 0) package name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pkg = ET.parse(manifest).getroot().attrib.get('package','')
@@ -12863,7 +12881,7 @@ def check_frida_task_hijack(base, manifest,
             acts = [a.get(ns('name')) for a in act.findall('.//action')]
             cats = [c.get(ns('name')) for c in act.findall('.//category')]
             if 'android.intent.action.MAIN' in acts and 'android.intent.category.LAUNCHER' in cats:
-                safe.append((fq, "Launcher activity â€” skipped"))
+                safe.append((fq, "Launcher activity - skipped"))
                 continue
 
         if weak:
@@ -12876,15 +12894,15 @@ def check_frida_task_hijack(base, manifest,
         if total:
             rows = "".join(
                 f"<li style='padding:3px 0;'><code style='font-size:12px;'>{html.escape(fq)}</code>"
-                f" <span style='color:#6b7280;font-size:12px;'>â€” {html.escape(reason)}</span></li>"
+                f" <span style='color:#6b7280;font-size:12px;'>- {html.escape(reason)}</span></li>"
                 for fq, reason in safe
             )
             detail_html = (
                 f"<p style='margin:0 0 8px 0;'>Scanned <strong>{total}</strong> exported "
-                f"activit{'y' if total==1 else 'ies'} â€” none are vulnerable to task hijacking.</p>"
+                f"activit{'y' if total==1 else 'ies'} - none are vulnerable to task hijacking.</p>"
                 f"<ul style='margin:0;padding-left:20px;'>{rows}</ul>"
             )
-            summary = [f"{total} exported activit{'y' if total==1 else 'ies'} checked â€” none vulnerable to task hijacking"]
+            summary = [f"{total} exported activit{'y' if total==1 else 'ies'} checked - none vulnerable to task hijacking"]
         else:
             detail_html = "<p style='margin:0;'>No exported activities found in manifest.</p>"
             summary = ["No exported activities found in manifest"]
@@ -13206,7 +13224,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
                 var JavaString = Java.use("java.lang.String");
                 return JavaString.$new(bytes, off, len, "UTF-8").toString();
             } catch (e) {
-                // Fallback â€“ do a crude conversion if JavaString fails
+                // Fallback - do a crude conversion if JavaString fails
                 var s = "";
                 for (var i = off; i < off + len; i++) {
                 s += String.fromCharCode(bytes[i] & 0xff);
@@ -13260,7 +13278,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
                 }
               }
               if (!isNoise) {
-                console.log("ðŸ’¾ SQLite insert into table: " + table + " values: " + values);
+                console.log("[DB] SQLite insert into table: " + table + " values: " + values);
               }
               return this.insert(table, nullColumnHack, values);
             };
@@ -13274,7 +13292,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
                 }
               }
               if (!isNoise) {
-                console.log("ðŸ’¾ SQLite update table: " + table + " values: " + values);
+                console.log("[DB] SQLite update table: " + table + " values: " + values);
               }
               return this.update(table, values, whereClause, whereArgs);
             };
@@ -13283,7 +13301,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook DataStore (newer preference API)
           try {
             var DataStore = Java.use("androidx.datastore.preferences.core.PreferencesKt");
-            console.log("ðŸ” DataStore detected");
+            console.log("[DataStore] DataStore detected");
 
             // Hook DataStore edit/write operations
             try {
@@ -13333,7 +13351,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
               if (path.indexOf("shared_prefs") >= 0) {
                 var filename = path.substring(path.lastIndexOf("/") + 1);
                 var timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-                console.log("ðŸ“ [" + timestamp + "] FileOutputStream writing to: " + filename);
+                console.log("[File] [" + timestamp + "] FileOutputStream writing to: " + filename);
 
                 // Store current file context for write tracking
                 currentFileStream = {
@@ -13514,7 +13532,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             if (stack.indexOf("EncryptedSharedPreferences") >= 0) {
               encrypted = true;
             }
-            console.log("ðŸ“ getSharedPreferences: " + name + " (encrypted: " + encrypted + ")");
+            console.log("[File] getSharedPreferences: " + name + " (encrypted: " + encrypted + ")");
             send({
               type: "prefs_access",
               name: name,
@@ -13531,7 +13549,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
                                      "androidx.security.crypto.EncryptedSharedPreferences$PrefKeyEncryptionScheme",
                                      "androidx.security.crypto.EncryptedSharedPreferences$PrefValueEncryptionScheme")
                            .implementation = function(fileName, masterKeyAlias, context, keyScheme, valueScheme) {
-              console.log("ðŸ” EncryptedSharedPreferences.create: " + fileName);
+              console.log("[Encrypted] EncryptedSharedPreferences.create: " + fileName);
               send({
                 type: "prefs_access",
                 name: fileName,
@@ -13546,7 +13564,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           try {
             var PrefManager = Java.use("android.preference.PreferenceManager");
             PrefManager.getDefaultSharedPreferences.overload("android.content.Context").implementation = function(context) {
-              console.log("ðŸ“ PreferenceManager.getDefaultSharedPreferences called");
+              console.log("[File] PreferenceManager.getDefaultSharedPreferences called");
               var prefs = this.getDefaultSharedPreferences(context);
               send({
                 type: "prefs_access",
@@ -13563,7 +13581,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             var SharedPrefs = Java.use("android.content.SharedPreferences");
             SharedPrefs.getString.overload("java.lang.String", "java.lang.String").implementation = function(key, defValue) {
               var result = this.getString(key, defValue);
-              console.log("ðŸ“– getString: " + key + " = " + (result ? result.substring(0, 30) : "null"));
+              console.log(" getString: " + key + " = " + (result ? result.substring(0, 30) : "null"));
               return result;
             };
           } catch(e) { console.log("getString hook error: " + e); }
@@ -13572,7 +13590,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
           try {
             var SharedPrefs = Java.use("android.content.SharedPreferences");
             SharedPrefs.edit.implementation = function() {
-              console.log("ðŸ“ SharedPreferences.edit() called - starting edit session");
+              console.log("[Edit] SharedPreferences.edit() called - starting edit session");
               return this.edit();
             };
           } catch(e) { console.log("edit() hook error: " + e); }
@@ -13717,14 +13735,14 @@ def check_frida_sharedprefs(base, wait_secs=10):
           // Hook commit and apply to see when data is actually persisted
           try {
             Editor.commit.implementation = function() {
-              console.log("ðŸ’¾ Editor.commit() called - saving to disk");
+              console.log("[DB] Editor.commit() called - saving to disk");
               return this.commit();
             };
           } catch(e) { console.log("commit hook error: " + e); }
 
           try {
             Editor.apply.implementation = function() {
-              console.log("ðŸ’¾ Editor.apply() called - saving to disk async");
+              console.log("[DB] Editor.apply() called - saving to disk async");
               this.apply();
             };
           } catch(e) { console.log("apply hook error: " + e); }
@@ -13734,7 +13752,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             var SharedPrefs = Java.use("android.content.SharedPreferences");
             SharedPrefs.getInt.overload("java.lang.String", "int").implementation = function(key, defValue) {
               var result = this.getInt(key, defValue);
-              console.log("ðŸ“– getInt: " + key + " = " + result);
+              console.log("[Read] getInt: " + key + " = " + result);
               return result;
             };
           } catch(e) {}
@@ -13743,7 +13761,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             var SharedPrefs = Java.use("android.content.SharedPreferences");
             SharedPrefs.getBoolean.overload("java.lang.String", "boolean").implementation = function(key, defValue) {
               var result = this.getBoolean(key, defValue);
-              console.log("ðŸ“– getBoolean: " + key + " = " + result);
+              console.log("[Read] getBoolean: " + key + " = " + result);
               return result;
             };
           } catch(e) {}
@@ -13752,7 +13770,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             var SharedPrefs = Java.use("android.content.SharedPreferences");
             SharedPrefs.getLong.overload("java.lang.String", "long").implementation = function(key, defValue) {
               var result = this.getLong(key, defValue);
-              console.log("ðŸ“– getLong: " + key + " = " + result);
+              console.log("[Read] getLong: " + key + " = " + result);
               return result;
             };
           } catch(e) {}
@@ -13919,7 +13937,7 @@ def check_frida_sharedprefs(base, wait_secs=10):
             write_data = file_writes[filename]
             details = write_data['details']
 
-            # Just show the file name â€“ no date/time
+            # Just show the file name - no date/time
             detail.append(
                 f"<div style='margin-left:15px'><strong>{escape(filename)}</strong></div>"
             )
@@ -14471,7 +14489,7 @@ def check_frida_pending_intent(base, wait_secs=10):
         method = html.escape(ev.get('method') or "unknown")
         flags_hex = html.escape(ev.get('flags_hex') or "0x0")
         flags_text = html.escape(ev.get('flags_text') or "none")
-        detail.append(f"<div style='margin-left:15px'><code>{method}</code> â†’ {target}</div>")
+        detail.append(f"<div style='margin-left:15px'><code>{method}</code> -> {target}</div>")
         detail.append(f"<div style='margin-left:30px'>Flags: {flags_hex} ({flags_text})</div>")
     if len(events) > 30:
         detail.append(f"<div style='margin-left:15px'><em>...and {len(events) - 30} more</em></div>")
@@ -15060,13 +15078,13 @@ def check_storage_analysis(base, package_name):
     # Summary section
     findings.append("<div class='storage-section'><strong>Summary:</strong></div>")
     findings.append("<div class='storage-item'>")
-    findings.append(f"<div>â€¢ New directories: <strong>{len(new_dirs)}</strong></div>")
+    findings.append(f"<div>- New directories: <strong>{len(new_dirs)}</strong></div>")
     total_files = sum(len(files) for files in modified_files.values())
-    findings.append(f"<div>â€¢ New files: <strong>{total_files}</strong></div>")
+    findings.append(f"<div>- New files: <strong>{total_files}</strong></div>")
     if secure_dbs:
-        findings.append(f"<div>â€¢ Secure encrypted databases: <strong class='text-success'>{len(secure_dbs)}</strong></div>")
+        findings.append(f"<div>- Secure encrypted databases: <strong class='text-success'>{len(secure_dbs)}</strong></div>")
     issue_color = 'text-danger' if security_issues else 'text-success'
-    findings.append(f"<div>â€¢ Security issues: <strong class='{issue_color}'>{len(security_issues)}</strong></div>")
+    findings.append(f"<div>- Security issues: <strong class='{issue_color}'>{len(security_issues)}</strong></div>")
     findings.append("</div>")
 
     detail.extend(findings)
@@ -15135,7 +15153,7 @@ def check_pending_intent_flags(base):
     vulnerable_files = []
     mutable_files = []
     update_current_files = []
-    immutable_files = []   # list of (rel, line_num, code_snippet) â€” same shape as others
+    immutable_files = []   # list of (rel, line_num, code_snippet) - same shape as others
     library_files = []  # Track library files separately
 
     files_to_scan = []
@@ -15188,7 +15206,7 @@ def check_pending_intent_flags(base):
                                 v = int(raw, 16) if raw.startswith('0x') else int(raw)
                                 # baksmali already emits the full 32-bit value for
                                 # const/high16 (e.g. 0xc000000 = 0x0C000000), so
-                                # no additional shift is needed â€” parse as-is.
+                                # no additional shift is needed - parse as-is.
                                 vals.add(v & 0xFFFFFFFF)
                             except ValueError:
                                 pass
@@ -15222,7 +15240,7 @@ def check_pending_intent_flags(base):
                     elif ctx_vals:
                         file_has_update = True
                     else:
-                        # No const found in context â€” fall back to whole-file search
+                        # No const found in context - fall back to whole-file search
                         if re.search(flag_immutable, content):
                             file_has_immutable = True
                         elif re.search(flag_mutable, content):
@@ -15238,7 +15256,7 @@ def check_pending_intent_flags(base):
                     for j in range(start, end):
                         txt = lines[j].rstrip()
                         if j == line_num - 1 and not file_has_immutable:
-                            ctx.append(f'â†’ {j+1:4d} | {txt}  âš ï¸ MISSING FLAG_IMMUTABLE')
+                            ctx.append(f'-> {j+1:4d} | {txt}  [WARNING] MISSING FLAG_IMMUTABLE')
                         else:
                             ctx.append(f'  {j+1:4d} | {txt}')
                     code_snippet = '\n'.join(ctx)
@@ -15303,7 +15321,7 @@ def check_pending_intent_flags(base):
     add_findings(vulnerable_files,     "Missing FLAG_IMMUTABLE",                        expand=True)
     add_findings(mutable_files,        "Uses FLAG_MUTABLE",                             expand=True)
     add_findings(update_current_files, "Uses FLAG_UPDATE_CURRENT without FLAG_IMMUTABLE", expand=False)
-    add_findings(immutable_files,      "FLAG_IMMUTABLE present â€” review only",          expand=False)
+    add_findings(immutable_files,      "FLAG_IMMUTABLE present - review only",          expand=False)
 
     return TestResult(
         name="PendingIntent Flags",
@@ -15356,7 +15374,7 @@ def check_webview_ssl_error_handling(base):
                             end = min(len(lines), i + 2)
                             context_lines = []
                             for j in range(start, end):
-                                prefix = "â†’ " if j == i - 1 else "  "
+                                prefix = "-> " if j == i - 1 else "  "
                                 context_lines.append(f"{prefix}{j+1:4d} | {lines[j].rstrip()}")
 
                             finding_blocks.append(
@@ -15927,7 +15945,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.1.2 â€“ Automated Mobile App Security Test Script
+    AppSec 5.1.2 - Automated Mobile App Security Test Script
 
     Options:
       -f, --file          APK file to decompile into smali
@@ -17316,4 +17334,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
