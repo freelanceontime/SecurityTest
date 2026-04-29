@@ -5548,17 +5548,17 @@ def check_task_hijack(manifest):
     # Match both self-closing <activity .../> and <activity>...</activity> tags
     blocks = re.findall(r'(<activity\b(?:.*?/>|.*?>.*?</activity>))', txt, flags=re.DOTALL)
 
-    # Library paths to exclude (not your app code)
-    lib_paths = (
-        '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
-        '/androidx/', '/android/support/', '/com/facebook/', '/kotlin/', '/kotlinx/'
+    # Library package prefixes to exclude (not app-owned code).
+    # Use startswith() on dot-separated names — avoids the leading-dot bug
+    # that occurred when converting slash-paths via replace('/', '.').
+    lib_prefixes = (
+        'com.google.android.gms.', 'com.google.firebase.', 'com.google.android.play.',
+        'androidx.', 'android.support.', 'com.facebook.', 'kotlin.', 'kotlinx.',
+        'com.google.android.datatransport.', 'com.google.android.material.',
     )
 
     def is_library_activity(name):
-        for lib in lib_paths:
-            if lib.replace('/', '.') in name:
-                return True
-        return False
+        return any(name.startswith(p) for p in lib_prefixes)
 
     for blk in blocks:
         name_m = re.search(r'android:name="([^"]+)"', blk)
@@ -5576,6 +5576,12 @@ def check_task_hijack(manifest):
         exported_m = re.search(r'android:exported="true"', blk)
         has_intent_filter = re.search(r'<intent-filter', blk)
         is_exported = exported_m is not None or has_intent_filter is not None
+
+        # Non-exported activities cannot be targeted by a third-party process —
+        # task hijacking requires the attacker to start the activity, which the OS
+        # blocks for exported="false". Skip entirely; no WARN is warranted.
+        if not is_exported:
+            continue
 
         # Check if taskAffinity attribute is missing
         ta_m = re.search(r'android:taskAffinity="([^"]*)"', blk)
@@ -5598,28 +5604,16 @@ def check_task_hijack(manifest):
 
             adb_cmd = f"adb shell am start -n {pkg}/{full_name}"
 
-            if is_exported:
-                # FAIL: Exported activities are exploitable
-                desc = (
-                    f'<strong>Activity:</strong> <code>{name}</code><br>'
-                    f'<strong>Exported:</strong> YES (externally launchable - EXPLOITABLE)<br>'
-                    f'<strong>Issue:</strong> Missing <code>taskAffinity</code> and <code>launchMode</code> attributes<br>'
-                    f'<strong>Risk:</strong> Vulnerable to task hijacking attacks<br>'
-                    f'<strong>Fix:</strong> Add <code>android:launchMode="singleTask"</code> or set <code>android:taskAffinity=""</code><br>'
-                    f'<strong>OWASP Reference:</strong> MSTG-PLATFORM-3<br>'
-                    f'<strong>Test:</strong> <code>{adb_cmd}</code>'
-                )
-                failures.append(f"{desc}<br><pre>{esc}</pre>")
-            else:
-                # WARN: Non-exported activities (defense-in-depth)
-                desc = (
-                    f'<strong>Activity:</strong> <code>{name}</code><br>'
-                    f'<strong>Exported:</strong> NO (internal only - not exploitable)<br>'
-                    f'<strong>Issue:</strong> Missing <code>taskAffinity</code> and <code>launchMode</code> attributes<br>'
-                    f'<strong>Recommendation:</strong> Add for defense-in-depth (best practice)<br>'
-                    f'<strong>Fix:</strong> Add <code>android:launchMode="singleTask"</code> or set <code>android:taskAffinity=""</code>'
-                )
-                warnings.append(f"{desc}<br><pre>{esc}</pre>")
+            desc = (
+                f'<strong>Activity:</strong> <code>{name}</code><br>'
+                f'<strong>Exported:</strong> YES (externally launchable - EXPLOITABLE)<br>'
+                f'<strong>Issue:</strong> Missing <code>taskAffinity</code> and <code>launchMode</code> attributes<br>'
+                f'<strong>Risk:</strong> Vulnerable to task hijacking attacks<br>'
+                f'<strong>Fix:</strong> Add <code>android:launchMode="singleTask"</code> or set <code>android:taskAffinity=""</code><br>'
+                f'<strong>OWASP Reference:</strong> MSTG-PLATFORM-3<br>'
+                f'<strong>Test:</strong> <code>{adb_cmd}</code>'
+            )
+            failures.append(f"{desc}<br><pre>{esc}</pre>")
 
     # â”€â”€ PART 2 + PART 3: XML-based scan â”€â”€
     tree = ET.parse(manifest)
@@ -8743,6 +8737,183 @@ def check_external_storage(base):
         return 'WARN', "\n".join(lines)
     else:
         return 'PASS', "\n".join(lines)
+
+def _parse_manifest_bool(raw_value):
+    """Parse AndroidManifest boolean attributes into True/False/None."""
+    if raw_value is None:
+        return None
+    v = str(raw_value).strip().lower()
+    if v in ("true", "1"):
+        return True
+    if v in ("false", "0"):
+        return False
+    return None
+
+def check_manifest_storage_flags(manifest, base):
+    """
+    Check manifest storage/data-retention flags:
+    - android:requestLegacyExternalStorage
+    - android:hasFragileUserData
+
+    Also scans app code (excluding common libraries) for legacy external storage
+    API/path usage to validate whether legacy mode appears required.
+    """
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0200/' target='_blank'>"
+        "MASTG-TEST-0200: Files Written to External Storage</a>"
+        "</div>"
+    )
+    ns = '{http://schemas.android.com/apk/res/android}'
+
+    try:
+        tree = ET.parse(manifest)
+        root = tree.getroot()
+    except Exception as e:
+        return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>{mastg_ref}", 0
+
+    app = root.find('application')
+    if app is None:
+        return 'WARN', f"<div>No &lt;application&gt; element found in manifest</div>{mastg_ref}", 0
+
+    uses_sdk = root.find('uses-sdk')
+    target_sdk_raw = uses_sdk.get(ns + 'targetSdkVersion') if uses_sdk is not None else None
+    target_sdk = int(target_sdk_raw) if (target_sdk_raw and str(target_sdk_raw).isdigit()) else None
+
+    request_legacy_raw = app.get(ns + 'requestLegacyExternalStorage')
+    fragile_raw = app.get(ns + 'hasFragileUserData')
+
+    request_legacy = _parse_manifest_bool(request_legacy_raw)
+    has_fragile = _parse_manifest_bool(fragile_raw)
+
+    storage_permissions = set()
+    for perm in root.findall('.//uses-permission'):
+        name = perm.get(ns + 'name', '')
+        if name in (
+            'android.permission.READ_EXTERNAL_STORAGE',
+            'android.permission.WRITE_EXTERNAL_STORAGE',
+            'android.permission.MANAGE_EXTERNAL_STORAGE',
+        ):
+            storage_permissions.add(name)
+
+    legacy_patterns = {
+        'getExternalStorageDirectory': re.compile(r'getExternalStorageDirectory'),
+        'getExternalStoragePublicDirectory': re.compile(r'getExternalStoragePublicDirectory'),
+        '/sdcard': re.compile(r'/sdcard'),
+        '/storage/emulated/0': re.compile(r'/storage/emulated/0'),
+    }
+    scoped_patterns = {
+        'getExternalCacheDir': re.compile(r'getExternalCacheDir'),
+        'getExternalFilesDir': re.compile(r'getExternalFilesDir'),
+    }
+
+    legacy_hits = {}
+    scoped_hits = {}
+    files_to_scan = []
+    for root_dir, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.java', '.kt', '.xml')):
+                continue
+            full = os.path.join(root_dir, fn)
+            rel = os.path.relpath(full, base)
+            if is_library_path(rel):
+                continue
+            files_to_scan.append((full, rel))
+
+    with ScanProgress("Manifest Storage Flags", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                with open(full, errors='ignore') as f:
+                    lines = f.readlines()
+            except Exception:
+                continue
+
+            file_legacy = []
+            file_scoped = []
+            for line_num, line in enumerate(lines, 1):
+                s = line.strip()
+                for pat_name, rx in legacy_patterns.items():
+                    if rx.search(line):
+                        file_legacy.append((line_num, s, pat_name))
+                for pat_name, rx in scoped_patterns.items():
+                    if rx.search(line):
+                        file_scoped.append((line_num, s, pat_name))
+
+            if file_legacy:
+                legacy_hits[rel] = file_legacy[:5]
+            if file_scoped:
+                scoped_hits[rel] = file_scoped[:5]
+
+    lines = []
+    issue_count = 0
+    status = 'PASS'
+
+    request_display = html.escape(str(request_legacy_raw)) if request_legacy_raw is not None else "not set"
+    fragile_display = html.escape(str(fragile_raw)) if fragile_raw is not None else "not set"
+    target_display = str(target_sdk) if target_sdk is not None else "unknown"
+
+    lines.append(f"<div><strong>android:requestLegacyExternalStorage:</strong> {request_display}</div>")
+    lines.append(f"<div><strong>android:hasFragileUserData:</strong> {fragile_display}</div>")
+    lines.append(f"<div><strong>targetSdkVersion:</strong> {target_display}</div>")
+
+    if request_legacy is True:
+        status = 'WARN'
+        issue_count += 1
+        lines.append("<div><strong>WARNING:</strong> requestLegacyExternalStorage=true is set.</div>")
+        if target_sdk is not None and target_sdk >= 30:
+            lines.append("<div>This flag is ignored on Android 11+ when targetSdkVersion >= 30.</div>")
+        elif target_sdk == 29:
+            lines.append("<div>This flag can affect behavior on Android 10 (API 29), but is legacy-only.</div>")
+        else:
+            lines.append("<div>Target SDK is unknown from manifest; treat this as legacy hardening debt unless required.</div>")
+    elif request_legacy is False:
+        lines.append("<div>requestLegacyExternalStorage is explicitly disabled.</div>")
+    else:
+        lines.append("<div>requestLegacyExternalStorage is not declared (scoped-storage default behavior).</div>")
+
+    if has_fragile is True:
+        status = 'WARN'
+        issue_count += 1
+        lines.append("<div><strong>WARNING:</strong> hasFragileUserData=true may retain app data on uninstall flow.</div>")
+        lines.append("<div>Verify this is intentional for privacy/data-retention policy.</div>")
+    elif has_fragile is False:
+        lines.append("<div>hasFragileUserData is explicitly false.</div>")
+    else:
+        lines.append("<div>hasFragileUserData is not declared.</div>")
+
+    if storage_permissions:
+        status = 'WARN'
+        issue_count += 1
+        lines.append("<div><strong>Storage permissions declared:</strong></div>")
+        for perm in sorted(storage_permissions):
+            lines.append(f"<div>{html.escape(perm)}</div>")
+    else:
+        lines.append("<div>No broad external storage permissions declared.</div>")
+
+    if legacy_hits:
+        status = 'WARN'
+        issue_count += 1
+        lines.append(f"<div><strong>Legacy external storage patterns in app code:</strong> {len(legacy_hits)} file(s)</div>")
+        for rel in sorted(legacy_hits)[:10]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+            for line_num, code_line, pat_name in legacy_hits[rel]:
+                lines.append(f"<div>Line {line_num} ({html.escape(pat_name)})</div>")
+                lines.append(f'<pre><code>{html.escape(code_line)}</code></pre>')
+        if len(legacy_hits) > 10:
+            lines.append(f"<div>...and {len(legacy_hits) - 10} more</div>")
+    else:
+        lines.append("<div>No legacy external path/API usage detected in app code.</div>")
+
+    if scoped_hits:
+        lines.append(f"<div><em>Scoped external storage usage detected:</em> {len(scoped_hits)} file(s)</div>")
+        for rel in sorted(scoped_hits)[:5]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+
+    lines.append(mastg_ref)
+    return status, "\n".join(lines), issue_count
 
 def check_hardcoded_keys(base):
     """
@@ -15752,6 +15923,7 @@ HTML_SPECIAL_CHECKS = {
     "Root Detection",
     # New checks
     "SharedPreferences Encryption", "External Storage Usage",
+    "Manifest Storage Flags",
     "Hardcoded Keys",
     "Biometric Authentication", "FLAG_SECURE Usage",
     "WebView JavaScript Bridges", "Clipboard Security",
@@ -15788,6 +15960,7 @@ SUMMARY_BUILDERS = {
     "Dangerous Permissions": summary_with_count("Dangerous permissions"),
     "DataStore Encryption": summary_with_count("Unencrypted DataStore files"),
     "Room Database Encryption": summary_with_count("Unencrypted Room databases"),
+    "Manifest Storage Flags": summary_with_count("Manifest storage flag issues"),
     "Dependency Vulnerability Scan": summary_with_count("Dependencies with known vulnerabilities"),
     "S3 Bucket Security": summary_with_count("Misconfigured buckets"),
 }
@@ -16390,6 +16563,7 @@ def main():
                 "FileProvider Paths",
                 "SharedPreferences Encryption",
                 "External Storage Usage",
+                "Manifest Storage Flags",
                 "Keyboard Cache",
                 "Storage Analysis",
                 "DataStore Encryption",
@@ -16595,6 +16769,7 @@ def main():
         make_check("Root Detection",          lambda: check_root_detection(manifest, base)),
         make_check("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
         make_check("External Storage Usage",  lambda: check_external_storage(base)),
+        make_check("Manifest Storage Flags", lambda: check_manifest_storage_flags(manifest, base)),
         make_check("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
         make_check("Biometric Authentication",lambda: check_biometric_auth(base)),
         make_check("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
