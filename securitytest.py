@@ -5519,7 +5519,7 @@ def render_checksec_table(text):
     rows.sort(key=lambda r: 0 if "Partial RELRO" in r[0] else 1)
     return _build_table_html(col_names, rows)
     
-def check_task_hijack(manifest):
+def check_task_hijack(manifest, apk_path=None):
     """
     Scan AndroidManifest.xml for three classes of task-hijacking risk:
       1) Activities with NO taskAffinity AND NO launchMode (missing protection),
@@ -5536,12 +5536,36 @@ def check_task_hijack(manifest):
     def ns(a): return f'{{{ANDROID_NS}}}{a}'
 
     failures = []  # Exploitable issues
-    warnings = []  # Defense-in-depth recommendations
+    warnings = []  # Low / version-gated issues
 
     # Get package name first (needed for ADB commands)
     tree = ET.parse(manifest)
     root = tree.getroot()
     pkg = root.attrib.get('package', '')
+
+    # ── Extract minSdkVersion ────────────────────────────────────────────────
+    # CVE-2020-0267 (StrandHogg 2.0) patched in Android 11 (API 30).
+    # Launcher-activity check is skipped entirely when minSdk >= 30.
+    min_sdk = None
+    try:
+        uses = root.find('uses-sdk') or root.find(f'{{{ANDROID_NS}}}uses-sdk')
+        if uses is not None:
+            v = uses.get(f'{{{ANDROID_NS}}}minSdkVersion') or uses.get('minSdkVersion')
+            if v:
+                min_sdk = int(v)
+    except Exception:
+        pass
+    if min_sdk is None and apk_path and os.path.exists(apk_path):
+        try:
+            out = subprocess.check_output(
+                ['aapt', 'dump', 'badging', apk_path],
+                stderr=subprocess.STDOUT, universal_newlines=True
+            )
+            m_sdk = re.search(r"minSdkVersion:'(\d+)'", out) or re.search(r"sdkVersion:'(\d+)'", out)
+            if m_sdk:
+                min_sdk = int(m_sdk.group(1))
+        except Exception:
+            pass
 
     # â”€â”€ PART 1: regex-based "missing protection" scan â”€â”€
     txt = open(manifest, errors='ignore').read()
@@ -5568,10 +5592,6 @@ def check_task_hijack(manifest):
         if is_library_activity(name):
             continue
 
-        # Skip launcher activities (any activity with MAIN action is an app entry point)
-        if re.search(r'<action[^>]+android:name="android.intent.action.MAIN"', blk):
-            continue
-
         # Check for explicit exported="true" OR presence of intent-filter (makes it exported)
         exported_m = re.search(r'android:exported="true"', blk)
         has_intent_filter = re.search(r'<intent-filter', blk)
@@ -5582,6 +5602,60 @@ def check_task_hijack(manifest):
         # blocks for exported="false". Skip entirely; no WARN is warranted.
         if not is_exported:
             continue
+
+        is_launcher = bool(re.search(
+            r'<action[^>]+android:name="android.intent.action\.MAIN"', blk))
+
+        # ── Launcher activity check (StrandHogg / CVE-2020-0267) ─────────────
+        # Launcher activities must be exported but are a StrandHogg target when
+        # taskAffinity is not explicitly set to "".  CVE-2020-0267 (StrandHogg
+        # 2.0) is patched on Android 11+ (API 30), so only flag when minSdk < 30.
+        if is_launcher:
+            has_empty_affinity = bool(re.search(r'android:taskAffinity=""', blk))
+            if not has_empty_affinity:
+                if min_sdk is not None and min_sdk >= 30:
+                    # Fully patched SDK range — nothing to report
+                    pass
+                else:
+                    lm_m = re.search(r'android:launchMode="(\d+)"', blk)
+                    launch_mode = int(lm_m.group(1)) if lm_m else None
+                    lm_label = {1: 'singleTop', 2: 'singleTask', 3: 'singleInstance'}.get(
+                        launch_mode, f'{launch_mode}' if launch_mode is not None else 'standard'
+                    )
+                    if min_sdk is not None:
+                        sdk_note = (
+                            f"minSdk={min_sdk} includes Android versions below API 30 "
+                            f"where CVE-2020-0267 is unpatched."
+                        )
+                    else:
+                        sdk_note = (
+                            "minSdkVersion could not be determined. If minSdk &lt; 30, "
+                            "CVE-2020-0267 applies — verify manually."
+                        )
+                    esc = html.escape(blk[:300] + ('...' if len(blk) > 300 else ''))
+                    warnings.append(
+                        f'<strong>Activity:</strong> <code>{name}</code><br>'
+                        f'<strong>Type:</strong> Launcher / entry-point (exported by design)<br>'
+                        f'<strong>Issue:</strong> No explicit <code>android:taskAffinity=""</code><br>'
+                        f'<strong>Current launchMode:</strong> <code>{lm_label}</code><br>'
+                        f'<strong>Risk:</strong> StrandHogg / CVE-2020-0267 — {sdk_note}<br>'
+                        f'<strong>Note:</strong> Task-affinity attacks operate at the task-stack level, '
+                        f'not per-activity. A malicious app sets its own activity\'s affinity to match '
+                        f'this app\'s package name and inserts itself in front of the whole task — '
+                        f'non-exported activities within the task are also affected. '
+                        f'Fixing the launcher activity (or the <code>&lt;application&gt;</code> tag) '
+                        f'covers all activities in the task at once.<br>'
+                        f'<strong>Fix (preferred):</strong> Set <code>android:taskAffinity=""</code> '
+                        f'on the <code>&lt;application&gt;</code> tag to harden all activities at once<br>'
+                        f'<strong>Fix (targeted):</strong> Add <code>android:taskAffinity=""</code> '
+                        f'to this <code>&lt;activity&gt;</code> tag only<br>'
+                        f'<strong>Patched on:</strong> Android 11+ (API 30) via CVE-2020-0267 fix<br>'
+                        f'<strong>Reference:</strong> '
+                        f'<a href="https://nvd.nist.gov/vuln/detail/CVE-2020-0267" target="_blank">'
+                        f'CVE-2020-0267</a>'
+                        f'<br><pre>{esc}</pre>'
+                    )
+            continue  # Launcher handled — skip the non-launcher checks below
 
         # Check if taskAffinity attribute is missing
         ta_m = re.search(r'android:taskAffinity="([^"]*)"', blk)
@@ -5610,7 +5684,7 @@ def check_task_hijack(manifest):
                 f'<strong>Issue:</strong> Missing <code>taskAffinity</code> and <code>launchMode</code> attributes<br>'
                 f'<strong>Risk:</strong> Vulnerable to task hijacking attacks<br>'
                 f'<strong>Fix:</strong> Add <code>android:launchMode="singleTask"</code> or set <code>android:taskAffinity=""</code><br>'
-                f'<strong>OWASP Reference:</strong> MSTG-PLATFORM-3<br>'
+                f'<strong>OWASP Reference:</strong> MASVS-PLATFORM-1 / MASTG-TEST-0029<br>'
                 f'<strong>Test:</strong> <code>{adb_cmd}</code>'
             )
             failures.append(f"{desc}<br><pre>{esc}</pre>")
@@ -5663,7 +5737,7 @@ def check_task_hijack(manifest):
                 f'<strong>Issue:</strong> taskAffinity="{task_affinity}" + allowTaskReparenting="true"<br>'
                 f'<strong>Risk:</strong> Activity can be moved to attacker\'s task<br>'
                 f'<strong>Fix:</strong> Remove allowTaskReparenting or set taskAffinity to package name<br>'
-                f'<strong>OWASP Reference:</strong> MSTG-PLATFORM-3<br>'
+                f'<strong>OWASP Reference:</strong> MASVS-PLATFORM-1 / MASTG-TEST-0029<br>'
                 f'<strong>Test:</strong> <code>{adb_cmd}</code>'
             )
 
@@ -5678,7 +5752,7 @@ def check_task_hijack(manifest):
                 f'<strong>Issue:</strong> Exported with no android:permission attribute<br>'
                 f'<strong>Risk:</strong> Any app can launch this activity<br>'
                 f'<strong>Fix:</strong> Add android:permission attribute or set android:exported="false"<br>'
-                f'<strong>OWASP Reference:</strong> MSTG-PLATFORM-3<br>'
+                f'<strong>OWASP Reference:</strong> MASVS-PLATFORM-1 / MASTG-TEST-0029<br>'
                 f'<strong>Test:</strong> <code>{adb_cmd}</code>'
             )
 
@@ -12993,25 +13067,113 @@ def check_frida_task_hijack(base, manifest,
             except Exception:
                 pass
 
-    # â”€â”€ 8) cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── 8) taskAffinity runtime check via dumpsys ────────────────────────────
+    # MASTG-TEST-0029 requires verifying the actual task affinity at runtime,
+    # not just the manifest declaration. `dumpsys activity activities` shows
+    # the live task stack with each task’s affinity string — if it matches the
+    # package name the app is targetable by a StrandHogg-style attack.
+    affinity_findings = []
+    try:
+        dumpsys = subprocess.check_output(
+            [‘adb’, ‘shell’, ‘dumpsys’, ‘activity’, ‘activities’],
+            stderr=subprocess.DEVNULL, universal_newlines=True, timeout=10
+        )
+        # Match lines like:  * TaskRecord{... affinity=com.phe.couchto5K ...}
+        # or:                  affinity=com.example.app
+        for line in dumpsys.splitlines():
+            if pkg not in line:
+                continue
+            m_aff = re.search(r’affinity=([^\s\}]+)’, line)
+            if not m_aff:
+                continue
+            affinity = m_aff.group(1)
+            if affinity == pkg:
+                # Default affinity = package name → predictable, targetable
+                affinity_findings.append(
+                    f’<strong style=”color:#dc3545;”>Task affinity is the package name ‘
+                    f’(<code>{affinity}</code>)</strong> — a malicious app can set its own ‘
+                    f’<code>taskAffinity</code> to this value to insert itself into the task ‘
+                    f’stack (StrandHogg / CVE-2020-0267 on Android &lt; 11).<br><br>’
+
+                    f’<strong>Manual verification — craft a malicious task:</strong><br>’
+                    f’Create a companion test app with the following ‘
+                    f’<code>AndroidManifest.xml</code> activity declaration:<br>’
+                    f’<pre style=”background:#f8f9fa;padding:10px;border-left:3px solid #dc3545;’
+                    f’font-size:12px;overflow-x:auto;”>’
+                    f’&lt;activity\n’
+                    f’    android:name=”.MaliciousActivity”\n’
+                    f’    android:taskAffinity=”{affinity}”\n’
+                    f’    android:launchMode=”singleTask”\n’
+                    f’    android:exported=”true”&gt;\n’
+                    f’    &lt;intent-filter&gt;\n’
+                    f’        &lt;action android:name=”android.intent.action.MAIN”/&gt;\n’
+                    f’        &lt;category android:name=”android.intent.category.LAUNCHER”/&gt;\n’
+                    f’    &lt;/intent-filter&gt;\n’
+                    f’&lt;/activity&gt;</pre>’
+
+                    f’<strong>Steps to confirm exploitation:</strong><br>’
+                    f’<ol style=”margin:4px 0;padding-left:20px;”>’
+                    f’<li>Install the companion test app on the device: ‘
+                    f’<code>adb install malicious.apk</code></li>’
+                    f’<li>Launch the companion app once so its task is registered with the system</li>’
+                    f’<li>Press Home, then tap the <strong>target app</strong> icon ‘
+                    f’(<code>{affinity}</code>)</li>’
+                    f’<li>If the companion app\’s activity appears instead of the target — ‘
+                    f’the attack succeeds</li>’
+                    f’<li>On Android 11+ (API 30) the attack is patched and should fail — ‘
+                    f’confirm by testing on a pre-Android-11 device or emulator if in scope</li>’
+                    f’</ol>’
+
+                    f’<strong>Fix:</strong> add <code>android:taskAffinity=””</code> to the ‘
+                    f’<code>&lt;application&gt;</code> tag (covers all activities at once) or ‘
+                    f’to the launcher <code>&lt;activity&gt;</code> tag individually.<br>’
+                    f’<strong>CVE:</strong> ‘
+                    f’<a href=”https://nvd.nist.gov/vuln/detail/CVE-2020-0267” target=”_blank”>’
+                    f’CVE-2020-0267</a> &mdash; ‘
+                    f’<a href=”https://promon.co/security-news/strandhogg/” target=”_blank”>’
+                    f’StrandHogg research</a>’
+                )
+                break
+            elif affinity and affinity != pkg:
+                # Explicit non-package, non-empty affinity — unusual, flag it
+                affinity_findings.append(
+                    f’Task affinity is set to <code>{affinity}</code> (not the package ‘
+                    f’name and not empty). Verify this is intentional — a custom affinity ‘
+                    f’shared with another app can also be exploited if that app is malicious.’
+                )
+                break
+    except Exception:
+        affinity_findings.append(‘Could not read task affinity from dumpsys — verify manually.’)
+
+    # ── 9) cleanup ───────────────────────────────────────────────────────────
     proc.terminate()
-    subprocess.run(['adb','shell','am','force-stop', pkg],
+    subprocess.run([‘adb’,’shell’,’am’,’force-stop’, pkg],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(tmp.name)
 
-    # â”€â”€ 9) build HTML report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── 10) build HTML report ─────────────────────────────────────────────────
     rows, launches = [], 0
     for comp in bad:
-        simple = comp.split('.')[-1]
+        simple = comp.split(‘.’)[-1]
         if comp in seen:
             launches += 1
-            rows.append(f"- <code>{simple}</code> â†’ <code>{seen[comp]}()</code>")
+            rows.append(f”- <code>{simple}</code> &rarr; <code>{seen[comp]}()</code>”)
         else:
-            rows.append(f"- <code>{simple}</code> not observed")
+            rows.append(f”- <code>{simple}</code> not observed”)
 
-    detail = "<br>\n".join(rows)
-    # FAIL if any activity launched
-    return (False if launches else True), detail
+    detail_parts = []
+    if rows:
+        detail_parts.append(“<br>\n”.join(rows))
+    if affinity_findings:
+        detail_parts.append(
+            “<br><strong>Task Affinity (StrandHogg) — runtime check:</strong><br>” +
+            “<br>”.join(affinity_findings)
+        )
+
+    detail = “<br><br>”.join(detail_parts) if detail_parts else “No issues observed.”
+    # FAIL if any activity launched OR if taskAffinity is exploitable
+    fail = launches > 0 or bool(affinity_findings and ‘package name’ in affinity_findings[0])
+    return (not fail), detail
 
 
 def check_frida_sharedprefs(base, wait_secs=10):
@@ -16755,7 +16917,7 @@ def main():
         make_check("Browsable DeepLinks",     lambda: check_browsable_deeplinks(manifest)),
         make_check("Deep Link Intent Filter Misconfiguration", lambda: check_deep_link_misconfiguration(manifest)),
         make_check("SQLi via ContentProvider",lambda: check_sql_injection(base, manifest)),
-        make_check("Task Hijacking",          lambda: check_task_hijack(manifest)),
+        make_check("Task Hijacking",          lambda: check_task_hijack(manifest, apk_path)),
         make_check("Exported Components",     lambda: check_exported_components(manifest, base)),
         make_check("Insecure WebView Usage",  lambda: check_insecure_webview(base)),
         make_check("OS Command Injection",    lambda: check_os_command_injection(base)),
