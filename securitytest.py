@@ -8222,7 +8222,7 @@ def check_certificate_pinning(base):
 
         # Certificate comparison
         r'equals\(.*Certificate',
-        r'Arrays;->equals',
+        r'Arrays;->equals\(\[B\[B\)Z',
 
         # SSL Context with custom trust
         r'SSLContext;->init',
@@ -8271,6 +8271,10 @@ def check_certificate_pinning(base):
                 continue
 
             rel_path = os.path.relpath(file_path, base)
+
+            # Ignore common third-party/library paths to reduce false positives.
+            if is_library_path(rel_path):
+                continue
 
             if any(rx.search(content) for rx in lib_regexes):
                 lib_hits.add(rel_path)
@@ -10902,7 +10906,7 @@ def check_signature_schemes(apk_path):
 
     # If we have v2/v3 WITHOUT v1, we're fully protected
     if "v2" in present or "v3" in present:
-        report_lines.insert(0, "<div style='margin-bottom:10px;color:#198754;'><strong>âœ“ Secure signature configuration</strong></div>")
+        report_lines.insert(0, "<div style='margin-bottom:10px;color:#198754;'><strong>Secure signature configuration</strong></div>")
         return True, "<br>\n".join(report_lines)
 
     # No proper signatures (shouldn't reach here, but safety fallback)
@@ -12131,7 +12135,7 @@ def check_frida_pinning(base, wait_secs=15):
         detail_parts.append("<div><strong>Domains WITH Certificate Pinning:</strong></div>")
         detail_parts.append("<div class='detail-list-item'>")
         for host in sorted(pinned_hosts):
-            detail_parts.append(f"â–¹ <code style='color:#28a745'>{html.escape(host)}</code><br>")
+            detail_parts.append(f"- <code style='color:#28a745'>{html.escape(host)}</code><br>")
         detail_parts.append("</div><br>")
 
     # Non-pinned domains section
@@ -12139,7 +12143,7 @@ def check_frida_pinning(base, wait_secs=15):
         detail_parts.append("<div><strong>Domains WITHOUT Certificate Pinning:</strong></div>")
         detail_parts.append("<div class='detail-list-item'>")
         for host in sorted(non_pinned_hosts):
-            detail_parts.append(f"â–¹ <code style='color:#dc3545'>{html.escape(host)}</code><br>")
+            detail_parts.append(f"- <code style='color:#dc3545'>{html.escape(host)}</code><br>")
         detail_parts.append("</div><br>")
 
     # Pinning methods detected
@@ -12147,7 +12151,7 @@ def check_frida_pinning(base, wait_secs=15):
         detail_parts.append("<div><strong>Pinning Methods Detected:</strong></div>")
         detail_parts.append("<div class='detail-list-item'>")
         for h in sorted(pinning_methods):
-            detail_parts.append(f"â–¹ <code>{html.escape(h)}</code><br>")
+            detail_parts.append(f"- <code>{html.escape(h)}</code><br>")
         detail_parts.append("</div>")
 
     # MASTG reference
@@ -13109,11 +13113,11 @@ def check_frida_task_hijack(base, manifest,
                 # Default affinity = package name → predictable, targetable
                 affinity_findings.append(
                     f'<strong style="color:#dc3545;">Task affinity is the package name '
-                    f'(<code>{affinity}</code>)</strong> — a malicious app can set its own '
+                    f'(<code>{affinity}</code>)</strong> - a malicious app can set its own '
                     f'<code>taskAffinity</code> to this value to insert itself into the task '
                     f'stack (StrandHogg / CVE-2020-0267 on Android &lt; 11).<br><br>'
 
-                    f'<strong>Manual verification — craft a malicious task:</strong><br>'
+                    f'<strong>Manual verification - craft a malicious task:</strong><br>'
                     f'Create a companion test app with the following '
                     f'<code>AndroidManifest.xml</code> activity declaration:<br>'
                     f'<pre style="background:#f8f9fa;padding:10px;border-left:3px solid #dc3545;'
@@ -13136,9 +13140,9 @@ def check_frida_task_hijack(base, manifest,
                     f'<li>Launch the companion app once so its task is registered with the system</li>'
                     f'<li>Press Home, then tap the <strong>target app</strong> icon '
                     f'(<code>{affinity}</code>)</li>'
-                    f'<li>If the companion app\'s activity appears instead of the target — '
+                    f'<li>If the companion app\'s activity appears instead of the target - '
                     f'the attack succeeds</li>'
-                    f'<li>On Android 11+ (API 30) the attack is patched and should fail — '
+                    f'<li>On Android 11+ (API 30) the attack is patched and should fail - '
                     f'confirm by testing on a pre-Android-11 device or emulator if in scope</li>'
                     f'</ol>'
 
@@ -13156,12 +13160,12 @@ def check_frida_task_hijack(base, manifest,
                 # Explicit non-package, non-empty affinity — unusual, flag it
                 affinity_findings.append(
                     f'Task affinity is set to <code>{affinity}</code> (not the package '
-                    f'name and not empty). Verify this is intentional — a custom affinity '
+                    f'name and not empty). Verify this is intentional - a custom affinity '
                     f'shared with another app can also be exploited if that app is malicious.'
                 )
                 break
     except Exception:
-        affinity_findings.append('Could not read task affinity from dumpsys — verify manually.')
+        affinity_findings.append('Could not read task affinity from dumpsys - verify manually.')
 
     # ── 9) cleanup ───────────────────────────────────────────────────────────
     proc.terminate()
@@ -13184,7 +13188,7 @@ def check_frida_task_hijack(base, manifest,
         detail_parts.append("<br>\n".join(rows))
     if affinity_findings:
         detail_parts.append(
-            "<br><strong>Task Affinity (StrandHogg) — runtime check:</strong><br>" +
+            "<br><strong>Task Affinity (StrandHogg) - runtime check:</strong><br>" +
             "<br>".join(affinity_findings)
         )
 
