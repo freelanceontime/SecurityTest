@@ -43,6 +43,7 @@ import hashlib
 import html
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
 import os
 import pathlib
@@ -5897,6 +5898,630 @@ def check_third_party_libraries(app_dir: str, base: str) -> TestResult:
         findings=findings
     )
 
+def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResult:
+    """
+    Scan all files and binary strings in the IPA to discover versioned components,
+    then query OSV (https://api.osv.dev) and NVD for known CVEs.
+    Lists ALL versions found (even without CVEs) so outdated components are visible.
+
+    Sources scanned:
+    - Framework Info.plist files (CFBundleShortVersionString)
+    - Podfile.lock (CocoaPods)
+    - Cartfile.resolved (Carthage)
+    - Package.resolved (Swift Package Manager)
+    - Mach-O binary strings (embedded native libs: openssl, zlib, sqlite, curl, etc.)
+
+    MASTG References:
+    - MASTG-TEST-0085: Checking for Weaknesses in Third Party Libraries
+    - MASTG-TEST-0273: Dependencies with Known Vulnerabilities
+    """
+    print("[*] Scanning IPA for versioned components (frameworks, packages, binaries)...")
+
+    osv_api_url = "https://api.osv.dev/v1/query"
+    nvd_url_base = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+    data_source_html = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0273/' target='_blank'>"
+        "MASTG-TEST-0273: Dependencies with Known Vulnerabilities</a>"
+        " | <a href='https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0085/' target='_blank'>"
+        "MASTG-TEST-0085: Third Party Libraries</a></div>"
+        "<div><strong>Data sources:</strong> "
+        "<a href='https://api.osv.dev/' target='_blank'>OSV API</a> (package matching) + "
+        "<a href='https://services.nvd.nist.gov/rest/json/cves/2.0' target='_blank'>NVD CVE API v2.0</a> (binary string matching)</div>"
+    )
+
+    version_rx = re.compile(
+        r'^(?:v)?\d+(?:[._-]\d+)*(?:[._-]?(?:alpha|beta|rc|final|release|snapshot|preview)\d*)?(?:[+._-][0-9A-Za-z]+)*$',
+        re.IGNORECASE,
+    )
+
+    # (ecosystem, name_lower, version) -> {ecosystem, name, version, location}
+    discovered: Dict = {}
+    # (name, version) -> {name, version, evidence: set}
+    native_candidates: Dict = {}
+    scanned_files = 0
+    parsed_manifest_files = 0
+    binaries_scanned = 0
+    query_errors = 0
+    nvd_query_errors = 0
+
+    def _normalize_version(v: str) -> str:
+        if not v:
+            return ""
+        v = str(v).strip().strip('"').strip("'")
+        if v.startswith('v') and len(v) > 1 and v[1].isdigit():
+            v = v[1:]
+        return v.strip()
+
+    def _is_valid_version(v: str) -> bool:
+        if not v:
+            return False
+        low = v.lower()
+        if any(x in v for x in ('${', '}', '$(')):
+            return False
+        if low in {'latest', 'release', 'unspecified', 'main', 'master', 'unknown', 'development'}:
+            return False
+        if len(v) > 60 or not any(ch.isdigit() for ch in v):
+            return False
+        return bool(version_rx.match(v))
+
+    def _add_dep(ecosystem: str, name: str, version: str, location: str) -> None:
+        version = _normalize_version(version)
+        if not ecosystem or not name or not _is_valid_version(version):
+            return
+        name = str(name).strip()
+        if not name or len(name) > 180:
+            return
+        key = (ecosystem, name.lower(), version)
+        if key not in discovered:
+            discovered[key] = {
+                'ecosystem': ecosystem,
+                'name': name,
+                'version': version,
+                'location': location,
+            }
+
+    def _add_native(name: str, version: str, evidence: str) -> None:
+        version = _normalize_version(version)
+        if not name or not _is_valid_version(version):
+            return
+        name = name.strip().lower()
+        if len(name) < 2 or len(name) > 60:
+            return
+        key = (name, version)
+        if key not in native_candidates:
+            native_candidates[key] = {'name': name, 'version': version, 'evidence': set()}
+        native_candidates[key]['evidence'].add(evidence)
+
+    def _read_plist_safe(path: str) -> Optional[Dict]:
+        try:
+            with open(path, 'rb') as f:
+                return plistlib.load(f)
+        except Exception:
+            pass
+        try:
+            rc, out = run(["plutil", "-convert", "xml1", "-o", "-", path], timeout=15)
+            if rc == 0 and out.strip():
+                return plistlib.loads(out.encode('utf-8', errors='replace'))
+        except Exception:
+            pass
+        return None
+
+    def _extract_ascii_strings(path: str, max_bytes: int = 4 * 1024 * 1024) -> List[str]:
+        try:
+            with open(path, 'rb') as f:
+                blob = f.read(max_bytes)
+        except Exception:
+            return []
+        out = []
+        for m in re.finditer(rb'[\x20-\x7e]{6,160}', blob):
+            try:
+                s = m.group(0).decode('ascii', errors='ignore').strip()
+            except Exception:
+                continue
+            if s:
+                out.append(s)
+            if len(out) >= 3000:
+                break
+        return out
+
+    macho_magic = {
+        b'\xfe\xed\xfa\xce', b'\xfe\xed\xfa\xcf',
+        b'\xce\xfa\xed\xfe', b'\xcf\xfa\xed\xfe',
+        b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+    }
+
+    def _is_macho(path: str) -> bool:
+        try:
+            with open(path, 'rb') as f:
+                return f.read(4) in macho_magic
+        except Exception:
+            return False
+
+    # ── Phase 1: Framework Info.plist files ────────────────────────────────────
+    print("[*]   Phase 1: Scanning framework Info.plist files...")
+    for root, dirs, files in os.walk(app_dir):
+        scanned_files += len(files)
+        for fn in files:
+            if fn != 'Info.plist':
+                continue
+            full_path = os.path.join(root, fn)
+            rel_path = os.path.relpath(full_path, base).replace('\\', '/')
+
+            # Only process framework / extension / plugin plists, not the main app plist
+            rel_norm = rel_path
+            if ('.framework/' not in rel_norm and
+                    '.appex/' not in rel_norm and
+                    '.bundle/' not in rel_norm and
+                    'PlugIns/' not in rel_norm):
+                continue
+
+            pdata = _read_plist_safe(full_path)
+            if not pdata or not isinstance(pdata, dict):
+                continue
+
+            version = str(
+                pdata.get('CFBundleShortVersionString') or
+                pdata.get('CFBundleVersion') or ''
+            ).strip()
+            bundle_name = str(
+                pdata.get('CFBundleName') or
+                pdata.get('CFBundleIdentifier') or
+                os.path.basename(os.path.dirname(full_path)) or ''
+            ).strip()
+
+            if not version or not bundle_name:
+                continue
+
+            # Convert bundle identifier format (org.cocoapods.Zip -> Zip)
+            if '.' in bundle_name and not bundle_name[0].isdigit():
+                # org.cocoapods.Zip -> Zip; com.alamofire.Alamofire -> Alamofire
+                parts = bundle_name.split('.')
+                # If "org.cocoapods" prefix, use the last part directly
+                if 'cocoapods' in bundle_name.lower():
+                    bundle_name = parts[-1]
+                else:
+                    # For generic bundle IDs, use last component only if it looks like a name
+                    last = parts[-1]
+                    if last and last[0].isupper():
+                        bundle_name = last
+
+            parsed_manifest_files += 1
+            _add_dep('CocoaPods', bundle_name, version, rel_path)
+
+    # ── Phase 2: Package manager manifests ────────────────────────────────────
+    print("[*]   Phase 2: Scanning package manager manifests...")
+
+    # Podfile.lock
+    for search_dir in [base, os.path.dirname(base)]:
+        podfile_lock = os.path.join(search_dir, 'Podfile.lock')
+        if os.path.exists(podfile_lock):
+            try:
+                content = open(podfile_lock, 'r', encoding='utf-8', errors='ignore').read()
+                parsed_manifest_files += 1
+                pod_rx = re.compile(
+                    r'^\s*-\s+([A-Za-z0-9_\-\.]+)\s+\(([0-9][0-9A-Za-z.\-+]*)\)',
+                    re.MULTILINE
+                )
+                for m in pod_rx.finditer(content):
+                    _add_dep('CocoaPods', m.group(1), m.group(2), 'Podfile.lock')
+            except Exception:
+                pass
+            break
+
+    # Cartfile.resolved
+    for search_dir in [base, os.path.dirname(base)]:
+        cartfile = os.path.join(search_dir, 'Cartfile.resolved')
+        if os.path.exists(cartfile):
+            try:
+                content = open(cartfile, 'r', encoding='utf-8', errors='ignore').read()
+                parsed_manifest_files += 1
+                cart_rx = re.compile(
+                    r'(?:github|git|binary)\s+"([^"]+)"\s+"v?([0-9][^"]*)"'
+                )
+                for m in cart_rx.finditer(content):
+                    repo_name = m.group(1).split('/')[-1]
+                    _add_dep('CocoaPods', repo_name, m.group(2), 'Cartfile.resolved')
+            except Exception:
+                pass
+            break
+
+    # Package.resolved (SPM)
+    pkg_resolved_found: List[str] = []
+    for search_root in [app_dir, base]:
+        for r, _, fs in os.walk(search_root):
+            if 'Package.resolved' in fs:
+                pkg_resolved_found.append(os.path.join(r, 'Package.resolved'))
+            if len(pkg_resolved_found) >= 3:
+                break
+    for pkg_path in pkg_resolved_found[:3]:
+        try:
+            data = json.loads(open(pkg_path, 'r', encoding='utf-8').read())
+            parsed_manifest_files += 1
+            pins = data.get('pins') or data.get('object', {}).get('pins', [])
+            for pin in pins:
+                name = pin.get('identity') or pin.get('package') or ''
+                version = pin.get('state', {}).get('version') or ''
+                if name and version:
+                    rel_pkg = os.path.relpath(pkg_path, base).replace('\\', '/')
+                    _add_dep('SwiftPM', name, version, rel_pkg)
+        except Exception:
+            pass
+
+    # ── Phase 3: Binary string scanning (Mach-O) ──────────────────────────────
+    print("[*]   Phase 3: Scanning Mach-O binaries for embedded version strings...")
+
+    native_string_patterns = [
+        ('openssl',   re.compile(r'\bOpenSSL\s+(\d+\.\d+\.\d+[a-z]?)\b',         re.IGNORECASE)),
+        ('zlib',      re.compile(r'\bzlib(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('libpng',    re.compile(r'\blibpng(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('sqlite',    re.compile(r'\bSQLite(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('curl',      re.compile(r'\b(?:libcurl|curl)/(\d+\.\d+(?:\.\d+)?)\b',    re.IGNORECASE)),
+        ('libxml2',   re.compile(r'\blibxml2(?:\s+|/)(\d+\.\d+(?:\.\d+)?)\b',     re.IGNORECASE)),
+        ('expat',     re.compile(r'\bexpat[_\s-]?(\d+\.\d+(?:\.\d+)?)\b',         re.IGNORECASE)),
+        ('nghttp2',   re.compile(r'\bnghttp2/(\d+\.\d+(?:\.\d+)?)\b',             re.IGNORECASE)),
+        ('boringssl', re.compile(r'\bBoringSSL\s+(\d+\.\d+(?:\.\d+)?)\b',         re.IGNORECASE)),
+        ('libressl',  re.compile(r'\bLibreSSL\s+(\d+\.\d+(?:\.\d+)?)\b',          re.IGNORECASE)),
+    ]
+
+    for root, _, files in os.walk(app_dir):
+        for fn in files:
+            full_path = os.path.join(root, fn)
+            if not _is_macho(full_path):
+                continue
+            rel_path = os.path.relpath(full_path, base).replace('\\', '/')
+            binaries_scanned += 1
+            strings_out = _extract_ascii_strings(full_path)
+            if not strings_out:
+                continue
+            joined = "\n".join(strings_out)
+            for lib_name, rx in native_string_patterns:
+                for hit in rx.finditer(joined):
+                    _add_native(lib_name, hit.group(1), f"{rel_path} (binary strings)")
+
+    if not discovered and not native_candidates:
+        return TestResult(
+            name="Dependency Vulnerability Scan (iOS)",
+            status="INFO",
+            summary_lines=[
+                "No versioned components detected",
+                "Ensure the IPA contains framework Info.plist files, Podfile.lock, or Cartfile.resolved",
+                f"Files scanned: {scanned_files}, manifests parsed: {parsed_manifest_files}, binaries scanned: {binaries_scanned}",
+            ],
+            mastg_ref_html=data_source_html,
+        )
+
+    # ── Phase 4: OSV API queries ───────────────────────────────────────────────
+    dep_list = sorted(discovered.values(), key=lambda x: (x['ecosystem'], x['name'], x['version']))
+    if len(dep_list) > 150:
+        dep_list = dep_list[:150]
+
+    print(f"[*]   Phase 4: Querying OSV API for {len(dep_list)} packages...")
+
+    findings_html: List[str] = []
+    all_components: List[Dict] = []
+    vuln_dep_count = 0
+    total_vulns = 0
+    unique_cves: Set[str] = set()
+    max_details = 12
+
+    for dep in dep_list:
+        payload: Dict = {
+            "package": {"ecosystem": dep['ecosystem'], "name": dep['name']},
+            "version": dep['version'],
+        }
+        dep_vulns: List[Dict] = []
+        page_token = None
+        page_guard = 0
+        while page_guard < 5:
+            page_guard += 1
+            if page_token:
+                payload["page_token"] = page_token
+            else:
+                payload.pop("page_token", None)
+            try:
+                req = urllib.request.Request(
+                    osv_api_url,
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                data_resp = json.loads(body) if body else {}
+            except Exception:
+                query_errors += 1
+                break
+            vulns = data_resp.get('vulns', [])
+            if isinstance(vulns, list):
+                dep_vulns.extend(vulns)
+            page_token = data_resp.get('next_page_token')
+            if not page_token:
+                break
+
+        cve_ids_for_dep: List[str] = []
+        for v in dep_vulns:
+            aliases = v.get('aliases', []) or []
+            for a in aliases:
+                if isinstance(a, str) and a.upper().startswith('CVE-'):
+                    unique_cves.add(a.upper())
+                    cve_ids_for_dep.append(a.upper())
+
+        all_components.append({
+            'name': dep['name'],
+            'version': dep['version'],
+            'ecosystem': dep['ecosystem'],
+            'location': dep['location'],
+            'vuln_count': len(dep_vulns),
+            'cves': cve_ids_for_dep,
+        })
+
+        if not dep_vulns:
+            continue
+
+        vuln_dep_count += 1
+        total_vulns += len(dep_vulns)
+
+        rows: List[str] = []
+        for v in dep_vulns[:max_details]:
+            vid = v.get('id', 'UNKNOWN')
+            summary_text = str(v.get('summary') or v.get('details', '')[:200] or "No summary")
+            aliases = v.get('aliases', []) if isinstance(v.get('aliases', []), list) else []
+            cves = [a for a in aliases if isinstance(a, str) and a.upper().startswith('CVE-')]
+            sev_parts: List[str] = []
+            for sev in (v.get('severity', []) or []):
+                if isinstance(sev, dict) and sev.get('type') and sev.get('score'):
+                    sev_parts.append(f"{sev['type']}:{sev['score']}")
+            osv_link = f"https://osv.dev/vulnerability/{vid}"
+            cve_html = ", ".join(html.escape(c) for c in sorted(set(cves))) if cves else "None listed"
+            sev_html = html.escape(", ".join(sev_parts)) if sev_parts else "Not provided"
+            rows.append(
+                "<tr>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>"
+                f"<a href='{html.escape(osv_link)}' target='_blank'>{html.escape(vid)}</a></td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{html.escape(summary_text[:200])}</td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{cve_html}</td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{sev_html}</td>"
+                "</tr>"
+            )
+
+        findings_html.append(
+            "<div style='margin:14px 0;padding:10px;border:1px solid #dee2e6;"
+            "border-left:4px solid #dc3545;border-radius:4px;'>"
+            f"<div style='font-weight:700;margin-bottom:4px;'>"
+            f"{html.escape(dep['ecosystem'])} / {html.escape(dep['name'])} @ {html.escape(dep['version'])}</div>"
+            f"<div style='font-size:11px;color:#666;margin-bottom:8px;'>"
+            f"<strong>Location:</strong> {html.escape(dep['location'])}</div>"
+            "<div style='overflow-x:auto;'>"
+            "<table style='width:100%;border-collapse:collapse;font-size:11px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Vuln ID</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Summary</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>CVE(s)</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Severity</th>"
+            "</tr></thead><tbody>"
+            + "".join(rows) +
+            "</tbody></table></div>"
+            + (f"<div style='margin-top:6px;font-size:11px;color:#666;'>Showing first {max_details} "
+               f"of {len(dep_vulns)} vulnerabilities.</div>" if len(dep_vulns) > max_details else "")
+            + "</div>"
+        )
+
+    # ── Phase 5: NVD queries for native binary candidates ─────────────────────
+    native_list = sorted(native_candidates.values(), key=lambda x: (x['name'], x['version']))
+    if len(native_list) > 60:
+        native_list = native_list[:60]
+
+    print(f"[*]   Phase 5: Querying NVD for {len(native_list)} native binary candidates...")
+
+    nvd_vuln_lib_count = 0
+    total_nvd_cves = 0
+    nvd_cache: Dict = {}
+
+    for cand in native_list:
+        name = cand['name']
+        version = cand['version']
+        evidence_list = sorted(cand['evidence'])[:2]
+
+        comp_entry: Dict = {
+            'name': name,
+            'version': version,
+            'ecosystem': 'native/binary',
+            'location': ', '.join(evidence_list),
+            'vuln_count': 0,
+            'cves': [],
+        }
+        all_components.append(comp_entry)
+
+        keyword = f"{name} {version}"
+        if keyword in nvd_cache:
+            nvd_data = nvd_cache[keyword]
+        else:
+            params = {
+                'keywordSearch': keyword,
+                'keywordExactMatch': '',
+                'noRejected': '',
+                'resultsPerPage': '25',
+            }
+            req_url = f"{nvd_url_base}?{urllib.parse.urlencode(params)}"
+            try:
+                with urllib.request.urlopen(req_url, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                nvd_data = json.loads(body) if body else {}
+                nvd_cache[keyword] = nvd_data
+            except Exception:
+                nvd_query_errors += 1
+                continue
+
+        vulns_arr = nvd_data.get('vulnerabilities', [])
+        if not isinstance(vulns_arr, list) or not vulns_arr:
+            continue
+
+        matched_rows: List[str] = []
+        for item in vulns_arr:
+            cve = item.get('cve', {}) if isinstance(item, dict) else {}
+            cve_id = cve.get('id', '')
+            descriptions = cve.get('descriptions', [])
+            desc_text = ""
+            if isinstance(descriptions, list):
+                for d in descriptions:
+                    if isinstance(d, dict) and d.get('lang') == 'en':
+                        desc_text = d.get('value', '') or ""
+                        break
+                if not desc_text and descriptions and isinstance(descriptions[0], dict):
+                    desc_text = descriptions[0].get('value', '') or ""
+            low_desc = desc_text.lower()
+            if name.lower() not in low_desc or version.lower() not in low_desc:
+                continue
+            metrics = cve.get('metrics', {})
+            severity = "Not provided"
+            if isinstance(metrics, dict):
+                for mk in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
+                    arr = metrics.get(mk, [])
+                    if isinstance(arr, list) and arr:
+                        md = arr[0].get('cvssData', {}) if isinstance(arr[0], dict) else {}
+                        bs = md.get('baseScore')
+                        bsev = md.get('baseSeverity')
+                        if bs is not None or bsev:
+                            severity = f"{bsev or 'UNKNOWN'} ({bs})" if bs is not None else str(bsev)
+                            break
+            if cve_id:
+                unique_cves.add(cve_id.upper())
+                comp_entry['cves'].append(cve_id.upper())
+            link = f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id else "https://nvd.nist.gov/"
+            matched_rows.append(
+                "<tr>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>"
+                f"<a href='{html.escape(link)}' target='_blank'>{html.escape(cve_id or 'UNKNOWN')}</a></td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{html.escape(desc_text[:180] or 'No description')}</td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{html.escape(cve_id or 'N/A')}</td>"
+                f"<td style='padding:6px;border:1px solid #dee2e6;'>{html.escape(str(severity))}</td>"
+                "</tr>"
+            )
+
+        if not matched_rows:
+            continue
+
+        nvd_vuln_lib_count += 1
+        total_nvd_cves += len(matched_rows)
+        comp_entry['vuln_count'] = len(matched_rows)
+        evidence_html = "<br>".join(html.escape(x) for x in evidence_list)
+
+        findings_html.append(
+            "<div style='margin:14px 0;padding:10px;border:1px solid #dee2e6;"
+            "border-left:4px solid #fd7e14;border-radius:4px;'>"
+            f"<div style='font-weight:700;margin-bottom:4px;'>"
+            f"native/binary / {html.escape(name)} @ {html.escape(version)}</div>"
+            f"<div style='font-size:11px;color:#666;margin-bottom:8px;'>"
+            f"<strong>Location:</strong> {evidence_html}</div>"
+            "<div style='overflow-x:auto;'>"
+            "<table style='width:100%;border-collapse:collapse;font-size:11px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>CVE ID</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Description</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Reference</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;text-align:left;'>Severity</th>"
+            "</tr></thead><tbody>"
+            + "".join(matched_rows[:12]) +
+            "</tbody></table></div>"
+            + (f"<div style='margin-top:6px;font-size:11px;color:#666;'>Showing first 12 of {len(matched_rows)} CVE matches.</div>"
+               if len(matched_rows) > 12 else "")
+            + "</div>"
+        )
+
+    # ── Build "All Components" table (shown regardless of CVEs found) ──────────
+    all_comp_rows: List[str] = []
+    for comp in sorted(all_components, key=lambda x: (-x['vuln_count'], x['name'].lower())):
+        if comp['vuln_count'] > 0:
+            cve_str = ', '.join(comp['cves'][:3])
+            if len(comp['cves']) > 3:
+                cve_str += f" +{len(comp['cves'])-3} more"
+            vuln_cell = (
+                f"<span style='background:#fee2e2;color:#991b1b;padding:2px 6px;"
+                f"border-radius:4px;font-weight:600;'>{comp['vuln_count']} vuln(s)</span>"
+                + (f"<br><span style='font-size:10px;color:#666;'>{html.escape(cve_str)}</span>" if cve_str else "")
+            )
+        else:
+            vuln_cell = "<span style='color:#6b7280;font-size:11px;'>None found</span>"
+        all_comp_rows.append(
+            "<tr>"
+            f"<td style='padding:6px;border:1px solid #dee2e6;font-weight:600;'>{html.escape(comp['name'])}</td>"
+            f"<td style='padding:6px;border:1px solid #dee2e6;'>{html.escape(comp['version'])}</td>"
+            f"<td style='padding:6px;border:1px solid #dee2e6;font-size:11px;color:#666;'>{html.escape(comp['ecosystem'])}</td>"
+            f"<td style='padding:6px;border:1px solid #dee2e6;font-size:11px;color:#555;word-break:break-all;'>"
+            f"{html.escape(comp['location'])}</td>"
+            f"<td style='padding:6px;border:1px solid #dee2e6;'>{vuln_cell}</td>"
+            "</tr>"
+        )
+
+    all_components_table = ""
+    if all_comp_rows:
+        all_components_table = (
+            f"<h4 style='margin:16px 0 8px;'>All Discovered Components ({len(all_components)})</h4>"
+            "<div style='overflow-x:auto;'>"
+            "<table style='width:100%;border-collapse:collapse;font-size:12px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px;border:1px solid #dee2e6;background:#f8fafc;'>Name</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;background:#f8fafc;'>Version</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;background:#f8fafc;'>Source</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;background:#f8fafc;'>Location</th>"
+            "<th style='padding:6px;border:1px solid #dee2e6;background:#f8fafc;'>Vulnerabilities</th>"
+            "</tr></thead><tbody>"
+            + "".join(all_comp_rows) +
+            "</tbody></table></div>"
+        )
+
+    # ── Final result ───────────────────────────────────────────────────────────
+    if vuln_dep_count == 0 and nvd_vuln_lib_count == 0:
+        status: Status = "PASS" if (query_errors == 0 and nvd_query_errors == 0) else "INFO"
+        summary_lines = [
+            f"Components discovered: {len(all_components)}",
+            f"Queried against OSV: {len(dep_list)}, NVD: {len(native_list)}",
+            "No known vulnerabilities matched for detected component versions",
+            f"Files scanned: {scanned_files}, manifests parsed: {parsed_manifest_files}, "
+            f"Mach-O binaries scanned: {binaries_scanned}",
+        ]
+        if query_errors:
+            summary_lines.append(f"OSV query errors: {query_errors}")
+        if nvd_query_errors:
+            summary_lines.append(f"NVD query errors: {nvd_query_errors}")
+        return TestResult(
+            name="Dependency Vulnerability Scan (iOS)",
+            status=status,
+            summary_lines=summary_lines,
+            mastg_ref_html=data_source_html,
+            raw_html=all_components_table,
+        )
+
+    summary_lines = [
+        f"Components discovered: {len(all_components)}",
+        f"Components with known vulnerabilities (OSV): {vuln_dep_count}",
+        f"Native libraries with CVE matches (NVD): {nvd_vuln_lib_count}",
+        f"Total vulnerability records: {total_vulns + total_nvd_cves}",
+        f"Unique CVE IDs found: {len(unique_cves)}",
+        f"Files scanned: {scanned_files}, manifests parsed: {parsed_manifest_files}, "
+        f"Mach-O binaries scanned: {binaries_scanned}",
+    ]
+    if query_errors:
+        summary_lines.append(f"OSV query errors: {query_errors}")
+    if nvd_query_errors:
+        summary_lines.append(f"NVD query errors: {nvd_query_errors}")
+
+    combined_html = (
+        all_components_table
+        + "<h4 style='margin:16px 0 8px;'>Vulnerable Components</h4>"
+        + "".join(findings_html)
+    )
+    return TestResult(
+        name="Dependency Vulnerability Scan (iOS)",
+        status="FAIL",
+        summary_lines=summary_lines,
+        mastg_ref_html=data_source_html,
+        raw_html=combined_html,
+    )
+
+
 def check_debug_symbols(main_bin: str) -> TestResult:
     cmd = ["/usr/bin/nm", "-a", main_bin]
     rc, out = run(cmd, timeout=60)
@@ -8854,6 +9479,9 @@ def build_tests() -> List[TestDef]:
                 "MASTG iOS: Network Security", lambda ctx: check_network_security(ctx["app_dir"], ctx["main_bin"], ctx["base"])),
         TestDef("THIRDPARTY", "Third-Party Library Analysis", "MASVS-CODE",
                 "MASTG iOS: Library Vulnerabilities", lambda ctx: check_third_party_libraries(ctx["app_dir"], ctx["base"])),
+        TestDef("DEPVULN", "Dependency Vulnerability Scan (CVE/OSV/NVD)", "MASVS-CODE",
+                "MASTG iOS: Dependencies with Known Vulnerabilities (MASTG-TEST-0273)",
+                lambda ctx: check_dependency_vulnerability_scan_ios(ctx["app_dir"], ctx["base"])),
         TestDef("DYNFRIDA", "Dynamic Introspection (Frida)", "MASVS-DYNAMIC",
                 "MASTG iOS: Dynamic Analysis", lambda ctx: dynamic_introspection_frida(ctx["bundle_id"])),
         TestDef("DEVICE-FILES", "Installed App File Analysis (SSH)", "MASVS-DEVICE",
