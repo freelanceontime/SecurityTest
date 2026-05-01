@@ -5944,7 +5944,10 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     parsed_manifest_files = 0
     binaries_scanned = 0
     query_errors = 0
+    osv_invalid_queries = 0
     nvd_query_errors = 0
+    osv_query_cache: Dict = {}
+    cocoapods_swifturl_cache: Dict = {}
 
     def _normalize_version(v: str) -> str:
         if not v:
@@ -5993,6 +5996,125 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         if key not in native_candidates:
             native_candidates[key] = {'name': name, 'version': version, 'evidence': set()}
         native_candidates[key]['evidence'].add(evidence)
+
+    def _extract_github_swifturl_name(raw_value: str) -> Optional[str]:
+        """
+        Convert a repository hint into OSV SwiftURL package naming:
+        github.com/<owner>/<repo>
+        """
+        if not raw_value:
+            return None
+        value = str(raw_value).strip().strip('"').strip("'")
+        if not value:
+            return None
+
+        m = re.search(r'github\.com[:/]+([^/\s]+)/([^/\s#?]+)', value, re.IGNORECASE)
+        if m:
+            owner = m.group(1).strip()
+            repo = m.group(2).strip()
+            if repo.lower().endswith('.git'):
+                repo = repo[:-4]
+            if owner and repo:
+                return f"github.com/{owner}/{repo}"
+
+        if re.match(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$', value):
+            owner, repo = value.split('/', 1)
+            if repo.lower().endswith('.git'):
+                repo = repo[:-4]
+            if owner and repo:
+                return f"github.com/{owner}/{repo}"
+
+        return None
+
+    def _lookup_cocoapods_swifturl_name(dep_name: str, version: str) -> Optional[str]:
+        key = (dep_name, version)
+        if key in cocoapods_swifturl_cache:
+            return cocoapods_swifturl_cache[key]
+
+        resolved: Optional[str] = None
+        pod = urllib.parse.quote(str(dep_name).strip(), safe='')
+        ver = urllib.parse.quote(str(version).strip(), safe='')
+        spec_url = f"https://trunk.cocoapods.org/api/v1/pods/{pod}/specs/{ver}"
+
+        try:
+            with urllib.request.urlopen(spec_url, timeout=15) as resp:
+                body = resp.read().decode('utf-8', errors='ignore')
+            pdata = json.loads(body) if body else {}
+
+            source = pdata.get('source')
+            if isinstance(source, dict):
+                git_url = source.get('git') or source.get('http')
+                resolved = _extract_github_swifturl_name(git_url or "")
+            if not resolved:
+                resolved = _extract_github_swifturl_name(pdata.get('homepage') or "")
+        except Exception:
+            resolved = None
+
+        cocoapods_swifturl_cache[key] = resolved
+        return resolved
+
+    def _query_osv(package_name: str, version: str, ecosystem: Optional[str] = None) -> Tuple[List[Dict], Optional[str]]:
+        """
+        Query OSV with optional ecosystem. Returns (vulns, error_kind).
+        error_kind:
+          - None: success
+          - "invalid": unsupported coordinate format (HTTP 400/404)
+          - "error": transport/rate-limit/server issues
+        """
+        nonlocal query_errors, osv_invalid_queries
+
+        cache_key = (ecosystem or "", package_name, version)
+        if cache_key in osv_query_cache:
+            cached_vulns, cached_err = osv_query_cache[cache_key]
+            return list(cached_vulns), cached_err
+
+        payload: Dict = {"package": {"name": package_name}, "version": version}
+        if ecosystem:
+            payload["package"]["ecosystem"] = ecosystem
+
+        dep_vulns: List[Dict] = []
+        page_token = None
+        page_guard = 0
+
+        while page_guard < 5:
+            page_guard += 1
+            if page_token:
+                payload["page_token"] = page_token
+            else:
+                payload.pop("page_token", None)
+
+            try:
+                req = urllib.request.Request(
+                    osv_api_url,
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                data_resp = json.loads(body) if body else {}
+            except urllib.error.HTTPError as e:
+                if e.code in (400, 404):
+                    osv_invalid_queries += 1
+                    osv_query_cache[cache_key] = ([], "invalid")
+                    return [], "invalid"
+                query_errors += 1
+                osv_query_cache[cache_key] = ([], "error")
+                return [], "error"
+            except Exception:
+                query_errors += 1
+                osv_query_cache[cache_key] = ([], "error")
+                return [], "error"
+
+            vulns = data_resp.get('vulns', [])
+            if isinstance(vulns, list):
+                dep_vulns.extend(vulns)
+            page_token = data_resp.get('next_page_token')
+            if not page_token:
+                break
+
+        osv_query_cache[cache_key] = (list(dep_vulns), None)
+        return dep_vulns, None
 
     def _read_plist_safe(path: str) -> Optional[Dict]:
         try:
@@ -6121,8 +6243,12 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
                     r'(?:github|git|binary)\s+"([^"]+)"\s+"v?([0-9][^"]*)"'
                 )
                 for m in cart_rx.finditer(content):
-                    repo_name = m.group(1).split('/')[-1]
+                    repo_spec = m.group(1).strip()
+                    repo_name = repo_spec.split('/')[-1]
                     _add_dep('CocoaPods', repo_name, m.group(2), 'Cartfile.resolved')
+                    swifturl_name = _extract_github_swifturl_name(repo_spec)
+                    if swifturl_name:
+                        _add_dep('SwiftURL', swifturl_name, m.group(2), 'Cartfile.resolved')
             except Exception:
                 pass
             break
@@ -6146,6 +6272,10 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
                 if name and version:
                     rel_pkg = os.path.relpath(pkg_path, base).replace('\\', '/')
                     _add_dep('SwiftPM', name, version, rel_pkg)
+                    repo_hint = pin.get('location') or pin.get('repositoryURL') or pin.get('url') or ''
+                    swifturl_name = _extract_github_swifturl_name(str(repo_hint))
+                    if swifturl_name:
+                        _add_dep('SwiftURL', swifturl_name, version, rel_pkg)
         except Exception:
             pass
 
@@ -6156,6 +6286,9 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         ('openssl',   re.compile(r'\bOpenSSL\s+(\d+\.\d+\.\d+[a-z]?)\b',         re.IGNORECASE)),
         ('zlib',      re.compile(r'\bzlib(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
         ('libpng',    re.compile(r'\blibpng(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
+        ('libjpeg-turbo', re.compile(r'\blibjpeg[-\s]?turbo(?:\s+version)?\s*[:=]?\s*v?(\d+\.\d+(?:\.\d+)*)\b', re.IGNORECASE)),
+        ('libjpeg',   re.compile(r'\blibjpeg(?:\s+version)?\s*[:=]?\s*v?(\d+\.\d+(?:\.\d+)*)\b', re.IGNORECASE)),
+        ('libwebp',   re.compile(r'\blibwebp(?:\s+version)?\s*[:=]?\s*v?(\d+\.\d+(?:\.\d+)*)\b', re.IGNORECASE)),
         ('sqlite',    re.compile(r'\bSQLite(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
         ('curl',      re.compile(r'\b(?:libcurl|curl)/(\d+\.\d+(?:\.\d+)?)\b',    re.IGNORECASE)),
         ('libxml2',   re.compile(r'\blibxml2(?:\s+|/)(\d+\.\d+(?:\.\d+)?)\b',     re.IGNORECASE)),
@@ -6207,38 +6340,54 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     max_details = 12
 
     for dep in dep_list:
-        payload: Dict = {
-            "package": {"ecosystem": dep['ecosystem'], "name": dep['name']},
-            "version": dep['version'],
-        }
         dep_vulns: List[Dict] = []
-        page_token = None
-        page_guard = 0
-        while page_guard < 5:
-            page_guard += 1
-            if page_token:
-                payload["page_token"] = page_token
-            else:
-                payload.pop("page_token", None)
-            try:
-                req = urllib.request.Request(
-                    osv_api_url,
-                    data=json.dumps(payload).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'},
-                    method='POST',
-                )
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    body = resp.read().decode('utf-8', errors='ignore')
-                data_resp = json.loads(body) if body else {}
-            except Exception:
-                query_errors += 1
-                break
-            vulns = data_resp.get('vulns', [])
-            if isinstance(vulns, list):
-                dep_vulns.extend(vulns)
-            page_token = data_resp.get('next_page_token')
-            if not page_token:
-                break
+
+        # Try a few coordinate formats because iOS package ecosystems are represented
+        # inconsistently across package managers and OSV databases.
+        query_candidates: List[Tuple[Optional[str], str]] = [
+            (dep['ecosystem'], dep['name'])
+        ]
+        if dep['ecosystem'] in ('CocoaPods', 'SwiftPM', 'SwiftURL'):
+            query_candidates.append((None, dep['name']))  # name-only fallback
+
+        if dep['ecosystem'] == 'CocoaPods':
+            low_name = dep['name'].lower()
+            if low_name.startswith('org.cocoapods.') and '.' in dep['name']:
+                short_name = dep['name'].split('.')[-1]
+                if short_name and short_name != dep['name']:
+                    query_candidates.append((None, short_name))
+
+        seen_coords: Set[Tuple[str, str]] = set()
+        for ecosys, pkg_name in query_candidates:
+            coord_key = (ecosys or "", pkg_name)
+            if coord_key in seen_coords:
+                continue
+            seen_coords.add(coord_key)
+            found_vulns, _ = _query_osv(pkg_name, dep['version'], ecosys)
+            if found_vulns:
+                dep_vulns.extend(found_vulns)
+
+        # CocoaPods fallback: resolve pod metadata to its upstream GitHub repo and
+        # query using OSV SwiftURL naming (github.com/<owner>/<repo>).
+        if not dep_vulns and dep['ecosystem'] == 'CocoaPods':
+            swifturl_name = _lookup_cocoapods_swifturl_name(dep['name'], dep['version'])
+            if swifturl_name:
+                found_vulns, _ = _query_osv(swifturl_name, dep['version'], 'SwiftURL')
+                if found_vulns:
+                    dep_vulns.extend(found_vulns)
+
+        # De-duplicate vulns merged from fallback queries.
+        if dep_vulns:
+            merged: Dict[str, Dict] = {}
+            for v in dep_vulns:
+                vid = str(v.get('id') or "")
+                aliases = v.get('aliases') if isinstance(v.get('aliases'), list) else []
+                key = vid or "|".join(sorted(str(a) for a in aliases if isinstance(a, str)))
+                if not key:
+                    key = str(v.get('summary') or v.get('details') or id(v))
+                if key not in merged:
+                    merged[key] = v
+            dep_vulns = list(merged.values())
 
         cve_ids_for_dep: List[str] = []
         for v in dep_vulns:
@@ -6318,6 +6467,148 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     nvd_vuln_lib_count = 0
     total_nvd_cves = 0
     nvd_cache: Dict = {}
+    native_nvd_cpe_templates: Dict[str, str] = {
+        'sqlite': 'cpe:2.3:a:sqlite:sqlite:{version}:*:*:*:*:*:*:*',
+        'openssl': 'cpe:2.3:a:openssl:openssl:{version}:*:*:*:*:*:*:*',
+        'zlib': 'cpe:2.3:a:zlib:zlib:{version}:*:*:*:*:*:*:*',
+        'libpng': 'cpe:2.3:a:libpng:libpng:{version}:*:*:*:*:*:*:*',
+        'curl': 'cpe:2.3:a:haxx:curl:{version}:*:*:*:*:*:*:*',
+        'libxml2': 'cpe:2.3:a:xmlsoft:libxml2:{version}:*:*:*:*:*:*:*',
+        'expat': 'cpe:2.3:a:libexpat:expat:{version}:*:*:*:*:*:*:*',
+        'nghttp2': 'cpe:2.3:a:nghttp2:nghttp2:{version}:*:*:*:*:*:*:*',
+        'libwebp': 'cpe:2.3:a:webmproject:libwebp:{version}:*:*:*:*:*:*:*',
+        'libjpeg-turbo': 'cpe:2.3:a:libjpeg-turbo:libjpeg-turbo:{version}:*:*:*:*:*:*:*',
+    }
+
+    def _version_tokens(v: str) -> List[Tuple[int, object]]:
+        raw = _normalize_version(v)
+        if not raw:
+            return []
+        parts = re.findall(r'\d+|[A-Za-z]+', raw)
+        out: List[Tuple[int, object]] = []
+        for p in parts:
+            if p.isdigit():
+                out.append((0, int(p)))
+            else:
+                out.append((1, p.lower()))
+        return out
+
+    def _cmp_versions(a: str, b: str) -> int:
+        at = _version_tokens(a)
+        bt = _version_tokens(b)
+        max_len = max(len(at), len(bt))
+        for i in range(max_len):
+            av = at[i] if i < len(at) else (0, 0)
+            bv = bt[i] if i < len(bt) else (0, 0)
+            if av == bv:
+                continue
+            if av[0] != bv[0]:
+                return 1 if av[0] > bv[0] else -1
+            return 1 if av[1] > bv[1] else -1
+        return 0
+
+    def _component_aliases(name: str) -> Set[str]:
+        low = name.lower().strip()
+        aliases = {low}
+        if low.startswith('lib') and len(low) > 3:
+            aliases.add(low[3:])
+        if low == 'sqlite':
+            aliases.add('sqlite3')
+        if low == 'curl':
+            aliases.add('libcurl')
+        if low == 'libjpeg-turbo':
+            aliases.update({'libjpeg', 'jpeg'})
+        if low == 'libjpeg':
+            aliases.add('jpeg')
+        return aliases
+
+    def _name_matches_text(text: str, name: str) -> bool:
+        low_text = text.lower()
+        return any(a and a in low_text for a in _component_aliases(name))
+
+    def _iter_cpe_matches(node) -> List[Dict]:
+        found: List[Dict] = []
+        stack = [node]
+        while stack:
+            cur = stack.pop()
+            if isinstance(cur, dict):
+                if 'criteria' in cur and isinstance(cur.get('criteria'), str):
+                    found.append(cur)
+                for v in cur.values():
+                    if isinstance(v, (dict, list)):
+                        stack.append(v)
+            elif isinstance(cur, list):
+                for item in cur:
+                    if isinstance(item, (dict, list)):
+                        stack.append(item)
+        return found
+
+    def _criteria_mentions_name(criteria: str, name: str) -> bool:
+        return _name_matches_text(criteria or "", name)
+
+    def _version_matches_cpe(match: Dict, version: str) -> bool:
+        if isinstance(match.get('vulnerable'), bool) and not match.get('vulnerable'):
+            return False
+
+        criteria = str(match.get('criteria') or "")
+        exact_version = ""
+        parts = criteria.split(':')
+        if len(parts) >= 6:
+            exact_version = parts[5].strip()
+
+        if exact_version and exact_version not in ('*', '-'):
+            return _cmp_versions(version, exact_version) == 0
+
+        start_inc = match.get('versionStartIncluding')
+        start_exc = match.get('versionStartExcluding')
+        end_inc = match.get('versionEndIncluding')
+        end_exc = match.get('versionEndExcluding')
+
+        if start_inc and _cmp_versions(version, str(start_inc)) < 0:
+            return False
+        if start_exc and _cmp_versions(version, str(start_exc)) <= 0:
+            return False
+        if end_inc and _cmp_versions(version, str(end_inc)) > 0:
+            return False
+        if end_exc and _cmp_versions(version, str(end_exc)) >= 0:
+            return False
+
+        return bool(start_inc or start_exc or end_inc or end_exc)
+
+    def _fetch_nvd_vulnerabilities(params: Dict[str, str], cache_key: str) -> Optional[List[Dict]]:
+        nonlocal nvd_query_errors
+        if cache_key in nvd_cache:
+            cached = nvd_cache[cache_key]
+            return cached.get('vulnerabilities', []) if isinstance(cached, dict) else []
+
+        try:
+            results: List[Dict] = []
+            start_index = 0
+            max_total = 150
+            while True:
+                req_params = dict(params)
+                req_params['resultsPerPage'] = req_params.get('resultsPerPage') or '50'
+                req_params['startIndex'] = str(start_index)
+                req_url = f"{nvd_url_base}?{urllib.parse.urlencode(req_params)}"
+                with urllib.request.urlopen(req_url, timeout=20) as resp:
+                    body = resp.read().decode('utf-8', errors='ignore')
+                nvd_data = json.loads(body) if body else {}
+                page_vulns = nvd_data.get('vulnerabilities', [])
+                if isinstance(page_vulns, list):
+                    results.extend(page_vulns)
+                total_results = int(nvd_data.get('totalResults') or 0)
+                per_page = int(nvd_data.get('resultsPerPage') or len(page_vulns) or 0)
+                if not page_vulns:
+                    break
+                start_index += per_page
+                if start_index >= total_results or start_index >= max_total:
+                    break
+            data_obj = {'vulnerabilities': results}
+            nvd_cache[cache_key] = data_obj
+            return results
+        except Exception:
+            nvd_query_errors += 1
+            return None
 
     for cand in native_list:
         name = cand['name']
@@ -6334,29 +6625,41 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         }
         all_components.append(comp_entry)
 
-        keyword = f"{name} {version}"
-        if keyword in nvd_cache:
-            nvd_data = nvd_cache[keyword]
-        else:
-            params = {
-                'keywordSearch': keyword,
-                'keywordExactMatch': '',
-                'noRejected': '',
-                'resultsPerPage': '25',
-            }
-            req_url = f"{nvd_url_base}?{urllib.parse.urlencode(params)}"
-            try:
-                with urllib.request.urlopen(req_url, timeout=20) as resp:
-                    body = resp.read().decode('utf-8', errors='ignore')
-                nvd_data = json.loads(body) if body else {}
-                nvd_cache[keyword] = nvd_data
-            except Exception:
-                nvd_query_errors += 1
-                continue
+        query_sets: List[Tuple[str, Dict[str, str]]] = []
+        cpe_tmpl = native_nvd_cpe_templates.get(name)
+        if cpe_tmpl:
+            query_sets.append((
+                f"cpe:{name}:{version}",
+                {'cpeName': cpe_tmpl.format(version=version), 'noRejected': ''}
+            ))
+        query_sets.append((
+            f"kw_nv:{name}:{version}",
+            {'keywordSearch': f"{name} {version}", 'keywordExactMatch': '', 'noRejected': ''}
+        ))
+        query_sets.append((
+            f"kw_n:{name}",
+            {'keywordSearch': name, 'keywordExactMatch': '', 'noRejected': ''}
+        ))
 
-        vulns_arr = nvd_data.get('vulnerabilities', [])
-        if not isinstance(vulns_arr, list) or not vulns_arr:
+        vulns_arr: List[Dict] = []
+        for cache_key, params in query_sets:
+            page_vulns = _fetch_nvd_vulnerabilities(params, cache_key)
+            if page_vulns is None:
+                continue
+            if page_vulns:
+                vulns_arr.extend(page_vulns)
+
+        if not vulns_arr:
             continue
+
+        # De-duplicate NVD rows across cpeName/keyword query paths.
+        dedup_map: Dict[str, Dict] = {}
+        for item in vulns_arr:
+            cve = item.get('cve', {}) if isinstance(item, dict) else {}
+            cid = str(cve.get('id') or "")
+            if cid and cid not in dedup_map:
+                dedup_map[cid] = item
+        vulns_arr = list(dedup_map.values())
 
         matched_rows: List[str] = []
         for item in vulns_arr:
@@ -6371,8 +6674,19 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
                         break
                 if not desc_text and descriptions and isinstance(descriptions[0], dict):
                     desc_text = descriptions[0].get('value', '') or ""
-            low_desc = desc_text.lower()
-            if name.lower() not in low_desc or version.lower() not in low_desc:
+
+            cpe_matches = _iter_cpe_matches(cve.get('configurations', []))
+            name_match_desc = _name_matches_text(desc_text, name)
+            name_match_cpe = any(_criteria_mentions_name(str(m.get('criteria', '')), name) for m in cpe_matches)
+            if not name_match_desc and not name_match_cpe:
+                continue
+
+            version_match_desc = version.lower() in (desc_text or "").lower()
+            version_match_cpe = any(
+                _criteria_mentions_name(str(m.get('criteria', '')), name) and _version_matches_cpe(m, version)
+                for m in cpe_matches
+            )
+            if not version_match_desc and not version_match_cpe:
                 continue
             metrics = cve.get('metrics', {})
             severity = "Not provided"
@@ -6484,6 +6798,8 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         ]
         if query_errors:
             summary_lines.append(f"OSV query errors: {query_errors}")
+        if osv_invalid_queries:
+            summary_lines.append(f"OSV unsupported package coordinates: {osv_invalid_queries}")
         if nvd_query_errors:
             summary_lines.append(f"NVD query errors: {nvd_query_errors}")
         return TestResult(
@@ -6505,6 +6821,8 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     ]
     if query_errors:
         summary_lines.append(f"OSV query errors: {query_errors}")
+    if osv_invalid_queries:
+        summary_lines.append(f"OSV unsupported package coordinates: {osv_invalid_queries}")
     if nvd_query_errors:
         summary_lines.append(f"NVD query errors: {nvd_query_errors}")
 
