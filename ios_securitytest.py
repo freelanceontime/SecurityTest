@@ -5812,6 +5812,9 @@ def check_third_party_libraries(app_dir: str, base: str) -> TestResult:
     else:
         summary_lines.append(f"Package managers found: {', '.join(package_managers)}")
         summary_lines.append(f"Total dependencies detected: {len(dependencies)}")
+        if len(dependencies) == 0:
+            summary_lines.append("Dependency parsing yielded zero entries; vulnerability conclusion is inconclusive")
+            status = "INFO"
 
         if vulnerable_deps:
             summary_lines.append(f"⚠ {len(vulnerable_deps)} potentially vulnerable dependencies")
@@ -6334,6 +6337,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
 
     findings_html: List[str] = []
     all_components: List[Dict] = []
+    vuln_component_summaries: List[Dict] = []
     vuln_dep_count = 0
     total_vulns = 0
     unique_cves: Set[str] = set()
@@ -6411,6 +6415,22 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
 
         vuln_dep_count += 1
         total_vulns += len(dep_vulns)
+        vuln_ids_for_dep: List[str] = []
+        for v in dep_vulns:
+            vid = str(v.get('id') or "").strip()
+            if vid:
+                vuln_ids_for_dep.append(vid)
+            aliases = v.get('aliases', []) if isinstance(v.get('aliases', []), list) else []
+            for a in aliases:
+                if isinstance(a, str) and (a.upper().startswith('CVE-') or a.upper().startswith('GHSA-')):
+                    vuln_ids_for_dep.append(a.upper())
+        vuln_component_summaries.append({
+            'ecosystem': dep['ecosystem'],
+            'name': dep['name'],
+            'version': dep['version'],
+            'ids': sorted(set(vuln_ids_for_dep)),
+            'vuln_count': len(dep_vulns),
+        })
 
         rows: List[str] = []
         for v in dep_vulns[:max_details]:
@@ -6720,6 +6740,13 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         nvd_vuln_lib_count += 1
         total_nvd_cves += len(matched_rows)
         comp_entry['vuln_count'] = len(matched_rows)
+        vuln_component_summaries.append({
+            'ecosystem': 'native/binary',
+            'name': name,
+            'version': version,
+            'ids': sorted(set(comp_entry.get('cves', []))),
+            'vuln_count': len(matched_rows),
+        })
         evidence_html = "<br>".join(html.escape(x) for x in evidence_list)
 
         findings_html.append(
@@ -6819,6 +6846,23 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
         f"Files scanned: {scanned_files}, manifests parsed: {parsed_manifest_files}, "
         f"Mach-O binaries scanned: {binaries_scanned}",
     ]
+    if vuln_component_summaries:
+        max_summary_components = 8
+        ranked = sorted(
+            vuln_component_summaries,
+            key=lambda x: (-int(x.get('vuln_count', 0)), str(x.get('name', '')).lower())
+        )
+        summary_lines.append("Vulnerable component versions detected:")
+        for comp in ranked[:max_summary_components]:
+            ids = comp.get('ids', []) or []
+            ids_txt = ", ".join(ids[:3]) if ids else "ID not listed"
+            if len(ids) > 3:
+                ids_txt += f" +{len(ids)-3} more"
+            summary_lines.append(
+                f"- {comp.get('ecosystem')} / {comp.get('name')} {comp.get('version')} ({ids_txt})"
+            )
+        if len(ranked) > max_summary_components:
+            summary_lines.append(f"- ... and {len(ranked) - max_summary_components} more vulnerable components")
     if query_errors:
         summary_lines.append(f"OSV query errors: {query_errors}")
     if osv_invalid_queries:
