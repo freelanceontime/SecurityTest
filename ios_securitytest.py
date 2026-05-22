@@ -39,6 +39,7 @@ This script accelerates triage; MASVS compliance still needs human validation.
 from __future__ import annotations
 
 import argparse
+import binascii
 import hashlib
 import html
 import urllib.request
@@ -9115,18 +9116,71 @@ def check_device_crash_privacy(device_ip: str, bundle_id: str, base: str, passwo
     summary_lines = [f"Found {len(crash_files)} crash-report artifact file(s) in app-owned paths"]
     status: Status = "INFO"
 
-    sensitive_terms = "email|password|bearer|token|auth|gender|age|drink|postcode|first_name|last_name"
+    sensitive_terms = (
+        "email|password|bearer|token|auth|gender|age|drink|postcode|first_name|last_name|"
+        "userid|user_id|user\\\"|bmi|weight|height|waist|calorie|target|ethnic|goals?"
+    )
+    sensitive_re = re.compile(sensitive_terms, re.IGNORECASE)
+
+    def decode_crashlytics_hex_logs(raw_text: str) -> List[str]:
+        """
+        Firebase/Crashlytics can store Analytics breadcrumbs as JSON lines whose
+        log.msg value is hex-encoded. Decode those locally so privacy checks do
+        not miss user data hidden behind a simple encoding layer.
+        """
+        decoded: List[str] = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            msg = obj.get("log", {}).get("msg") if isinstance(obj, dict) else None
+            if not isinstance(msg, str) or not re.fullmatch(r"[0-9a-fA-F]+", msg):
+                continue
+            # Observed Crashlytics Analytics breadcrumbs are prefixed with "$A:".
+            if msg.lower().startswith("2441243a"):
+                msg = msg[8:]
+            try:
+                text = binascii.unhexlify(msg).decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            if text:
+                decoded.append(text)
+        return decoded
+
     hit_count = 0
     for path in crash_files:
         grep_cmd = f"grep -a -n -i '{sensitive_terms}' '{path}' 2>/dev/null | head -20"
         rc_grep, grep_out = ssh_run(device_ip, grep_cmd, password=password, timeout=10, manual=manual)
         basename = os.path.basename(path)
+        decoded_hits: List[str] = []
+        if basename.endswith(".clsrecord"):
+            read_cmd = f"head -c 200000 '{path}' 2>/dev/null"
+            rc_read, raw_text = ssh_run(device_ip, read_cmd, password=password, timeout=10, manual=manual)
+            if rc_read == 0 and raw_text.strip():
+                decoded_logs = decode_crashlytics_hex_logs(raw_text)
+                decoded_hits = [line for line in decoded_logs if sensitive_re.search(line)]
+
         if rc_grep == 0 and grep_out.strip():
             hit_count += 1
             status = "FAIL"
             findings.append(FindingBlock(
                 title=f"Sensitive pattern hit: {basename}",
                 evidence=[f"Path: {path}", "Matched lines:"] + [f"• {line[:240]}" for line in grep_out.strip().splitlines()[:10]],
+                open_by_default=True
+            ))
+        elif decoded_hits:
+            hit_count += 1
+            status = "FAIL"
+            findings.append(FindingBlock(
+                title=f"Sensitive decoded Crashlytics log hit: {basename}",
+                evidence=[
+                    f"Path: {path}",
+                    "Decoded hex-encoded Crashlytics/Firebase Analytics log entries matched sensitive terms:",
+                ] + [f"• {line[:500]}" for line in decoded_hits[:12]],
                 open_by_default=True
             ))
         else:
@@ -9143,6 +9197,7 @@ def check_device_crash_privacy(device_ip: str, bundle_id: str, base: str, passwo
 
     if hit_count:
         summary_lines.append(f"Sensitive patterns matched in {hit_count} crash artifact file(s)")
+        summary_lines.append("Includes decoded hex-encoded Crashlytics/Firebase Analytics breadcrumb records where present")
     else:
         status = "PASS"
         summary_lines.append("No searched sensitive patterns matched the inspected crash artifacts")
