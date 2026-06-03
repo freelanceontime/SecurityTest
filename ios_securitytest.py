@@ -59,67 +59,89 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Literal, Optional, Set, Tuple
 
-APPLE_BANNER = r"""
-          .:'
-      __ :'__
-   .'`  `-'  ``'.
-  :             :
-  :             :
-   :           :
-    `.__.-.__.'
+# ── Console output helpers ─────────────────────────────────────────────────────
+_ANSI = {
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m",
+    "cyan": "\033[36m", "blue": "\033[34m", "white": "\033[37m",
+}
 
-    AppSec 1.1.2 – Automated iOS App Security Test Script
+def _c(code: str, text: str) -> str:
+    return f"{_ANSI.get(code,'')}{text}{_ANSI['reset']}"
 
-    Options:
-      -f, --file           IPA file to analyze
-      -o, --out            Output directory (default: ./<ipa_name>_iosscan)
-      --keep               Keep extracted IPA directory after analysis
-      -d, --dynamic        Include safe dynamic introspection tests (requires Frida)
-      -s, --select         Interactive test selection mode
-      -ssh, --ssh          IP address of jailbroken iOS device for runtime analysis
-      --ssh-password       SSH password for device (default: alpine)
-      --ssh-manual         Disable automated SSH (prompt for password each time)
+def _ok(msg: str):   print(f"  {_c('green','✓')} {msg}")
+def _info(msg: str): print(f"  {_c('cyan','·')} {msg}")
+def _warn(msg: str): print(f"  {_c('yellow','⚠')} {msg}")
+def _err(msg: str):  print(f"  {_c('red','✗')} {msg}")
 
-    Notes:
-      This script is designed for macOS environments with Xcode Command Line Tools.
-      For --dynamic mode, ensure Frida is installed and the target app is running.
-      For --ssh mode, the device must be jailbroken with SSH enabled (port 22).
+def _section(title: str, width: int = 62):
+    bar = _c("dim", "─" * width)
+    print(f"\n{bar}\n  {_c('bold', title)}\n{bar}")
 
-      Verify device connectivity:
-        frida-ps -U              # List USB-connected iOS devices
-        ssh root@<device-ip>     # Test SSH access (default password: alpine)
+def _header(app: str, bundle: str, version: str, ipa: str, size_mb: float, out: str):
+    w = 64
+    top    = "┌" + "─" * (w - 2) + "┐"
+    mid    = "│" + " " * (w - 2) + "│"
+    bottom = "└" + "─" * (w - 2) + "┘"
+    title  = f"  AppSec {__version__}  —  iOS MASVS Security Scanner"
+    print(f"\n{_c('bold', top)}")
+    print(_c("bold", f"│{title:<{w-2}}│"))
+    print(_c("bold", mid))
+    print(_c("bold", f"│  App     : {app:<{w-14}}│"))
+    print(_c("bold", f"│  Bundle  : {bundle:<{w-14}}│"))
+    print(_c("bold", f"│  Version : {version:<{w-14}}│"))
+    print(_c("bold", f"│  IPA     : {size_mb:.1f} MB{'':<{w-20}}│"))
+    print(_c("bold", f"│  Output  : {out:<{w-14}}│"))
+    print(_c("bold", mid))
+    print(_c("bold", bottom))
+    print()
 
-    Usage:
-      python3 ios_securitytest.py -f /path/to/App.ipa
-      python3 ios_securitytest.py -f /path/to/App.ipa -s
-      python3 ios_securitytest.py -f /path/to/App.ipa -d
-      python3 ios_securitytest.py -f /path/to/App.ipa -ssh 192.168.1.100
-      python3 ios_securitytest.py -f /path/to/App.ipa -ssh 192.168.1.100 -d
-      python3 ios_securitytest.py --help
+def _progress(idx: int, total: int, name: str):
+    pct = int((idx / total) * 20)
+    bar = _c("green", "█" * pct) + _c("dim", "░" * (20 - pct))
+    label = _c("dim", f"[{idx:>{len(str(total))}}/{total}]")
+    print(f"  {label} {bar}  {name}", end="\r", flush=True)
 
-    Requirements:  These must be on your $PATH or in /usr/bin
-      Required:  [plutil], [otool], [nm], [codesign], [strings]
-      Optional:  [lipo], [swift-demangle], [frida], [objection], [sshpass/pexpect], [checksec.rs]
+def _summary_table(grouped: Dict, elapsed: str):
+    _section("Scan Complete")
+    counts = {"FAIL": 0, "WARN": 0, "PASS": 0, "INFO": 0}
+    rows = []
+    for group_key, items in grouped.items():
+        if not items:
+            continue
+        f = sum(1 for r in items if r.status == "FAIL")
+        w = sum(1 for r in items if r.status == "WARN")
+        p = sum(1 for r in items if r.status == "PASS")
+        i = sum(1 for r in items if r.status == "INFO")
+        counts["FAIL"] += f
+        counts["WARN"] += w
+        counts["PASS"] += p
+        counts["INFO"] += i
+        rows.append((group_key, f, w, p, i))
 
-    macOS Installation:
-      # Install Xcode Command Line Tools (includes required tools)
-      xcode-select --install
+    col_w = [20, 6, 6, 6, 6]
+    hdr = (f"  {'Category':<{col_w[0]}}"
+           f"{_c('red','FAIL'):>{col_w[1]+9}}"
+           f"{_c('yellow','WARN'):>{col_w[2]+9}}"
+           f"{_c('green','PASS'):>{col_w[3]+9}}"
+           f"{'INFO':>{col_w[4]}}")
+    divider = "  " + _c("dim", "─" * 46)
+    print(hdr)
+    print(divider)
+    for group_key, f, w, p, i in rows:
+        fc = _c("red", str(f)) if f else _c("dim", "0")
+        wc = _c("yellow", str(w)) if w else _c("dim", "0")
+        pc = _c("green", str(p)) if p else _c("dim", "0")
+        print(f"  {group_key:<{col_w[0]}}  {fc:>{col_w[1]+9}}  {wc:>{col_w[2]+9}}  {pc:>{col_w[3]+9}}  {i:>{col_w[4]}}")
+    print(divider)
+    total_f = _c("red", str(counts["FAIL"])) if counts["FAIL"] else _c("dim", "0")
+    total_w = _c("yellow", str(counts["WARN"])) if counts["WARN"] else _c("dim", "0")
+    total_p = _c("green", str(counts["PASS"])) if counts["PASS"] else _c("dim", "0")
+    print(f"  {'TOTAL':<{col_w[0]}}  {total_f:>{col_w[1]+9}}  {total_w:>{col_w[2]+9}}  {total_p:>{col_w[3]+9}}  {counts['INFO']:>{col_w[4]}}")
+    print(f"\n  {_c('dim', f'Elapsed: {elapsed}')}\n")
+# ──────────────────────────────────────────────────────────────────────────────
 
-      # Install optional tools
-      brew install hudochenkov/sshpass/sshpass
-      pip3 install frida-tools objection pexpect
-
-      # Install checksec.rs (for binary security feature analysis)
-      # First, install Rust if not already installed:
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-      # Then clone and build checksec.rs:
-      git clone https://github.com/etke/checksec.rs.git
-      cd checksec.rs
-      cargo build --release
-      # The script will automatically detect checksec.rs at ../../checksec.rs/target/release/checksec
-      # (relative to the script location) or you can add it to your PATH
-
-"""
+APPLE_BANNER = ""  # retained for backward compat — header now via _header()
 
 RUN_INTRO = []
 
@@ -135,9 +157,11 @@ __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest
 
 def check_for_updates():
     """Check if a newer version exists on GitHub and offer to update."""
+    # Suppress update check if running non-interactively or update declined before
+    if not sys.stdin.isatty():
+        return
     try:
-        print(f"[*] Current version: {__version__}")
-        print(f"[*] Checking for updates from GitHub...")
+        print(f"  Checking for updates  (current: v{__version__})", end="", flush=True)
 
         script_path = os.path.abspath(__file__)
         with open(script_path, 'rb') as f:
@@ -147,66 +171,51 @@ def check_for_updates():
             with urllib.request.urlopen(__script_url__, timeout=5) as response:
                 remote_content = response.read()
                 remote_hash = hashlib.sha256(remote_content).hexdigest()
-        except urllib.error.URLError as e:
-            print(f"[!] Could not check for updates: {e}")
-            print("[*] Continuing with current version...")
+        except urllib.error.URLError:
+            print(f"\r  {_c('dim', 'Update check skipped (no network)')}")
             return
-        except Exception as e:
-            print(f"[!] Update check failed: {e}")
-            print("[*] Continuing with current version...")
+        except Exception:
+            print(f"\r  {_c('dim', 'Update check skipped')}")
             return
 
         if local_hash == remote_hash:
-            print("[+] You have the latest version!")
-            print()
+            print(f"\r  {_c('green','✓')} Up to date (v{__version__})                    ")
             return
 
-        print("\n" + "="*70)
-        print("[!] A newer version is available on GitHub!")
-        print("="*70)
-        print(f"Local hash:  {local_hash[:16]}...")
-        print(f"Remote hash: {remote_hash[:16]}...")
-        print(f"Source: {__script_url__}")
+        print(f"\r  {_c('yellow','⚠')} Update available!")
+        print(f"  {_c('dim', __script_url__)}")
 
         try:
-            response = input("\n[?] Do you want to update now? [y/N]: ").strip().lower()
+            response = input("  Update now? [y/N]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
-            print("\n[*] Update cancelled. Continuing with current version...")
             return
 
         if response not in ['y', 'yes']:
-            print("[*] Update declined. Continuing with current version...")
-            print()
             return
 
-        print("\n[*] Downloading update...")
+        _info("Downloading update...")
         backup_path = script_path + ".backup"
         shutil.copy2(script_path, backup_path)
 
         try:
             with open(script_path, 'wb') as f:
                 f.write(remote_content)
-            print("[+] Update installed successfully!")
+            _ok("Update installed — please restart the script.")
             try:
                 os.remove(backup_path)
             except:
                 pass
-            print("\n[*] Please restart the script to use the new version.")
-            print("="*70)
             sys.exit(0)
         except Exception as e:
-            print(f"[!] Update failed: {e}")
-            print("[*] Restoring backup...")
+            _err(f"Update failed: {e} — restoring backup")
             shutil.copy2(backup_path, script_path)
-            print("[+] Backup restored. Continuing with current version...")
             try:
                 os.remove(backup_path)
             except:
                 pass
 
     except Exception as e:
-        print(f"[!] Update check error: {e}")
-        print("[*] Continuing with current version...")
+        _warn(f"Update check error: {e}")
 
     print()
 
@@ -468,11 +477,7 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
     Run diagnostic checks to locate app and verify bundle ID.
     Returns dict with: {found: bool, actual_bundle_id: str, app_path: str, data_path: str, suggestions: list}
     """
-    print(f"\n{'='*60}")
-    print(f"SSH DIAGNOSTIC PRE-CHECK")
-    print(f"{'='*60}")
-    print(f"Expected Bundle ID: {expected_bundle_id}")
-    print()
+    _section(f"SSH Pre-check  —  {expected_bundle_id}")
 
     result = {
         "found": False,
@@ -483,8 +488,7 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
     }
 
     # 1. Use grep to find the bundle ID (much simpler and more reliable)
-    print("[1/4] Searching for app using grep...")
-    # -a flag treats binary files as text
+    _info(f"Locating data container for {expected_bundle_id} ...")
     cmd = f"grep -ra '{expected_bundle_id}' /var/mobile/Containers/Data/Application/ 2>/dev/null | head -1"
 
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
@@ -498,31 +502,26 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
                 result["found"] = True
                 result["actual_bundle_id"] = expected_bundle_id
                 result["data_path"] = f"/var/mobile/Containers/Data/Application/{container_uuid}"
-                print(f"  ✓ FOUND: {expected_bundle_id} -> {container_uuid}")
+                _ok(f"Data container: {container_uuid}")
 
     if not result["found"]:
-        print(f"  ✗ Not found: {expected_bundle_id}")
-
-        # Try searching with just the app name
-        print("\n[2/4] Searching for similar bundle IDs...")
-        # Extract app name from bundle ID (e.g., "staging" from "com.blatchfordmobility.universalapp.staging")
+        _warn(f"Bundle not found: {expected_bundle_id} — trying partial match...")
         search_terms = expected_bundle_id.split('.')
-        for term in reversed(search_terms[-2:]):  # Try last two components
-            # -a flag treats binary files as text
+        for term in reversed(search_terms[-2:]):
             cmd = f"grep -ra '{term}' /var/mobile/Containers/Data/Application/ 2>/dev/null | grep -i 'bundle' | head -3"
             rc, out = ssh_run(device_ip, cmd, password=password, timeout=20, manual=manual)
             if rc == 0 and out.strip():
-                print(f"  ? Found references to '{term}':")
                 for line in out.strip().splitlines()[:3]:
-                    print(f"    {line[:100]}")
+                    _info(f"  Possible: {line[:90]}")
                 break
 
     # 3. Search for app bundle using grep
-    print("\n[3/4] Searching for app bundle...")
+    _info("Locating app bundle ...")
     search_bundle = result.get("actual_bundle_id") or expected_bundle_id
 
-    # -a flag treats binary files as text
-    cmd = f"grep -ram1 '{search_bundle}' /var/containers/Bundle/Application 2>/dev/null | grep '\\.app/' | head -10"
+    # Search rootful and rootless bundle locations
+    bundle_search_paths = "/var/containers/Bundle/Application /var/jb/var/containers/Bundle/Application /Applications /var/jb/Applications"
+    cmd = f"grep -ram1 '{search_bundle}' {bundle_search_paths} 2>/dev/null | grep '\\.app/' | head -10"
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=20, manual=manual)
 
     app_match = extract_app_bundle_path_from_output(out) if rc == 0 else None
@@ -531,31 +530,28 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
 
     if app_match:
         result["app_path"] = app_match
-        print(f"  ✓ App bundle: {result['app_path']}")
+        _ok(f"App bundle: {result['app_path']}")
     else:
         if not result.get("app_path"):
-            print(f"  ✗ App bundle not found for: {search_bundle}")
+            _warn(f"App bundle not found for: {search_bundle}")
 
     # 4. Summary
-    print(f"\n[4/4] Diagnostic Summary")
-    print(f"{'='*60}")
+    _section("Device Diagnostic")
     if result["found"]:
-        print(f"✓ App is installed")
-        print(f"  Bundle ID: {result['actual_bundle_id']}")
-        print(f"  App Bundle: {result['app_path'] or 'Not found'}")
-        print(f"  Data Container: {result['data_path']}")
+        _ok(f"App installed  •  {result['actual_bundle_id']}")
+        if result["app_path"]:
+            _info(f"Bundle : {result['app_path']}")
+        _info(f"Data   : {result['data_path']}")
     else:
-        print(f"✗ App NOT found with bundle ID: {expected_bundle_id}")
+        _err(f"App NOT found: {expected_bundle_id}")
         if result["suggestions"]:
-            print(f"\n  Possible matches found:")
+            _info("Possible matches:")
             for suggestion in result["suggestions"]:
-                print(f"    - {suggestion}")
-            print(f"\n  💡 TIP: Update your IPA's bundle ID or use one of the above")
+                print(f"       - {suggestion}")
+            _warn("Update the IPA bundle ID or install the correct build.")
         else:
-            print(f"\n  💡 TIP: Ensure the app is installed on the device")
-            print(f"  💡 Run on device: ls /var/mobile/Containers/Data/Application/*/")
-
-    print(f"{'='*60}\n")
+            _warn("Ensure the app is installed on the device.")
+    print()
     return result
 
 # Cache for jailbreak type detection (device_ip -> jailbreak_type)
@@ -573,7 +569,7 @@ def ssh_detect_jailbreak_type(device_ip: str, password: str = "alpine", manual: 
     if device_ip in _jailbreak_type_cache:
         return _jailbreak_type_cache[device_ip]
 
-    print(f"    [*] Detecting jailbreak type...")
+    _info("Detecting jailbreak type...")
 
     # Temporarily enable debug for detection
     old_debug = os.environ.get('SSH_DEBUG')
@@ -593,7 +589,7 @@ def ssh_detect_jailbreak_type(device_ip: str, password: str = "alpine", manual: 
     if rc == 0 and result and '/var/jb' in result and 'cannot access' not in result.lower() and 'no such file' not in result.lower():
         jailbreak_type = 'rootless'
         _jailbreak_type_cache[device_ip] = jailbreak_type
-        print(f"    [+] Detected {jailbreak_type} jailbreak")
+        _ok(f"Jailbreak type: {jailbreak_type}")
         return jailbreak_type
 
     # Method 2: Try with test -d
@@ -603,31 +599,24 @@ def ssh_detect_jailbreak_type(device_ip: str, password: str = "alpine", manual: 
     if result2 == 'YES':
         jailbreak_type = 'rootless'
         _jailbreak_type_cache[device_ip] = jailbreak_type
-        print(f"    [+] Detected {jailbreak_type} jailbreak (via test)")
+        _ok(f"Jailbreak type: {jailbreak_type}")
         return jailbreak_type
     elif result2 == 'NO':
         jailbreak_type = 'rootful'
         _jailbreak_type_cache[device_ip] = jailbreak_type
-        print(f"    [+] Detected {jailbreak_type} jailbreak (via test)")
+        _ok(f"Jailbreak type: {jailbreak_type}")
         return jailbreak_type
 
     # Method 3: Try multiple simple echo commands to verify SSH is working
     rc3, out3 = ssh_run(device_ip, "echo HELLO", password=password, timeout=5, manual=manual)
     result3 = out3.strip()
 
-    if 'HELLO' in result3:
-        print(f"    [!] SSH is working but jailbreak detection unclear")
-        # SSH works, but we couldn't detect jailbreak type - default to rootful
-        jailbreak_type = 'rootful'
-        _jailbreak_type_cache[device_ip] = jailbreak_type
-        print(f"    [!] Assuming {jailbreak_type} jailbreak (detection failed but SSH works)")
-        return jailbreak_type
-
-    # Complete failure
-    print(f"    [!] Could not detect jailbreak type - SSH may not be working properly")
     jailbreak_type = 'rootful'
     _jailbreak_type_cache[device_ip] = jailbreak_type
-    print(f"    [!] Assuming {jailbreak_type} jailbreak (default)")
+    if 'HELLO' in result3:
+        _warn(f"Jailbreak type unclear — assuming {jailbreak_type}")
+    else:
+        _warn(f"SSH detection failed — assuming {jailbreak_type} (check SSH access)")
     return jailbreak_type
 
 def extract_app_bundle_path_from_output(out: str) -> Optional[str]:
@@ -663,18 +652,23 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
     Find the app installation path on the device by bundle identifier.
     Uses direct Info.plist scanning (previous grep-first approach often timed out).
     """
-    print(f"    [*] Searching for app bundle containing '{bundle_id}' (Info.plist scan)...")
+    _info(f"Searching for app bundle: {bundle_id} ...")
 
-    # Check standard locations
+    # Check standard locations — include rootless jailbreak paths (/var/jb/)
     search_paths = [
         "/var/containers/Bundle/Application",
         "/var/mobile/Containers/Bundle/Application",
-        "/Applications"
+        "/var/jb/var/containers/Bundle/Application",
+        "/var/jb/var/mobile/Containers/Bundle/Application",
+        "/Applications",
+        "/var/jb/Applications",
     ]
+    # Only include paths that exist on the device
+    exist_cmd = " ".join(f"[ -d '{p}' ] && echo '{p}'" for p in search_paths)
+    rc_e, out_e = ssh_run(device_ip, exist_cmd, password=password, timeout=10, manual=manual)
+    active_paths = [p for p in search_paths if out_e and p in out_e] or search_paths[:3]
 
-    # Directly scan Info.plist files for the bundle id
-    print(f"    [*] Scanning Info.plist files for bundle id...")
-    find_cmd = f"find {' '.join(search_paths)} -maxdepth 3 -type f -name Info.plist 2>/dev/null | head -80"
+    find_cmd = f"find {' '.join(active_paths)} -maxdepth 3 -type f -name Info.plist 2>/dev/null | head -80"
     rc, out = ssh_run(device_ip, find_cmd, password=password, timeout=45, manual=manual)
 
     if rc == 0 and out.strip():
@@ -683,13 +677,10 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
             rc_check, out_check = ssh_run(device_ip, check_cmd, password=password, timeout=10, manual=manual)
             if rc_check == 0 and out_check.strip():
                 app_dir = os.path.dirname(info_path)
-                print(f"    [+] Found app bundle via Info.plist: {app_dir}")
+                _ok(f"App bundle: {app_dir}")
                 return app_dir
 
-    # Not found - provide helpful debug info
-    print(f"    [!] App bundle not found. Troubleshooting:")
-    print(f"    [!] 1. Verify the app is installed: Is '{bundle_id}' on the device?")
-    print(f"    [!] 2. Try manually: grep -r '{bundle_id}' /var/containers/Bundle/Application/")
+    _warn(f"App bundle not found for {bundle_id}")
     return None
 
 def ssh_find_app_data_path(device_ip: str, bundle_id: str, password: str = "alpine", manual: bool = False) -> Optional[str]:
@@ -697,32 +688,23 @@ def ssh_find_app_data_path(device_ip: str, bundle_id: str, password: str = "alpi
     Find the app data container path on the device.
     Uses grep to search for bundle ID in any file (much more reliable than plutil).
     """
-    print(f"    [*] Searching for data container containing '{bundle_id}'...")
+    _info(f"Searching for data container: {bundle_id} ...")
 
-    # Simple and reliable: grep recursively for the bundle ID
-    # This works with binary plists, JSON, XML, and any other format
-    # -a flag treats binary files as text so we can find matches in .db files, binary plists, etc.
     cmd = f"grep -ra '{bundle_id}' /var/mobile/Containers/Data/Application/ 2>/dev/null | head -1"
 
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
 
     if rc == 0 and out.strip():
-        # Extract the container UUID from the path
-        # Example output: /var/mobile/Containers/Data/Application/UUID/some/file: "bundleId" : "com.example.app"
         match_line = out.strip().splitlines()[0]
         if '/Containers/Data/Application/' in match_line:
-            # Extract path up to the container UUID
             parts = match_line.split('/Containers/Data/Application/')
             if len(parts) > 1:
                 container_uuid = parts[1].split('/')[0].split(':')[0]
                 data_path = f"/var/mobile/Containers/Data/Application/{container_uuid}"
-                print(f"    [+] Found data container: {data_path}")
+                _ok(f"Data container: {data_path}")
                 return data_path
 
-    # Not found - provide helpful debug info
-    print(f"    [!] Data container not found")
-    print(f"    [!] The app may not have been run yet (no data container created)")
-    print(f"    [!] Try manually: grep -r '{bundle_id}' /var/mobile/Containers/Data/Application/")
+    _warn("Data container not found — app may not have been launched yet")
     return None
 
 # ---------------------------
@@ -1023,163 +1005,214 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>iOS Mobile Security Assessment Report</title>
+<title>iOS Security Assessment — {app_name}</title>
 <style>
-body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:20px auto;background:#f5f7fa;color:#111827;max-width:1200px}}
-h1{{font-size:28px;margin:0 0 10px 0}}
-.header{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:18px;border-radius:12px;margin-bottom:18px}}
-.meta{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}}
-.card{{background:rgba(255,255,255,.15);border-radius:10px;padding:12px}}
-.card code{{word-break:break-all;overflow-wrap:break-word}}
-h2{{font-size:18px;margin:22px 0 10px 0}}
-details{{background:white;border:1px solid #e5e7eb;border-radius:10px;margin:10px 0;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
-summary{{cursor:pointer;display:flex;gap:10px;align-items:center;padding:12px 14px}}
-.check-name{{flex:1;font-weight:600}}
-.badge{{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px}}
-.pass .badge{{background:#d1fae5;color:#065f46}}
-.fail .badge{{background:#fee2e2;color:#991b1b}}
-.warn .badge{{background:#fef3c7;color:#92400e}}
-.info .badge{{background:#dbeafe;color:#1e40af}}
-.content{{padding:12px 14px;border-top:1px solid #f3f4f6;background:#fafbfc;border-radius:0 0 10px 10px}}
-ul{{margin:8px 0 8px 20px}}
-code,pre{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}}
-pre{{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto}}
-.small{{font-size:12px;opacity:.9}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px}}
-.kpi{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:10px;cursor:pointer;user-select:none;transition:all 0.2s ease}}
-.kpi:hover{{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.12)}}
-.kpi .num{{font-size:26px;font-weight:800}}
-.kpi .lbl{{font-size:12px;opacity:.8}}
-.kpi.kpi-active{{box-shadow:0 4px 12px rgba(0,0,0,.15);border-width:2px}}
-.kpi[data-status="fail"].kpi-active{{border-color:#dc2626;background:#fff5f5}}
-.kpi[data-status="warn"].kpi-active{{border-color:#d97706;background:#fffbf0}}
-.kpi[data-status="info"].kpi-active{{border-color:#2563eb;background:#eff6ff}}
-.kpi[data-status="pass"].kpi-active{{border-color:#059669;background:#f0fdf4}}
-.kpi-hint{{font-size:11px;opacity:.6;text-align:center;margin-top:6px;margin-bottom:2px}}
-th.sortable {{ background: #f5f5f5; }}
-.table-card{{background:white;border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin:14px 0;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
-.table-head{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}}
-.table-head h4{{margin:0;font-size:15px}}
-.table-search{{padding:6px 10px;border:1px solid #d1d5db;border-radius:8px;min-width:220px}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+:root{{
+  --bg:#f0f2f5;--surface:#fff;--border:#e2e6ea;--text:#1a202c;--text-muted:#6b7280;
+  --fail:#dc2626;--fail-bg:#fef2f2;--fail-border:#fca5a5;
+  --warn:#d97706;--warn-bg:#fffbeb;--warn-border:#fcd34d;
+  --pass:#059669;--pass-bg:#f0fdf4;--pass-border:#86efac;
+  --info:#2563eb;--info-bg:#eff6ff;--info-border:#93c5fd;
+  --code-bg:#1e293b;--code-text:#e2e8f0;
+  --radius:10px;--shadow:0 1px 4px rgba(0,0,0,.08);
+}}
+[data-theme="dark"]{{
+  --bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;--text-muted:#94a3b8;
+  --fail-bg:#450a0a;--fail-border:#991b1b;
+  --warn-bg:#422006;--warn-border:#92400e;
+  --pass-bg:#064e3b;--pass-border:#065f46;
+  --info-bg:#1e3a8a;--info-border:#1e40af;
+  --code-bg:#0f172a;
+}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;padding:24px 20px;max-width:1100px;margin:0 auto;font-size:14px}}
+
+/* ── Header ── */
+.report-header{{background:linear-gradient(135deg,#1e3a5f 0%,#2d6a9f 100%);color:#fff;padding:24px 28px;border-radius:14px;margin-bottom:24px;box-shadow:0 4px 16px rgba(0,0,0,.15)}}
+.report-header h1{{font-size:22px;font-weight:700;letter-spacing:-.3px;margin-bottom:4px}}
+.report-header .subtitle{{font-size:13px;opacity:.75;margin-bottom:20px}}
+.meta-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:16px}}
+.meta-item{{background:rgba(255,255,255,.12);border-radius:8px;padding:10px 14px}}
+.meta-item .lbl{{font-size:11px;opacity:.7;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}}
+.meta-item .val{{font-size:13px;font-weight:600;word-break:break-all}}
+.meta-item code{{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;opacity:.9}}
+.scan-times{{display:flex;gap:24px;margin-top:16px;padding-top:16px;border-top:1px solid rgba(255,255,255,.2);font-size:12px;opacity:.85}}
+
+/* ── KPI Strip ── */
+.kpi-strip{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}}
+.kpi{{background:var(--surface);border:2px solid var(--border);border-radius:var(--radius);padding:16px 20px;cursor:pointer;user-select:none;transition:all .2s;text-align:center;box-shadow:var(--shadow)}}
+.kpi:hover{{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.1)}}
+.kpi .kpi-num{{font-size:32px;font-weight:800;line-height:1}}
+.kpi .kpi-lbl{{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-top:4px;opacity:.7}}
+.kpi[data-status="fail"]{{border-color:var(--fail-border);color:var(--fail)}}
+.kpi[data-status="warn"]{{border-color:var(--warn-border);color:var(--warn)}}
+.kpi[data-status="pass"]{{border-color:var(--pass-border);color:var(--pass)}}
+.kpi[data-status="info"]{{border-color:var(--info-border);color:var(--info)}}
+.kpi.kpi-active{{box-shadow:0 0 0 3px currentColor}}
+.kpi-hint{{font-size:11px;color:var(--text-muted);text-align:center;margin-bottom:20px}}
+
+/* ── Section Headers ── */
+.section-heading{{display:flex;align-items:center;gap:10px;margin:32px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--border)}}
+.section-heading .section-label{{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted)}}
+.section-heading .section-title{{font-size:16px;font-weight:700;color:var(--text)}}
+.section-heading .section-count{{margin-left:auto;font-size:12px;color:var(--text-muted)}}
+
+/* ── Check Cards ── */
+.check-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin:8px 0;box-shadow:var(--shadow);overflow:hidden}}
+.check-card.fail{{border-left:4px solid var(--fail)}}
+.check-card.warn{{border-left:4px solid var(--warn)}}
+.check-card.pass{{border-left:4px solid var(--pass)}}
+.check-card.info{{border-left:4px solid var(--info)}}
+.check-summary{{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:13px 16px}}
+.check-summary::-webkit-details-marker{{display:none}}
+.check-summary:hover{{background:rgba(0,0,0,.02)}}
+[data-theme="dark"] .check-summary:hover{{background:rgba(255,255,255,.03)}}
+.check-id{{font-size:11px;font-weight:600;color:var(--text-muted);font-family:ui-monospace,monospace;min-width:90px}}
+.check-name{{flex:1;font-weight:600;font-size:13.5px}}
+.status-badge{{padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}}
+.fail .status-badge{{background:var(--fail-bg);color:var(--fail);border:1px solid var(--fail-border)}}
+.warn .status-badge{{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-border)}}
+.pass .status-badge{{background:var(--pass-bg);color:var(--pass);border:1px solid var(--pass-border)}}
+.info .status-badge{{background:var(--info-bg);color:var(--info);border:1px solid var(--info-border)}}
+.dyn-badge{{padding:2px 8px;border-radius:999px;font-size:10px;font-weight:700;background:#16a34a;color:#fff}}
+.chevron{{font-size:10px;color:var(--text-muted);transition:transform .2s}}
+details[open] .chevron{{transform:rotate(90deg)}}
+
+/* ── Check Content ── */
+.check-content{{padding:14px 18px 16px;border-top:1px solid var(--border);background:var(--bg)}}
+[data-theme="dark"] .check-content{{background:var(--bg)}}
+
+/* ── Summary Lines ── */
+.summary-list{{margin:0 0 12px;padding:0;list-style:none}}
+.summary-list li{{display:flex;gap:8px;padding:4px 0;font-size:13px;color:var(--text)}}
+.summary-list li::before{{content:"›";color:var(--text-muted);font-weight:700;flex-shrink:0}}
+
+/* ── Finding Items ── */
+.findings{{margin-bottom:12px}}
+.finding-item{{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin:8px 0;overflow:hidden}}
+.finding-header{{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(0,0,0,.02);border-bottom:1px solid var(--border)}}
+[data-theme="dark"] .finding-header{{background:rgba(255,255,255,.03)}}
+.finding-filepath{{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;color:var(--info);font-weight:600;flex:1}}
+.finding-filepath a{{color:var(--info);text-decoration:none}}
+.finding-filepath a:hover{{text-decoration:underline}}
+.finding-subtitle{{font-size:11px;color:var(--text-muted)}}
+.finding-body{{padding:10px 12px}}
+.evidence-block{{background:var(--code-bg);color:var(--code-text);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.6;padding:10px 14px;border-radius:6px;overflow-x:auto;white-space:pre-wrap;word-break:break-all}}
+.evidence-text{{font-size:12.5px;color:var(--text-muted);line-height:1.6;padding:2px 0}}
+
+/* ── Code Collapsible ── */
+.code-details{{border:1px solid var(--border);border-radius:6px;margin-top:8px;overflow:hidden}}
+.code-details summary{{cursor:pointer;padding:6px 12px;font-size:12px;font-weight:600;color:var(--text-muted);background:rgba(0,0,0,.02);list-style:none;display:flex;align-items:center;gap:6px}}
+.code-details summary::-webkit-details-marker{{display:none}}
+[data-theme="dark"] .code-details summary{{background:rgba(255,255,255,.03)}}
+.code-details pre{{margin:0;border-radius:0}}
+
+/* ── Evidence Content Rendering ── */
+.ev-body{{padding:10px 14px;font-size:13px;line-height:1.6}}
+.ev-header{{font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:10px 0 4px;padding-bottom:2px;border-bottom:1px solid var(--border)}}
+.ev-header:first-child{{margin-top:0}}
+.ev-line{{color:var(--text);padding:1px 0}}
+.ev-bullet{{color:var(--text);padding:1px 0 1px 16px;position:relative}}
+.ev-bullet::before{{content:"·";position:absolute;left:4px;color:var(--text-muted)}}
+.ev-space{{height:6px}}
+.ev-status{{display:flex;align-items:baseline;gap:6px;padding:3px 0}}
+.ev-icon{{font-size:12px;flex-shrink:0}}
+.ev-icon-fail{{color:var(--fail)}}
+.ev-icon-warn{{color:var(--warn)}}
+.ev-icon-pass{{color:var(--pass)}}
+.ev-icon-info{{color:var(--info)}}
+.summary-single{{font-size:13px;color:var(--text-muted);margin:0 0 6px;padding:0}}
+.summary-list{{margin:0 0 10px;padding:0;list-style:none}}
+.summary-list li{{display:flex;gap:8px;padding:3px 0;font-size:13px;color:var(--text);align-items:baseline}}
+.summary-list li::before{{content:"›";color:var(--text-muted);font-weight:700;flex-shrink:0}}
+.summary-list li.summary-sub{{padding-left:18px;color:var(--text-muted);font-size:12px}}
+.summary-list li.summary-sub::before{{content:"·"}}
+
+/* ── Reference Link ── */
+.ref-line{{margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--text-muted)}}
+.ref-line a{{color:var(--info);text-decoration:none}}
+.ref-line a:hover{{text-decoration:underline}}
+
+/* ── Table Components ── */
+.table-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:12px 0;box-shadow:var(--shadow);overflow-x:auto}}
+.table-head{{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}}
+.table-head h4{{font-size:14px;font-weight:600}}
+.table-search{{padding:5px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface);color:var(--text)}}
 .data-table{{width:100%;border-collapse:collapse;font-size:13px}}
-.data-table th,.data-table td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top;word-break:break-word}}
-.data-table th{{background:#f8fafc;cursor:pointer}}
-.data-table tbody tr:nth-child(odd){{background:#ffffff}}
-.data-table tbody tr:nth-child(even){{background:#f3f4f6}}
-/* Also stripe generic tables (e.g., checksec tables) for readability */
-table tbody tr:nth-child(odd){{background:#ffffff}}
-table tbody tr:nth-child(even){{background:#f3f4f6}}
+.data-table th,.data-table td{{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;word-break:break-word}}
+.data-table th{{background:rgba(0,0,0,.03);font-weight:600;cursor:pointer;white-space:nowrap}}
+[data-theme="dark"] .data-table th{{background:rgba(255,255,255,.05)}}
+.data-table tbody tr:nth-child(even){{background:rgba(0,0,0,.02)}}
+[data-theme="dark"] .data-table tbody tr:nth-child(even){{background:rgba(255,255,255,.02)}}
+table{{border-collapse:collapse;width:100%}}
+table th,table td{{border:1px solid var(--border);padding:7px 10px}}
+table th{{background:rgba(0,0,0,.03);font-weight:600}}
+table tbody tr:nth-child(even){{background:rgba(0,0,0,.02)}}
 
-/* Dark Mode Toggle Button */
-.dark-mode-toggle{{position:fixed;top:20px;right:20px;z-index:1000;background:rgba(255,255,255,0.9);backdrop-filter:blur(10px);border:1px solid rgba(0,0,0,0.1);border-radius:50px;padding:10px 20px;cursor:pointer;font-size:14px;font-weight:600;color:#333;transition:all 0.3s ease;box-shadow:0 4px 12px rgba(0,0,0,0.15);display:flex;align-items:center;gap:8px}}
-.dark-mode-toggle:hover{{background:rgba(255,255,255,1);box-shadow:0 6px 16px rgba(0,0,0,0.2);transform:translateY(-2px)}}
-.dark-mode-toggle:active{{transform:translateY(0)}}
-
-/* Dark Mode Styles */
-[data-theme="dark"] .dark-mode-toggle{{background:rgba(30,41,59,0.9);border:1px solid rgba(255,255,255,0.2);color:#e2e8f0}}
+/* ── Dark Mode Toggle ── */
+.dark-mode-toggle{{position:fixed;top:20px;right:20px;z-index:1000;background:rgba(255,255,255,.9);backdrop-filter:blur(8px);border:1px solid rgba(0,0,0,.1);border-radius:50px;padding:8px 18px;cursor:pointer;font-size:13px;font-weight:600;color:#333;transition:all .3s;box-shadow:0 2px 8px rgba(0,0,0,.12)}}
+.dark-mode-toggle:hover{{background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.18)}}
+[data-theme="dark"] .dark-mode-toggle{{background:rgba(30,41,59,.9);border-color:rgba(255,255,255,.2);color:#e2e8f0}}
 [data-theme="dark"] .dark-mode-toggle:hover{{background:rgba(30,41,59,1)}}
-[data-theme="dark"] body{{background:#0f172a;color:#e2e8f0}}
-[data-theme="dark"] h1{{color:#f1f5f9}}
-[data-theme="dark"] h2{{color:#f1f5f9}}
-[data-theme="dark"] .header{{background:linear-gradient(135deg,#312e81 0%,#581c87 100%)}}
-[data-theme="dark"] details{{background:#1e293b;border-color:#334155;box-shadow:0 1px 3px rgba(0,0,0,0.3)}}
-[data-theme="dark"] summary{{color:#e2e8f0}}
-[data-theme="dark"] summary:hover{{background:#293548}}
-[data-theme="dark"] .check-name{{color:#cbd5e1}}
-[data-theme="dark"] .pass .badge{{background:#065f46;color:#d1fae5}}
-[data-theme="dark"] .fail .badge{{background:#991b1b;color:#fee2e2}}
-[data-theme="dark"] .warn .badge{{background:#92400e;color:#fef3c7}}
-[data-theme="dark"] .info .badge{{background:#1e40af;color:#dbeafe}}
-[data-theme="dark"] .content{{border-top-color:#334155;background:#0f172a;color:#e2e8f0}}
-[data-theme="dark"] pre{{background:#1e293b;color:#e2e8f0;border:1px solid #334155}}
-[data-theme="dark"] code{{background:#1e293b;color:#e2e8f0}}
-[data-theme="dark"] .code-details{{border-color:#334155!important}}
-[data-theme="dark"] .code-details>summary{{background:#1e293b!important;color:#cbd5e1!important}}
-[data-theme="dark"] .kpi{{background:#1e293b;border-color:#334155;color:#e2e8f0}}
-[data-theme="dark"] .kpi .num{{color:#e2e8f0}}
-[data-theme="dark"] .kpi .lbl{{color:#e2e8f0}}
-[data-theme="dark"] .kpi[data-status="fail"].kpi-active{{border-color:#f87171;background:#450a0a;color:#fecaca}}
-[data-theme="dark"] .kpi[data-status="fail"].kpi-active .num{{color:#fca5a5}}
-[data-theme="dark"] .kpi[data-status="warn"].kpi-active{{border-color:#fbbf24;background:#422006;color:#fef3c7}}
-[data-theme="dark"] .kpi[data-status="warn"].kpi-active .num{{color:#fcd34d}}
-[data-theme="dark"] .kpi[data-status="info"].kpi-active{{border-color:#60a5fa;background:#1e3a8a;color:#dbeafe}}
-[data-theme="dark"] .kpi[data-status="info"].kpi-active .num{{color:#93c5fd}}
-[data-theme="dark"] .kpi[data-status="pass"].kpi-active{{border-color:#4ade80;background:#064e3b;color:#d1fae5}}
-[data-theme="dark"] .kpi[data-status="pass"].kpi-active .num{{color:#86efac}}
-[data-theme="dark"] th.sortable {{ background: #293548; color: #e2e8f0; }}
 [data-theme="dark"] a{{color:#60a5fa}}
 [data-theme="dark"] a:hover{{color:#93c5fd}}
-[data-theme="dark"] strong{{color:#f1f5f9}}
-[data-theme="dark"] .table-card{{background:#1e293b;border-color:#334155}}
-[data-theme="dark"] .data-table th{{background:#1f2937;color:#e2e8f0;border-color:#334155}}
-[data-theme="dark"] .data-table td{{border-color:#334155;color:#e2e8f0}}
-[data-theme="dark"] .data-table tbody tr:nth-child(odd){{background:#111827}}
-[data-theme="dark"] .data-table tbody tr:nth-child(even){{background:#1b2436}}
-[data-theme="dark"] table tbody tr:nth-child(odd){{background:#111827}}
-[data-theme="dark"] table tbody tr:nth-child(even){{background:#1b2436}}
-[data-theme="dark"] .table-search{{background:#0f172a;color:#e2e8f0;border-color:#334155}}
-[data-theme="dark"] .evidence-block{{background:#1e293b!important;color:#e2e8f0!important;border-left-color:#475569!important}}
-[data-theme="dark"] .evidence-block div{{color:#e2e8f0!important}}
+code{{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px}}
+[data-theme="dark"] code{{background:rgba(255,255,255,.1)}}
+pre{{background:var(--code-bg);color:var(--code-text);padding:12px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.6}}
+@media(max-width:600px){{.kpi-strip{{grid-template-columns:repeat(2,1fr)}}.meta-grid{{grid-template-columns:1fr}}}}
 </style>
 <script>
-function toggleDarkMode(){{const html=document.documentElement;const currentTheme=html.getAttribute('data-theme');const newTheme=currentTheme==='dark'?'light':'dark';html.setAttribute('data-theme',newTheme);localStorage.setItem('theme',newTheme);updateDarkModeButton(newTheme)}}
-function updateDarkModeButton(theme){{const button=document.getElementById('darkModeToggle');if(button){{button.textContent=theme==='dark'?'Light Mode':'Dark Mode'}}}} 
-function initDarkMode(){{const savedTheme=localStorage.getItem('theme');const prefersDark=window.matchMedia('(prefers-color-scheme: dark)').matches;const theme=savedTheme||(prefersDark?'dark':'light');document.documentElement.setAttribute('data-theme',theme);updateDarkModeButton(theme)}}
+function toggleDarkMode(){{var t=document.documentElement,c=t.getAttribute('data-theme'),n=c==='dark'?'light':'dark';t.setAttribute('data-theme',n);localStorage.setItem('theme',n);document.getElementById('darkModeToggle').textContent=n==='dark'?'Light Mode':'Dark Mode'}}
+function initDarkMode(){{var s=localStorage.getItem('theme'),p=window.matchMedia('(prefers-color-scheme: dark)').matches,t=s||(p?'dark':'light');document.documentElement.setAttribute('data-theme',t);var b=document.getElementById('darkModeToggle');if(b)b.textContent=t==='dark'?'Light Mode':'Dark Mode'}}
 document.addEventListener('DOMContentLoaded',initDarkMode);
-function sortTable(tableId,colIndex){{const table=document.getElementById(tableId);if(!table||!table.tBodies.length)return;const tbody=table.tBodies[0];const rows=Array.from(tbody.rows);const currentOrder=table.getAttribute('data-sort-order-'+colIndex)||'asc';const newOrder=currentOrder==='asc'?'desc':'asc';rows.sort((a,b)=>{{const aVal=a.cells[colIndex].innerText.trim();const bVal=b.cells[colIndex].innerText.trim();return newOrder==='asc'?aVal.localeCompare(bVal):bVal.localeCompare(aVal);}});rows.forEach(r=>tbody.appendChild(r));table.setAttribute('data-sort-order-'+colIndex,newOrder);const headers=table.querySelectorAll('th .chevron');headers.forEach((h,i)=>{{if(i===colIndex){{h.textContent=newOrder==='asc'?'▲':'▼';}} else if(h){{h.textContent='▼';}}}});}}
-function applyFilters(tableId){{const table=document.getElementById(tableId);if(!table||!table.tBodies.length)return;const selects=document.querySelectorAll('.filter-select-'+tableId);Array.from(table.tBodies[0].rows).forEach(row=>{{let show=true;selects.forEach((sel,idx)=>{{const val=sel.value;if(val&&row.cells[idx]&&row.cells[idx].innerText.trim()!==val){{show=false;}}}});row.style.display=show?'':'none';}});}}
-function filterTable(tableId,query){{const table=document.getElementById(tableId);if(!table||!table.tBodies.length)return;const q=(query||'').toLowerCase();const rows=Array.from(table.tBodies[0].rows);rows.forEach((row,idx)=>{{if(row.id&&row.id.includes('-context-')){{const parentRow=rows[idx-1];if(parentRow&&parentRow.style.display==='none'){{row.style.display='none';}}return;}}const text=row.innerText.toLowerCase();const shouldShow=text.indexOf(q)!==-1;row.style.display=shouldShow?'':'none';if(!shouldShow&&rows[idx+1]&&rows[idx+1].id&&rows[idx+1].id.includes('-context-')){{rows[idx+1].style.display='none';}}}});}}
-function toggleContext(contextId){{const row=document.getElementById(contextId);if(!row)return;const prevRow=row.previousElementSibling;if(!prevRow)return;const button=prevRow.querySelector('button');if(!button)return;if(row.style.display==='none'||!row.style.display){{row.style.display='';button.textContent='Hide Context';}}else{{row.style.display='none';button.textContent='Show Context';}}}}
+function sortTable(id,col){{var t=document.getElementById(id);if(!t||!t.tBodies.length)return;var b=t.tBodies[0],r=Array.from(b.rows),o=t.getAttribute('data-sort-'+col)||'asc',n=o==='asc'?'desc':'asc';r.sort(function(a,b){{var av=a.cells[col].innerText.trim(),bv=b.cells[col].innerText.trim();return n==='asc'?av.localeCompare(bv):bv.localeCompare(av)}});r.forEach(function(r){{b.appendChild(r)}});t.setAttribute('data-sort-'+col,n)}}
+function applyFilters(id){{var t=document.getElementById(id);if(!t||!t.tBodies.length)return;var sels=document.querySelectorAll('.filter-select-'+id);Array.from(t.tBodies[0].rows).forEach(function(row){{var show=true;sels.forEach(function(sel,i){{if(sel.value&&row.cells[i]&&row.cells[i].innerText.trim()!==sel.value)show=false}});row.style.display=show?'':'none'}})}}
+function filterTable(id,q){{var t=document.getElementById(id);if(!t||!t.tBodies.length)return;var lq=(q||'').toLowerCase();Array.from(t.tBodies[0].rows).forEach(function(r){{r.style.display=r.innerText.toLowerCase().indexOf(lq)!==-1?'':'none'}})}}
 function filterByStatus(status){{
   var kpi=document.querySelector('.kpi[data-status="'+status+'"]');
   if(!kpi)return;
   kpi.classList.toggle('kpi-active');
-  var activeFilters=Array.from(document.querySelectorAll('.kpi.kpi-active')).map(function(k){{return k.getAttribute('data-status');}});
-  document.querySelectorAll('details').forEach(function(d){{
-    if(d.classList.contains('code-details'))return;
-    if(activeFilters.length===0){{d.style.display='';return;}}
-    var cls=d.className.replace(/\\s+/g,' ').trim().split(' ')[0];
-    d.style.display=activeFilters.indexOf(cls)>=0?'':'none';
+  var active=Array.from(document.querySelectorAll('.kpi.kpi-active')).map(function(k){{return k.getAttribute('data-status')}});
+  document.querySelectorAll('details.check-card').forEach(function(d){{
+    if(active.length===0){{d.style.display='';return}}
+    var cls=Array.from(d.classList).find(function(c){{return['fail','warn','pass','info'].indexOf(c)>=0}});
+    d.style.display=active.indexOf(cls)>=0?'':'none'
   }});
-  document.querySelectorAll('h2').forEach(function(h){{
-    var sib=h.nextElementSibling;var anyVisible=false;
-    while(sib&&sib.tagName!=='H2'){{if(sib.tagName==='DETAILS'&&sib.style.display!=='none')anyVisible=true;sib=sib.nextElementSibling;}}
-    h.style.display=(activeFilters.length>0&&!anyVisible)?'none':'';
-  }});
+  document.querySelectorAll('.section-heading').forEach(function(h){{
+    var sib=h.nextElementSibling,any=false;
+    while(sib&&!sib.classList.contains('section-heading')){{if(sib.tagName==='DETAILS'&&sib.style.display!=='none')any=true;sib=sib.nextElementSibling}}
+    h.style.display=(active.length>0&&!any)?'none':''
+  }})
 }}
 </script>
 </head>
 <body>
 <button id="darkModeToggle" class="dark-mode-toggle" onclick="toggleDarkMode()">Dark Mode</button>
-<div class="header">
-  <h1>iOS Mobile Security Assessment Report</h1>
-  <div class="meta">
-    <div class="card"><div class="small">App</div><div><code>{app_name}</code></div></div>
-    <div class="card"><div class="small">Bundle ID</div><div><code>{bundle_id}</code></div></div>
-    <div class="card"><div class="small">Version</div><div>{version}</div></div>
-    <div class="card"><div class="small">IPA Size</div><div>{ipa_size} MB</div></div>
-    <div class="card"><div class="small">IPA SHA256</div><div><code>{ipa_sha256}</code></div></div>
+
+<div class="report-header">
+  <h1>iOS Security Assessment Report</h1>
+  <div class="subtitle">OWASP MASVS · Static Analysis</div>
+  <div class="meta-grid">
+    <div class="meta-item"><div class="lbl">Application</div><div class="val">{app_name}</div></div>
+    <div class="meta-item"><div class="lbl">Bundle ID</div><div class="val"><code>{bundle_id}</code></div></div>
+    <div class="meta-item"><div class="lbl">Version</div><div class="val">{version}</div></div>
+    <div class="meta-item"><div class="lbl">IPA Size</div><div class="val">{ipa_size} MB</div></div>
+    <div class="meta-item"><div class="lbl">SHA-256</div><div class="val"><code>{ipa_sha256}</code></div></div>
   </div>
 {previous_scan_info}
-  <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 15px; margin-top: 15px;">
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 13px;">
-      <div>
-        <span style="opacity: 0.9;">Started:</span> <strong>{started}</strong>
-      </div>
-      <div>
-        <span style="opacity: 0.9;">Finished:</span> <strong>{finished}</strong>
-      </div>
-    </div>
+  <div class="scan-times">
+    <span>Started: <strong>{started}</strong></span>
+    <span>Finished: <strong>{finished}</strong></span>
   </div>
 </div>
 
-<div class="kpi-hint">Click a card to filter results — click again to clear</div>
-<div class="grid">
-  <div class="kpi" data-status="fail" onclick="filterByStatus('fail')"><div class="num">{kpi_fail}</div><div class="lbl">FAIL</div></div>
-  <div class="kpi" data-status="warn" onclick="filterByStatus('warn')"><div class="num">{kpi_warn}</div><div class="lbl">WARN</div></div>
-  <div class="kpi" data-status="info" onclick="filterByStatus('info')"><div class="num">{kpi_info}</div><div class="lbl">INFO</div></div>
-  <div class="kpi" data-status="pass" onclick="filterByStatus('pass')"><div class="num">{kpi_pass}</div><div class="lbl">PASS</div></div>
+<div class="kpi-strip">
+  <div class="kpi" data-status="fail" onclick="filterByStatus('fail')"><div class="kpi-num">{kpi_fail}</div><div class="kpi-lbl">Fail</div></div>
+  <div class="kpi" data-status="warn" onclick="filterByStatus('warn')"><div class="kpi-num">{kpi_warn}</div><div class="kpi-lbl">Warn</div></div>
+  <div class="kpi" data-status="pass" onclick="filterByStatus('pass')"><div class="kpi-num">{kpi_pass}</div><div class="kpi-lbl">Pass</div></div>
+  <div class="kpi" data-status="info" onclick="filterByStatus('info')"><div class="kpi-num">{kpi_info}</div><div class="kpi-lbl">Info</div></div>
 </div>
+<div class="kpi-hint">Click to filter by status · click again to clear</div>
 
 {sections}
 
@@ -5919,7 +5952,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     - MASTG-TEST-0085: Checking for Weaknesses in Third Party Libraries
     - MASTG-TEST-0273: Dependencies with Known Vulnerabilities
     """
-    print("[*] Scanning IPA for versioned components (frameworks, packages, binaries)...")
+    _info("Scanning IPA for versioned components (frameworks, packages, binaries)...")
 
     osv_api_url = "https://api.osv.dev/v1/query"
     nvd_url_base = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -6166,7 +6199,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
             return False
 
     # ── Phase 1: Framework Info.plist files ────────────────────────────────────
-    print("[*]   Phase 1: Scanning framework Info.plist files...")
+    _info("  Phase 1/5  Scanning framework Info.plist files...")
     for root, dirs, files in os.walk(app_dir):
         scanned_files += len(files)
         for fn in files:
@@ -6217,7 +6250,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
             _add_dep('CocoaPods', bundle_name, version, rel_path)
 
     # ── Phase 2: Package manager manifests ────────────────────────────────────
-    print("[*]   Phase 2: Scanning package manager manifests...")
+    _info("  Phase 2/5  Scanning package manager manifests...")
 
     # Podfile.lock
     for search_dir in [base, os.path.dirname(base)]:
@@ -6284,7 +6317,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
             pass
 
     # ── Phase 3: Binary string scanning (Mach-O) ──────────────────────────────
-    print("[*]   Phase 3: Scanning Mach-O binaries for embedded version strings...")
+    _info("  Phase 3/5  Scanning Mach-O binaries for version strings...")
 
     native_string_patterns = [
         ('openssl',   re.compile(r'\bOpenSSL\s+(\d+\.\d+\.\d+[a-z]?)\b',         re.IGNORECASE)),
@@ -6334,7 +6367,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     if len(dep_list) > 150:
         dep_list = dep_list[:150]
 
-    print(f"[*]   Phase 4: Querying OSV API for {len(dep_list)} packages...")
+    _info(f"  Phase 4/5  Querying OSV API for {len(dep_list)} packages...")
 
     findings_html: List[str] = []
     all_components: List[Dict] = []
@@ -6483,7 +6516,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     if len(native_list) > 60:
         native_list = native_list[:60]
 
-    print(f"[*]   Phase 5: Querying NVD for {len(native_list)} native binary candidates...")
+    _info(f"  Phase 5/5  Querying NVD for {len(native_list)} native binary candidates...")
 
     nvd_vuln_lib_count = 0
     total_nvd_cves = 0
@@ -7617,7 +7650,7 @@ def check_checksec(app_dir: str, base: str, main_bin: str = None) -> TestResult:
     checksec_cmd = None
     if os.path.exists(checksec_rs_path) and os.access(checksec_rs_path, os.X_OK):
         checksec_cmd = checksec_rs_path
-        print(f"[*] Using checksec.rs at {checksec_rs_path}")
+        _info(f"Using checksec.rs at {checksec_rs_path}")
     else:
         # Fall back to system checksec
         rc, _ = run(["which", "checksec"], timeout=5)
@@ -7643,7 +7676,7 @@ def check_checksec(app_dir: str, base: str, main_bin: str = None) -> TestResult:
         # Optionally scan just the main binary's directory to include frameworks
         target_path = os.path.dirname(main_bin) if os.path.isfile(main_bin) else main_bin
     
-    print(f"[*] Running checksec on {target_path}...")
+    _info(f"Running checksec on {os.path.basename(target_path)}...")
     rc, out = run([checksec_cmd, "-d", target_path], timeout=120)
 
     if rc != 0:
@@ -8436,7 +8469,7 @@ def check_device_installed_files(device_ip: str, bundle_id: str, base: str, pass
     SSH into jailbroken device and scan installed app for sensitive files, plists, JS, configs.
     Analyzes both app bundle and data container.
     """
-    print(f"    [*] Connecting to device {device_ip}...")
+    _info(f"Connecting to device {device_ip}...")
     # Check SSH connectivity
     if not ssh_check_connectivity(device_ip, password, manual):
         return TestResult(
@@ -8449,20 +8482,17 @@ def check_device_installed_files(device_ip: str, bundle_id: str, base: str, pass
             mastg_ref_html=mastg_ref(["MASTG-TEST-0057"], ["Data Storage"])
         )
 
-    print(f"    [+] Connected to device")
-    # Use discovered paths if available, otherwise search
+    _ok(f"Connected to {device_ip}")
     if discovered_app_path:
-        print(f"    [*] Using discovered app bundle: {discovered_app_path}")
+        _info(f"App bundle (pre-discovered): {discovered_app_path}")
         app_path = discovered_app_path
     else:
-        print(f"    [*] Searching for app bundle containing '{bundle_id}'...")
         app_path = ssh_find_app_path(device_ip, bundle_id, password, manual)
 
     if discovered_data_path:
-        print(f"    [*] Using discovered data container: {discovered_data_path}")
+        _info(f"Data container (pre-discovered): {discovered_data_path}")
         data_path = discovered_data_path
     else:
-        print(f"    [*] Searching for data container containing '{bundle_id}'...")
         data_path = ssh_find_app_data_path(device_ip, bundle_id, password, manual)
 
     if not app_path and not data_path:
@@ -8592,10 +8622,9 @@ def check_device_cleartext_dbs(device_ip: str, bundle_id: str, base: str, passwo
 
     # Use discovered path if available, otherwise search
     if discovered_data_path:
-        print(f"    [*] Using discovered data container: {discovered_data_path}")
+        _info(f"Data container (pre-discovered): {discovered_data_path}")
         data_path = discovered_data_path
     else:
-        print(f"    [*] Searching for data container containing '{bundle_id}'...")
         data_path = ssh_find_app_data_path(device_ip, bundle_id, password, manual)
 
     if not data_path:
@@ -9246,8 +9275,8 @@ def check_device_keyboard_cache(device_ip: str, bundle_id: str, base: str, passw
     ssh_cmd = f'find /var/mobile/Library/Keyboard -type f 2>/dev/null'
 
     if manual:
-        print(f"\n[SSH] Please run on device ({device_ip}):")
-        print(f"  {ssh_cmd}")
+        print(f"\n  {_c('cyan','[SSH manual]')} Run on device ({device_ip}):")
+        print(f"    {ssh_cmd}")
         proceed = input("Press Enter after running command to continue...")
     else:
         try:
@@ -9395,10 +9424,9 @@ def check_device_system_logs(device_ip: str, bundle_id: str, base: str, password
     log_entries = []
 
     if manual:
-        print(f"\n[SSH] Please run on device ({device_ip}):")
-        print(f"  {log_cmd}")
-        print("\nOr alternative command:")
-        print(f"  grep -r '{bundle_id}' /var/log/ 2>/dev/null | tail -100")
+        print(f"\n  {_c('cyan','[SSH manual]')} Run on device ({device_ip}):")
+        print(f"    {log_cmd}")
+        print(f"  Or: grep -r '{bundle_id}' /var/log/ 2>/dev/null | tail -100")
         proceed = input("Press Enter after reviewing logs to continue...")
         summary_lines.append("Manual log review requested")
         status = "INFO"
@@ -9960,7 +9988,7 @@ def parse_previous_report(bundle_id: str, reports_dir: str = '.') -> Optional[Di
         }
 
     except Exception as e:
-        print(f"[!] Warning: Could not parse previous report: {e}")
+        _warn(f"Could not parse previous report: {e}")
         return None
 
 def parse_previous_scan_history(bundle_id: str, reports_dir: str = '.') -> List[Dict]:
@@ -10005,7 +10033,7 @@ def parse_previous_scan_history(bundle_id: str, reports_dir: str = '.') -> List[
         return history
 
     except Exception as e:
-        print(f"[!] Warning: Could not parse previous scan history: {e}")
+        _warn(f"Could not parse previous scan history: {e}")
         return []
 
 def format_size_diff(current_mb: float, previous_mb: float) -> str:
@@ -10136,149 +10164,250 @@ def interactive_select(tests: List[TestDef], include_dynamic_flag: bool, include
     # Build items for curses menu
     items = [(f"{t.id:<10} {t.group:<16} {t.name}", t) for t in allowed]
 
-    print("\nRun all tests or select specific tests?")
-    print("  a - RUN ALL tests")
-    print("  s - SELECT specific tests")
-    choice = input("Choice [a/s]: ").strip().lower()
+    print(f"\n  {_c('bold','Run all tests or select specific tests?')}")
+    print(f"    a  — Run ALL {len(allowed)} tests")
+    print(f"    s  — SELECT specific tests")
+    choice = input("  Choice [a/s]: ").strip().lower()
 
     if choice == 's':
         selected_indices = curses.wrapper(curses_select_menu, items, "SELECT TESTS (Use arrows, SPACE to toggle)")
         if selected_indices is None:
-            print("[!] Selection cancelled. Exiting.")
+            _err("Selection cancelled.")
             return []
 
         selected_tests = [allowed[i] for i in sorted(selected_indices)]
         if not selected_tests:
-            print("[!] No tests selected. Exiting.")
+            _err("No tests selected.")
             return []
 
-        print(f"\n[*] Running {len(selected_tests)} selected test(s)...")
+        _info(f"Running {len(selected_tests)} selected test(s)...")
         return selected_tests
     else:
-        print(f"\n[*] Running all {len(allowed)} tests...")
+        _info(f"Running all {len(allowed)} tests...")
         return allowed
 
 # --------------------------- 
 # Rendering
 # --------------------------- 
 
+_EMOJI_STRIP = re.compile(r'^[❌✓✗⚠ℹ·•\-]\s*')
+_CODE_HINTS = re.compile(r'(\||→|0x[0-9a-f]|://|\.[a-z]{1,5}:|^\s+\d+\s*\|)', re.I)
+
+def _strip_emoji_prefix(text: str) -> str:
+    """Remove leading status emoji / bullet characters from a line."""
+    return _EMOJI_STRIP.sub("", text).strip()
+
+def _looks_like_code_block(lines: List[str]) -> bool:
+    """Return True if the evidence list reads like code/path output rather than prose."""
+    if not lines:
+        return False
+    hits = sum(1 for l in lines[:30] if _CODE_HINTS.search(l))
+    return hits >= max(2, len(lines[:30]) // 3)
+
+def _render_evidence_smart(lines: List[str]) -> str:
+    """
+    Render evidence lines intelligently:
+    - Section headers (line ending in ':' with no indent) → bold label
+    - Sub-bullets ('  • x', '  - x', '  [n] x') → indented bullet
+    - Code-like content → monospace pre block
+    - Empty lines → visual spacer
+    - Plain text → paragraph
+    """
+    if not lines:
+        return ""
+
+    trimmed = lines[:300]
+
+    # If it looks like code/stack output, dump as a single pre block
+    if _looks_like_code_block(trimmed):
+        return f"<pre class='evidence-block'>{html.escape(chr(10).join(trimmed))}</pre>"
+
+    out = "<div class='ev-body'>"
+    i = 0
+    while i < len(trimmed):
+        raw = trimmed[i]
+        stripped = raw.strip()
+        i += 1
+
+        if not stripped:
+            out += "<div class='ev-space'></div>"
+            continue
+
+        indent = len(raw) - len(raw.lstrip())
+
+        # Section header: unindented line ending with ':'
+        if indent == 0 and stripped.endswith(":") and len(stripped) < 60 and not any(c in stripped for c in ["http", "//", "0x"]):
+            label = _strip_emoji_prefix(stripped.rstrip(":"))
+            out += f"<div class='ev-header'>{html.escape(label)}</div>"
+            continue
+
+        # Indented sub-bullet: '  • …' '  - …' '  [n] …' '  1. …'
+        is_bullet = indent >= 2 and re.match(r'\s*([•\-\*]|\[?\d+[\]\.)]|\[\d\])', raw)
+        if is_bullet:
+            content = re.sub(r'^\s*([•\-\*]|\[?\d+[\]\.)]|\[\d\])\s*', '', stripped)
+            content = _strip_emoji_prefix(content)
+            out += f"<div class='ev-bullet'>{html.escape(content)}</div>"
+            continue
+
+        # Status-prefixed line (❌/✓/⚠/ℹ) → chip + text
+        m = re.match(r'^([❌✓✗⚠ℹ])\s+(.*)', stripped)
+        if m:
+            icon, rest = m.group(1), m.group(2)
+            icon_cls = {"❌": "ev-icon-fail", "✗": "ev-icon-fail", "⚠": "ev-icon-warn",
+                        "✓": "ev-icon-pass", "ℹ": "ev-icon-info"}.get(icon, "")
+            out += f"<div class='ev-status {icon_cls}'><span class='ev-icon'>{html.escape(icon)}</span>{html.escape(rest)}</div>"
+            continue
+
+        # Plain text
+        out += f"<div class='ev-line'>{html.escape(stripped)}</div>"
+
+    out += "</div>"
+    return out
+
+
+def _render_summary_lines(lines: List[str]) -> str:
+    """Render summary_lines cleanly — strip emoji prefixes, handle nested bullets."""
+    if not lines:
+        return ""
+
+    # Single-line pass/info → simple paragraph, not a list
+    if len(lines) == 1:
+        clean = _strip_emoji_prefix(lines[0])
+        return f"<p class='summary-single'>{html.escape(clean)}</p>"
+
+    out = "<ul class='summary-list'>"
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        clean = _strip_emoji_prefix(stripped)
+        # Detect nested sub-items (indented ≥ 2 with bullet)
+        if indent >= 2 and re.match(r'[•\-\*]\s', stripped):
+            clean = re.sub(r'^[•\-\*]\s*', "", clean)
+            out += f"<li class='summary-sub'>{html.escape(clean)}</li>"
+        else:
+            out += f"<li>{html.escape(clean)}</li>"
+    out += "</ul>"
+    return out
+
+
+def _render_finding_block(f) -> str:
+    """Render a single FindingBlock as a clean finding-item card."""
+    if isinstance(f, FindingBlock):
+        filepath_html = f.link if f.link else f"<span>{html.escape(f.title)}</span>"
+        subtitle = f"<span class='finding-subtitle'>{html.escape(f.subtitle)}</span>" if f.subtitle else ""
+        header = (
+            f"<div class='finding-header'>"
+            f"<span class='finding-filepath'>{filepath_html}</span>{subtitle}"
+            f"</div>"
+        )
+        body = ""
+        if f.evidence:
+            body = _render_evidence_smart(f.evidence)
+        if f.code:
+            inner = f"<pre class='evidence-block'>{html.escape(f.code)}</pre>"
+            if f.is_collapsible:
+                lbl = "View plist" if f.code_language == "xml" else "View code"
+                body += (
+                    f"<details class='code-details'>"
+                    f"<summary><span>&#9654;</span> {lbl}</summary>"
+                    f"{inner}</details>"
+                )
+            else:
+                body += inner
+        return f"<div class='finding-item'>{header}{body}</div>"
+    else:
+        # Legacy Finding
+        filepath_html = f"<span>{html.escape(f.title)}</span>"
+        header = f"<div class='finding-header'><span class='finding-filepath'>{filepath_html}</span></div>"
+        body = _render_evidence_smart(f.evidence) if f.evidence else ""
+        return f"<div class='finding-item'>{header}{body}</div>"
+
+
 def render_html(meta: Dict, grouped_results: Dict[str, List[TestResult]]) -> str:
-    # KPIs
-    counts = {"FAIL":0,"WARN":0,"INFO":0,"PASS":0}
+    counts = {"FAIL": 0, "WARN": 0, "INFO": 0, "PASS": 0}
     for cat in grouped_results.values():
         for tr in cat:
-            counts[tr.status] = counts.get(tr.status,0) + 1
+            counts[tr.status] = counts.get(tr.status, 0) + 1
 
     sections: List[str] = []
     for group_key, group_title in MASVS_GROUPS.items():
         blocks = grouped_results.get(group_key, [])
         if not blocks:
             continue
-        sections.append(f"<h2>{html.escape(group_key)} — {html.escape(group_title)}</h2>")
+
+        # Section heading with check count
+        total = len(blocks)
+        fail_n = sum(1 for r in blocks if r.status == "FAIL")
+        warn_n = sum(1 for r in blocks if r.status == "WARN")
+        count_detail = f"{fail_n} fail · {warn_n} warn · {total} total" if (fail_n or warn_n) else f"{total} checks"
+        sections.append(
+            f"<div class='section-heading'>"
+            f"<span class='section-label'>{html.escape(group_key)}</span>"
+            f"<span class='section-title'>{html.escape(group_title)}</span>"
+            f"<span class='section-count'>{count_detail}</span>"
+            f"</div>"
+        )
+
         for tr in blocks:
             cls = status_cls(tr.status)
-            dyn = " <span class='badge' style='background:#16a34a;color:white'>DYNAMIC</span>" if tr.is_dynamic else ""
+            dyn = " <span class='dyn-badge'>DYNAMIC</span>" if tr.is_dynamic else ""
 
-            # Handle both old summary and new summary_lines
-            if hasattr(tr, 'summary_lines') and tr.summary_lines:
-                summary_html = "<ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in tr.summary_lines) + "</ul>"
-            elif tr.summary:
-                summary_html = "<ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in tr.summary) + "</ul>"
-            else:
-                summary_html = ""
+            # Check ID + name in summary bar
+            id_part = f"<span class='check-id'>{html.escape(tr.id)}</span>" if tr.id else ""
+            summary_bar = (
+                f"<summary class='check-summary'>"
+                f"<span class='chevron'>▶</span>"
+                f"{id_part}"
+                f"<span class='check-name'>{html.escape(tr.name)}{dyn}</span>"
+                f"<span class='status-badge'>{html.escape(tr.status)}</span>"
+                f"</summary>"
+            )
 
+            # Summary lines → smart rendering
+            raw_lines = (tr.summary_lines if hasattr(tr, "summary_lines") and tr.summary_lines
+                         else tr.summary if tr.summary else [])
+            summary_html = _render_summary_lines(raw_lines)
+
+            # Findings
             findings_html = ""
             if tr.findings:
-                parts = []
-                for f in tr.findings:
-                    # Handle both Finding and FindingBlock
-                    if isinstance(f, FindingBlock):
-                        title_html = f.link if f.link else html.escape(f.title)
-                        subtitle_html = f"<div class='small'>{html.escape(f.subtitle)}</div>" if f.subtitle else ""
-                        evidence_html = ""
-                        if f.evidence:
-                            # Render evidence as regular text with line breaks, not code blocks
-                            evidence_lines = []
-                            for line in f.evidence:
-                                escaped_line = html.escape(line)
-                                # Preserve bullet points and formatting
-                                if line.strip().startswith(('•', '-', '*', '1.', '2.', '3.', '4.', '5.')):
-                                    evidence_lines.append(f"<div style='margin:4px 0;padding-left:8px;'>{escaped_line}</div>")
-                                elif line.strip() == "":
-                                    evidence_lines.append("<div style='margin:4px 0;'>&nbsp;</div>")
-                                else:
-                                    evidence_lines.append(f"<div style='margin:4px 0;'>{escaped_line}</div>")
-                            evidence_html = "<div class='evidence-block' style='margin-top:8px;padding:8px;background:#f8fafc;border-left:3px solid #d1d5db;border-radius:4px;'>" + "".join(evidence_lines) + "</div>"
-                        code_html = ""
-                        if f.code:
-                            inner_code = f"<pre><code class='language-{f.code_language}'>{html.escape(f.code)}</code></pre>"
-                            if f.is_collapsible:
-                                lbl = "View plist content" if f.code_language == "xml" else "View code snippet"
-                                code_html = (
-                                    f"<details class='code-details' style='margin-top:10px;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;'>"
-                                    f"<summary style='cursor:pointer;padding:7px 12px;font-size:12px;font-weight:600;"
-                                    f"color:#374151;background:#f3f4f6;list-style:none;display:flex;align-items:center;gap:6px;'>"
-                                    f"<span style='font-size:10px;'>&#9654;</span> {lbl}</summary>"
-                                    f"{inner_code}</details>"
-                                )
-                            else:
-                                code_html = inner_code
-                        parts.append(f"<div style='margin-bottom:16px;'><strong>{title_html}</strong>{subtitle_html}{evidence_html}{code_html}</div>")
-                    else: # Legacy Finding
-                        ev = ""
-                        if f.evidence:
-                            # Render evidence as regular text with line breaks, not code blocks
-                            evidence_lines = []
-                            for line in f.evidence[:300]:
-                                escaped_line = html.escape(line)
-                                if line.strip().startswith(('•', '-', '*', '1.', '2.', '3.', '4.', '5.')):
-                                    evidence_lines.append(f"<div style='margin:4px 0;padding-left:8px;'>{escaped_line}</div>")
-                                elif line.strip() == "":
-                                    evidence_lines.append("<div style='margin:4px 0;'>&nbsp;</div>")
-                                else:
-                                    evidence_lines.append(f"<div style='margin:4px 0;'>{escaped_line}</div>")
-                            ev = "<div class='evidence-block' style='margin-top:8px;padding:8px;background:#f8fafc;border-left:3px solid #d1d5db;border-radius:4px;'>" + "".join(evidence_lines) + "</div>"
-                        parts.append(f"<div style='margin-bottom:16px;'><strong>{html.escape(f.title)}</strong>{ev}</div>")
-                findings_html = "".join(parts)
+                cards = "".join(_render_finding_block(f) for f in tr.findings)
+                findings_html = f"<div class='findings'>{cards}</div>"
 
-            # Handle tables_html (for checksec and other tabular data)
+            # Tabular data (checksec, etc.)
             tables_html = ""
-            if hasattr(tr, 'tables_html') and tr.tables_html:
-                tables_html = "<div style='overflow-x:auto;'>" + "".join(tr.tables_html) + "</div>"
+            if hasattr(tr, "tables_html") and tr.tables_html:
+                tables_html = "<div class='table-card'>" + "".join(tr.tables_html) + "</div>"
 
-            # Handle both old mastg_ref and new mastg_ref_html
-            if hasattr(tr, 'mastg_ref_html') and tr.mastg_ref_html:
-                ref_html = tr.mastg_ref_html
+            # Reference links
+            ref_html = ""
+            if hasattr(tr, "mastg_ref_html") and tr.mastg_ref_html:
+                ref_html = f"<div class='ref-line'>{tr.mastg_ref_html}</div>"
             elif tr.mastg_ref:
-                ref_html = f"<div class='small'><strong>Reference:</strong> {html.escape(tr.mastg_ref)}</div>"
-            else:
-                ref_html = ""
+                ref_html = f"<div class='ref-line'><strong>Reference:</strong> {html.escape(tr.mastg_ref)}</div>"
 
-            # Handle optional id field
-            if tr.id:
-                check_name = f"[{html.escape(tr.id)}] {html.escape(tr.name)}{dyn}"
-            else:
-                check_name = f"{html.escape(tr.name)}{dyn}"
-
+            content = f"<div class='check-content'>{summary_html}{findings_html}{tables_html}{ref_html}</div>"
             sections.append(
-                f"<details class='{cls}'>"
-                f"<summary class='{cls}'><span class='check-name'>{check_name}</span>"
-                f"<span class='badge'>{html.escape(tr.status)}</span></summary>"
-                f"<div class='content'>{summary_html}{findings_html}{tables_html}{ref_html}</div>"
+                f"<details class='check-card {cls}'>"
+                f"{summary_bar}"
+                f"{content}"
                 f"</details>"
             )
 
     return HTML_TEMPLATE.format(
-        app_name=html.escape(meta.get("app_name","Unknown")),
-        bundle_id=html.escape(meta.get("bundle_id","Unknown")),
-        version=html.escape(meta.get("version","Unknown")),
+        app_name=html.escape(meta.get("app_name", "Unknown")),
+        bundle_id=html.escape(meta.get("bundle_id", "Unknown")),
+        version=html.escape(meta.get("version", "Unknown")),
         ipa_size=f"{meta.get('ipa_size_mb', 0):.1f}",
-        ipa_sha256=html.escape(meta.get("ipa_sha256","")),
+        ipa_sha256=html.escape(meta.get("ipa_sha256", "")),
         previous_scan_info=meta.get("previous_scan_info", ""),
-        started=html.escape(meta.get("started","")),
-        finished=html.escape(meta.get("finished","")),
-        kpi_fail=counts["FAIL"], kpi_warn=counts["WARN"], kpi_info=counts["INFO"], kpi_pass=counts["PASS"],
-        sections="\n".join(sections)
+        started=html.escape(meta.get("started", "")),
+        finished=html.escape(meta.get("finished", "")),
+        kpi_fail=counts["FAIL"], kpi_warn=counts["WARN"],
+        kpi_info=counts["INFO"], kpi_pass=counts["PASS"],
+        sections="\n".join(sections),
     )
 
 # --------------------------- 
@@ -10316,13 +10445,13 @@ def main():
 
     ok, missing = preflight()
     if not ok:
-        print("[!] Missing required tools: " + ", ".join(missing))
-        print("[!] Install Xcode Command Line Tools: xcode-select --install")
+        _err("Missing required tools: " + ", ".join(missing))
+        _err("Install Xcode Command Line Tools:  xcode-select --install")
         sys.exit(1)
 
     ipa_path = os.path.abspath(args.file)
     if not os.path.isfile(ipa_path):
-        print(f"[!] IPA not found: {ipa_path}")
+        _err(f"IPA not found: {ipa_path}")
         sys.exit(1)
 
     start = datetime.now()
@@ -10369,13 +10498,9 @@ def main():
         meta["version"] = f"{ver} ({build})"
         meta["main_binary"] = rel(main_bin, extracted)
 
-        # Banner + quick intro before running tests
-        print(APPLE_BANNER)
-        for line in RUN_INTRO:
-            print(f"  {line}")
-        print(f"\nTarget: {meta['app_name']} ({meta['bundle_id']}) version {meta['version']}")
-        print(f"IPA: {meta['ipa']} ({meta['ipa_size_mb']:.1f} MB)")
-        print(f"Report output: {out_dir}\n")
+        # Banner
+        _header(meta['app_name'], meta['bundle_id'], meta['version'],
+                meta['ipa'], meta['ipa_size_mb'], out_dir)
 
         ctx = {
             "base": extracted,
@@ -10405,24 +10530,19 @@ def main():
 
         # Show info about enabled features
         if args.ssh:
-            print(f"\n[*] Device SSH analysis enabled for {args.ssh}")
-            print(f"[*] SSH password: {args.ssh_password}")
-
+            _info(f"SSH device analysis: {args.ssh}  (password: {args.ssh_password})")
             if args.ssh_manual:
-                print(f"[*] Manual SSH mode: You will be prompted to enter the password for each command")
+                _info("Manual SSH mode — you will be prompted for each command")
             elif not which("sshpass"):
                 try:
                     import pexpect
-                    print(f"[!] Using pexpect for automatic SSH authentication")
-                    print(f"[!] WARNING: pexpect may have issues capturing SSH output")
-                    print(f"[!] RECOMMENDED: Install sshpass for reliable SSH automation:")
-                    print(f"[!]   brew install hudochenkov/sshpass/sshpass")
-                    print(f"[!] OR use --ssh-manual to enter password manually (more reliable)")
+                    _warn("Using pexpect for SSH auth — install sshpass for more reliable output")
+                    _warn("  brew install hudochenkov/sshpass/sshpass")
                 except ImportError:
-                    print(f"[!] Warning: Neither sshpass nor pexpect found - will prompt for passwords")
-                    print(f"[!] Install sshpass: 'brew install hudochenkov/sshpass/sshpass'")
+                    _warn("Neither sshpass nor pexpect found — will prompt for passwords")
+                    _warn("  brew install hudochenkov/sshpass/sshpass")
             else:
-                print(f"[*] Using sshpass for automatic SSH authentication")
+                _info("SSH auth via sshpass")
 
             # Run diagnostic pre-check if device tests are selected
             has_device_tests = any(t.group == "MASVS-DEVICE" for t in selected)
@@ -10444,19 +10564,20 @@ def main():
 
             print()
 
+        _section("Running Tests")
         results: List[TestResult] = []
         total_tests = len(selected)
         for idx, t in enumerate(selected, 1):
             try:
-                # Show progress
-                print(f"[{idx}/{total_tests}] Running: {t.name}...")
+                _progress(idx, total_tests, t.name)
                 out = t.fn(ctx)
                 if isinstance(out, list):
                     results.extend(out)
                 else:
                     results.append(out)
             except Exception as e:
-                print(f"[!] Error in {t.name}: {type(e).__name__}: {e}")
+                print()  # end progress line
+                _warn(f"Error in {t.name}: {type(e).__name__}: {e}")
                 results.append(TestResult(
                     id=f"ERR-{t.id}",
                     name=f"{t.name} (error)",
@@ -10465,7 +10586,7 @@ def main():
                     mastg_ref=t.mastg_ref
                 ))
 
-        print(f"\n[+] Completed {total_tests} test(s)")
+        print()  # end progress line
 
         # Group
         grouped: Dict[str, List[TestResult]] = {k: [] for k in MASVS_GROUPS.keys()}
@@ -10512,12 +10633,9 @@ def main():
 
         # Check for previous scan
         bundle_id = meta.get("bundle_id", "unknown")
-        print("[*] Checking for previous scan report...")
         previous_info = parse_previous_report(bundle_id, reports_dir=out_dir)
         if previous_info:
-            print(f"[+] Found previous scan: version {previous_info['version']} ({previous_info['ipa_size_mb']:.1f} MB)")
-        else:
-            print("[*] No previous scan found for this bundle ID")
+            _info(f"Previous scan: v{previous_info['version']} ({previous_info['ipa_size_mb']:.1f} MB)")
 
         # Generate HTML for previous scan comparison
         previous_scan_info_html = ""
@@ -10578,9 +10696,15 @@ def main():
             with open(os.path.join(artefacts, "codesign.txt"), "w", encoding="utf-8") as f:
                 f.write(cs)
 
-        print(f"[+] Report written: {os.path.join(out_dir, f'{bundle_id}.report.html')}")
-        print(f"[+] JSON written:   {os.path.join(out_dir, f'{bundle_id}.report.json')}")
-        print(f"[+] Output dir:     {out_dir}")
+        elapsed = str(finish - start).split(".")[0]
+        _summary_table(grouped, elapsed)
+
+        html_path = os.path.join(out_dir, f'{bundle_id}.report.html')
+        json_path = os.path.join(out_dir, f'{bundle_id}.report.json')
+        _ok(f"HTML report : {html_path}")
+        _ok(f"JSON report : {json_path}")
+        _ok(f"Output dir  : {out_dir}")
+        print()
 
     finally:
         # Clean up temp dir if it was used
