@@ -5780,11 +5780,11 @@ def check_task_hijack(manifest, apk_path=None):
 def check_network_security_config(base):
     """
     Tests:
-      - android:usesCleartextTraffic must be explicitly "false" (FAIL if missing/wrong)
-      - Manifest reference @xml/network_security_config (WARN if missing)
-      - res/xml/network_security_config.xml exists (WARN if missing)
+      - android:usesCleartextTraffic="true" is a definite FAIL
+      - missing explicit cleartext policy is WARN unless a config proves it disabled
+      - manifest networkSecurityConfig reference and config file are reviewed when present
       - No <debug-overrides> in the config (FAIL if found)
-      - Every <domain-config> must have cleartextTrafficPermitted="false" and include a <pin-set> (FAIL if wrong)
+      - cleartextTrafficPermitted="true" is FAIL; missing attributes are WARN
     """
     manifest = os.path.join(base, 'AndroidManifest.xml')
     cfg_path = os.path.join(base, 'res', 'xml', 'network_security_config.xml')
@@ -5793,21 +5793,29 @@ def check_network_security_config(base):
     fail_issues = []  # Critical security issues
     warn_issues = []  # Recommendations
 
-    # 1) Check usesCleartextTraffic on <application> - CRITICAL
+    config_ref = None
+    try:
+        root_manifest = ET.parse(manifest).getroot()
+        app = root_manifest.find('application')
+        if app is not None:
+            config_ref = app.get('{http://schemas.android.com/apk/res/android}networkSecurityConfig')
+            if config_ref and config_ref.startswith('@xml/'):
+                cfg_path = os.path.join(base, 'res', 'xml', config_ref.split('/', 1)[1] + '.xml')
+    except Exception:
+        root_manifest = None
+
+    # 1) Check usesCleartextTraffic on <application>.
     m = re.search(
         r'<application\b[^>]*\bandroid:usesCleartextTraffic="(true|false)"',
         m_txt
     )
     if not m:
-        fail_issues.append("Missing android:usesCleartextTraffic")
+        warn_issues.append("Missing explicit android:usesCleartextTraffic; platform defaults depend on target SDK and network security config")
     elif m.group(1).lower() != 'false':
         fail_issues.append(f"android:usesCleartextTraffic is set to {m.group(1)}")
 
     # 2) Check networkSecurityConfig reference - RECOMMENDATION
-    if not re.search(
-        r'android:networkSecurityConfig="@xml/network_security_config"',
-        m_txt
-    ):
+    if not config_ref:
         warn_issues.append("Missing android:networkSecurityConfig")
 
     # 3) Check config file existence - RECOMMENDATION
@@ -5837,10 +5845,12 @@ def check_network_security_config(base):
                 for dc in dcs:
                     domain = dc.findtext('domain') or "(unspecified)"
                     ctp = dc.get('cleartextTrafficPermitted')
-                    if ctp != 'false':
+                    if ctp == 'true':
                         fail_issues.append(
-                            f"Domain `{domain}` allows cleartextTrafficPermitted={ctp}"
+                            f"Domain `{domain}` explicitly allows cleartextTrafficPermitted=true"
                         )
+                    elif ctp is None:
+                        warn_issues.append(f"Domain `{domain}` does not explicitly set cleartextTrafficPermitted=false")
                     if dc.find('pin-set') is None:
                         warn_issues.append(
                             f"Domain `{domain}` missing <pin-set> (no certificate pinning)"
@@ -5864,7 +5874,7 @@ def check_network_security_config(base):
     
 def check_http_uris(base):
     """
-    FAIL if any literal 'http://' URIs are found in .smali, .java or .xml files,
+    WARN if literal 'http://' URIs are found in .smali, .java or .xml files,
     except known safe namespaces (Android schema, W3C, Maven, Apache, etc.).
     Also filters out common false positives like localhost, example.com, test URLs,
     and URLs appearing in error messages or documentation strings.
@@ -5903,7 +5913,7 @@ def check_http_uris(base):
     )
 
     false_positive_patterns = [
-        r'(error|exception|warning|log|message|description|comment|make sure|example|e\.g\.|i\.e\.|see https?://)',
+        r'(\berror\b|\bexception\b|\bwarning\b|\blog\b|\bmessage\b|\bdescription\b|\bcomment\b|make sure|\bexample\b|e\.g\.|i\.e\.|see https?://)',
         r'(starts with|should be|must be|can be|try|instead)',
         r'(malformed|invalid|supplied.*url)',
     ]
@@ -5980,7 +5990,7 @@ def check_http_uris(base):
 
     return TestResult(
         name="Insecure HTTP URIs",
-        status="FAIL",
+        status="WARN",
         summary_lines=[f"HTTP URI usages: {len(findings)}"],
         mastg_ref_html=mastg_ref,
         raw_html=url_list_html,
@@ -6039,7 +6049,7 @@ def check_root_detection(manifest, base):
       - Runtime.getRuntime().exec("su")
       - java.io.File("/system/bin/su")
       - Build.TAGS.contains("test-keys")
-    FAIL otherwise. Reports ALL detection methods found, not just the first.
+    WARN otherwise. Reports ALL detection methods found, not just the first.
     """
     # Patterns tuned for smali and Java
     patterns = {
@@ -6088,7 +6098,11 @@ def check_root_detection(manifest, base):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0045/' target='_blank'>MASTG-TEST-0045: Testing Root Detection</a></div>"
 
     if not findings:
-        return False, f'No root detection code found{mastg_ref}'
+        return 'WARN', (
+            "No root detection code found. This is expected for many low-risk apps; "
+            "treat as a resilience gap only when the app handles high-value data or requires anti-tamper controls."
+            f"{mastg_ref}"
+        )
 
     # Report all detection methods found with line numbers and snippets
     lines = []
@@ -6239,13 +6253,13 @@ def check_allow_backup(manifest, base):
             exclude_count = rules_content.count("<exclude")
             return "WARN", "\n".join(report_lines) + f"<br><strong>Note:</strong> Found {exclude_count} exclusion rule(s). Verify via <code>adb backup</code> that sensitive data is excluded." + mastg_ref
         else:
-            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> No <code>&lt;exclude&gt;</code> tags found - all app data will be backed up" + mastg_ref
+            return "WARN", "\n".join(report_lines) + "<br><strong>Warning:</strong> No <code>&lt;exclude&gt;</code> tags found. Static analysis cannot prove sensitive data is present, but backups may include app data." + mastg_ref
     else:
         # No backup rules configured
         if not full_backup_content and not data_extraction_rules:
-            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> No backup rules configured - all app data will be backed up" + mastg_ref
+            return "WARN", "\n".join(report_lines) + "<br><strong>Warning:</strong> No backup rules configured. Verify whether the app stores sensitive data that must be excluded." + mastg_ref
         else:
-            return False, "\n".join(report_lines) + "<br><strong>Fail Reason:</strong> Backup rules XML file not found" + mastg_ref
+            return "WARN", "\n".join(report_lines) + "<br><strong>Warning:</strong> Backup rules XML file not found; referenced backup policy cannot be verified." + mastg_ref
     
 def check_notification_sensitive_data(manifest, base):
     """
@@ -7437,7 +7451,7 @@ def check_insecure_webview(base):
     details = "<br>\n".join(hits)
     details += mastg_ref
 
-    return False, details
+    return 'WARN', details
 
 
 def check_keyboard_cache(base, manifest):
@@ -8371,24 +8385,29 @@ def check_certificate_pinning(base):
     detail_html = summary_html + "<br>\n".join(sections)
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0022/' target='_blank'>MASTG-TEST-0022: Testing Custom Certificate Stores and Certificate Pinning</a></div>"
 
-    # Decide PASS / WARN / FAIL
+    # Decide PASS / WARN / FAIL using confidence-aware static semantics:
+    # - Static pinning evidence is useful but does not prove all runtime traffic is pinned.
+    # - Heuristic/manual patterns need review.
+    # - Absence of pinning is not a definite vulnerability for every app, so warn.
     if lib_hits or sslfactory_hits:
-        # definitive pinning found
         confidence_note = (
-            "<br><div><em> Definitive certificate pinning detected. "
-            "Dynamic testing recommended to verify pinning is active for all connections.</em></div>"
+            "<br><div><em>Certificate pinning implementation detected. "
+            "Static analysis cannot prove it covers every endpoint; run Dynamic Cert Pinning for runtime verification.</em></div>"
         )
-        return True, detail_html + confidence_note + mastg_ref
+        return 'WARN', detail_html + confidence_note + mastg_ref
     if manual_hits or hv_hits:
-        # only heuristics found -> warn
         warn_banner = (
             "<em class='warn'>"
             "No definitive pinning API found; heuristic patterns detected - "
             "please review above.</em><br><br>"
         )
-        return True, warn_banner + detail_html + mastg_ref
-    # nothing found -> fail
-    return False, f"<strong>No certificate pinning detected.</strong>{mastg_ref}"
+        return 'WARN', warn_banner + detail_html + mastg_ref
+    return 'WARN', (
+        "<strong>No certificate pinning implementation detected by static analysis.</strong>"
+        "<div>This is a concern for high-risk apps and should be verified dynamically; "
+        "absence in decompiled code is not a definite misconfiguration for every app.</div>"
+        f"{mastg_ref}"
+    )
 
 def check_sharedprefs_encryption(base):
     """
@@ -8808,9 +8827,15 @@ def check_external_storage(base):
 
     lines.append(mastg_ref)
 
-    # Only FAIL if risky patterns found in app code
+    # Static external-storage API references do not prove sensitive data is
+    # written unencrypted. Per MASTG-TEST-0200, runtime file collection and
+    # content inspection are required before failing.
     if has_risk:
-        return 'FAIL', "\n".join(lines)
+        lines.append(
+            "<div class='warning-box'>Static evidence only: run Dynamic External Storage or Storage Analysis "
+            "and inspect created files before marking this as a definite data leak.</div>"
+        )
+        return 'WARN', "\n".join(lines)
     elif safe_findings or permission_findings:
         return 'WARN', "\n".join(lines)
     else:
@@ -12428,7 +12453,7 @@ def check_frida_strict_mode(base, wait_secs=7):
 
     # 8) analyze and format the report
     if not logs:
-        return 'PASS', "No StrictMode activity observed."
+        return 'INFO', "No StrictMode activity observed during the exercised runtime flows."
 
     # Check if StrictMode calls are from app code or libraries
     app_package = pkg_prefix if pkg_prefix else spawn_name
@@ -14004,9 +14029,34 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if file_writes:
         summary_lines.append(f"Direct shared_prefs file writes: {len(file_writes)}")
 
+    plaintext_sensitive_writes = 0
+    runtime_storage_events = 0
+    for data in prefs_accessed.values():
+        runtime_storage_events += len(data.get('writes', []))
+        if not data.get('encrypted'):
+            plaintext_sensitive_writes += sum(1 for w in data.get('writes', []) if w.get('sensitive'))
+    plaintext_sensitive_writes += sum(1 for op in datastore_ops if op.get('sensitive'))
+    for write_data in file_writes.values():
+        for item in write_data.get('details', []):
+            key = item.get('key', '')
+            value = item.get('value', '')
+            key_sensitive, _ = is_sensitive_keyword(key)
+            value_sensitive, _ = is_sensitive_keyword(value)
+            if key_sensitive or value_sensitive:
+                plaintext_sensitive_writes += 1
+            runtime_storage_events += 1
+
+    if plaintext_sensitive_writes:
+        status = "FAIL"
+        summary_lines.append(f"Plaintext sensitive runtime writes: {plaintext_sensitive_writes}")
+    elif runtime_storage_events:
+        status = "WARN"
+    else:
+        status = "INFO"
+
     return TestResult(
         name="Dynamic SharedPreferences",
-        status="INFO",
+        status=status,
         summary_lines=summary_lines or ["SharedPreferences activity observed"],
         mastg_ref_html=mastg_ref,
         raw_html="".join(detail),
@@ -14671,7 +14721,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     if not findings:
         return TestResult(
             name="Dynamic Crypto Keys",
-            status="PASS",
+            status="INFO",
             summary_lines=["No cryptographic operations observed during runtime"],
             is_dynamic=True,
         )
@@ -14684,7 +14734,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     if len(findings) > 30:
         detail.append(f"<div>...and {len(findings) - 30} more</div>")
 
-    status = 'FAIL' if weak_keys else 'PASS'
+    status = 'FAIL' if weak_keys else 'INFO'
     return TestResult(
         name="Dynamic Crypto Keys",
         status=status,
@@ -14814,7 +14864,7 @@ def check_frida_clipboard(base, wait_secs=10):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
 
     if not findings:
-        return 'PASS', f"<div><strong>No clipboard usage observed during runtime</strong></div>{mastg_ref}"
+        return 'INFO', f"<div><strong>No clipboard usage observed during runtime</strong></div>{mastg_ref}"
 
     # Build detailed report with summary
     summary_parts = []
@@ -15941,6 +15991,471 @@ def check_gms_security_provider(base):
     )
 
 
+def _iter_app_source_files(base, exts=('.smali', '.java', '.kt', '.xml')):
+    """Yield (full_path, rel_path) for app-owned source/resource files."""
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(exts):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            if not INCLUDE_LIBS and fn.endswith(('.smali', '.java', '.kt')) and is_library_path(rel):
+                continue
+            yield full, rel
+
+
+def _context_snippet(lines, line_num, radius=3):
+    start = max(0, line_num - radius - 1)
+    end = min(len(lines), line_num + radius)
+    out = []
+    for idx in range(start, end):
+        prefix = "-> " if idx == line_num - 1 else "  "
+        out.append(f"{prefix}{idx+1:4d} | {lines[idx].rstrip()}")
+    return "\n".join(out)
+
+
+def _smali_bool_arg_before(lines, line_index):
+    """
+    Best-effort parse of the boolean argument loaded before a smali setter call.
+    Returns True, False, or None when the value is variable/unknown.
+    """
+    for prev in reversed(lines[max(0, line_index - 8):line_index]):
+        m = re.search(r'const(?:/4|/16|)?\s+[vp]\d+,\s+(0x[01]|\b[01]\b)', prev)
+        if m:
+            raw = m.group(1)
+            return raw in ('0x1', '1')
+    return None
+
+
+def check_webview_file_content_access(base):
+    """
+    MASTG-TEST-0250/0252 static WebView resource access review.
+
+    FAIL when app code explicitly enables the most dangerous WebView file-origin
+    access settings. WARN when WebView/content access exists but static analysis
+    cannot prove the runtime value or whether sensitive data is reachable.
+    """
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0252/' target='_blank'>"
+        "MASTG-TEST-0252: References to Local File Access in WebViews</a><br>"
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0250/' target='_blank'>"
+        "MASTG-TEST-0250: References to Content Provider Access in WebViews</a></div>"
+    )
+    methods = {
+        'setAllowUniversalAccessFromFileURLs': {
+            'pattern': 'Landroid/webkit/WebSettings;->setAllowUniversalAccessFromFileURLs',
+            'explicit_true_status': 'FAIL',
+            'reason': 'File-origin JavaScript can read across origins',
+        },
+        'setAllowFileAccessFromFileURLs': {
+            'pattern': 'Landroid/webkit/WebSettings;->setAllowFileAccessFromFileURLs',
+            'explicit_true_status': 'FAIL',
+            'reason': 'File-origin JavaScript can access other local files',
+        },
+        'setAllowFileAccess': {
+            'pattern': 'Landroid/webkit/WebSettings;->setAllowFileAccess',
+            'explicit_true_status': 'WARN',
+            'reason': 'Local file access is enabled; impact depends on loaded content',
+        },
+        'setAllowContentAccess': {
+            'pattern': 'Landroid/webkit/WebSettings;->setAllowContentAccess',
+            'explicit_true_status': 'WARN',
+            'reason': 'Content provider access is enabled by default and may expose content URIs',
+        },
+    }
+    load_file_re = re.compile(r'(file://|content://|loadDataWithBaseURL|WebViewAssetLoader)')
+
+    files = list(_iter_app_source_files(base, exts=('.smali', '.java', '.kt', '.xml')))
+    findings = []
+    disabled = []
+    possible = []
+
+    with ScanProgress("WebView File/Content Access", len(files)) as scan_progress:
+        for full, rel in files:
+            scan_progress.update()
+            try:
+                text = open(full, errors='ignore').read()
+                lines = text.splitlines()
+            except Exception:
+                continue
+
+            for idx, line in enumerate(lines):
+                for method, cfg in methods.items():
+                    if cfg['pattern'] not in line and method not in line:
+                        continue
+                    if rel.endswith('.smali'):
+                        val = _smali_bool_arg_before(lines, idx)
+                    elif re.search(r'\(\s*true\s*\)', line):
+                        val = True
+                    elif re.search(r'\(\s*false\s*\)', line):
+                        val = False
+                    else:
+                        val = None
+                    if val is False:
+                        disabled.append((rel, method))
+                        continue
+                    status = cfg['explicit_true_status'] if val is True else 'WARN'
+                    subtitle = cfg['reason'] if val is True else f"{cfg['reason']} (static value unresolved)"
+                    findings.append({
+                        'status': status,
+                        'rel': rel,
+                        'full': full,
+                        'line': idx + 1,
+                        'method': method,
+                        'subtitle': subtitle,
+                        'snippet': _context_snippet(lines, idx + 1),
+                    })
+            if load_file_re.search(text):
+                possible.append(rel)
+
+    if not findings and not possible:
+        return TestResult(
+            name="WebView File/Content Access",
+            status="PASS",
+            summary_lines=["No WebView local file/content access references detected in app code"],
+            mastg_ref_html=mastg_ref,
+        )
+
+    status = "FAIL" if any(f['status'] == 'FAIL' for f in findings) else "WARN"
+    blocks = [
+        FindingBlock(
+            title=f"{f['rel']}:{f['line']}",
+            subtitle=f"{f['method']}: {f['subtitle']}",
+            link=f"file://{os.path.abspath(f['full'])}:{f['line']}",
+            code=f['snippet'],
+            code_language="smali" if f['rel'].endswith(".smali") else "java",
+            open_by_default=f['status'] == 'FAIL',
+        )
+        for f in findings[:30]
+    ]
+
+    raw = ""
+    if possible:
+        raw += f"<div><strong>Other WebView local/content loading references:</strong> {len(set(possible))} file(s)</div>"
+        for rel in sorted(set(possible))[:15]:
+            full = os.path.abspath(os.path.join(base, rel))
+            raw += f'<div style="margin-left:14px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>'
+    if disabled:
+        raw += f"<div style='margin-top:8px'>Explicitly disabled settings observed: {len(disabled)}</div>"
+
+    return TestResult(
+        name="WebView File/Content Access",
+        status=status,
+        summary_lines=[
+            f"Explicit/possible WebView resource access findings: {len(findings)}",
+            f"Local/content loading references: {len(set(possible))}",
+        ],
+        mastg_ref_html=mastg_ref,
+        findings=blocks,
+        raw_html=raw,
+    )
+
+
+def check_app_link_verification(manifest):
+    """
+    Review browsable HTTP(S) deep links for Android App Link verification.
+    Missing autoVerify is not a definite exploit, so it is WARN unless combined
+    with exported, unprotected handling that can be reached by arbitrary apps.
+    """
+    mastg_ref = (
+        "<br><div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0028/' target='_blank'>"
+        "MASTG-TEST-0028: Testing Deep Links</a></div>"
+    )
+    ns = '{http://schemas.android.com/apk/res/android}'
+    try:
+        root = ET.parse(manifest).getroot()
+    except Exception as e:
+        return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>{mastg_ref}", 0
+
+    issues = []
+    reviewed = 0
+    for activity in root.findall('.//activity'):
+        act_name = activity.get(ns + 'name', '')
+        exported = activity.get(ns + 'exported')
+        permission = activity.get(ns + 'permission')
+        for filt in activity.findall('intent-filter'):
+            cats = {c.get(ns + 'name', '') for c in filt.findall('category')}
+            actions = {a.get(ns + 'name', '') for a in filt.findall('action')}
+            if 'android.intent.category.BROWSABLE' not in cats or 'android.intent.action.VIEW' not in actions:
+                continue
+            schemes = [d.get(ns + 'scheme', '') for d in filt.findall('data')]
+            hosts = [d.get(ns + 'host', '') for d in filt.findall('data')]
+            if not any(s in ('http', 'https') for s in schemes):
+                continue
+            reviewed += 1
+            auto_verify = _parse_manifest_bool(filt.get(ns + 'autoVerify'))
+            implicitly_exported = exported is None
+            is_exported = exported == 'true' or implicitly_exported
+            if auto_verify is not True:
+                severity = 'WARN'
+                if is_exported and not permission:
+                    severity = 'FAIL'
+                issues.append({
+                    'severity': severity,
+                    'activity': act_name or '(unnamed activity)',
+                    'schemes': ', '.join(schemes) or '(scheme in merged data)',
+                    'hosts': ', '.join(hosts) or '(no host)',
+                    'exported': exported if exported is not None else 'implicit via intent-filter',
+                    'permission': permission or 'none',
+                })
+
+    if reviewed == 0:
+        return 'PASS', f"<div>No HTTP(S) browsable app links declared</div>{mastg_ref}", 0
+    if not issues:
+        return 'PASS', f"<div>{reviewed} HTTP(S) app link filter(s) use android:autoVerify=\"true\"</div>{mastg_ref}", 0
+
+    lines = [f"<div><strong>HTTP(S) app link filters reviewed:</strong> {reviewed}</div>"]
+    for item in issues:
+        color = '#dc2626' if item['severity'] == 'FAIL' else '#d97706'
+        lines.append(
+            "<div style='margin:8px 0;padding:8px;border-left:4px solid "
+            f"{color};background:#f8f9fa'>"
+            f"<strong>{item['severity']}:</strong> <code>{html.escape(item['activity'])}</code><br>"
+            f"schemes={html.escape(item['schemes'])}; hosts={html.escape(item['hosts'])}<br>"
+            f"exported={html.escape(item['exported'])}; permission={html.escape(item['permission'])}<br>"
+            "Set <code>android:autoVerify=\"true\"</code> and host a valid assetlinks.json where applicable."
+            "</div>"
+        )
+    status = 'FAIL' if any(i['severity'] == 'FAIL' for i in issues) else 'WARN'
+    return status, "\n".join(lines) + mastg_ref, len(issues)
+
+
+def check_manifest_attack_surface(manifest):
+    """
+    Extra manifest misconfiguration review for app-wide attack surface.
+    """
+    mastg_ref = (
+        "<br><div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0029/' target='_blank'>"
+        "MASTG-TEST-0029: Testing for Sensitive Functionality Exposure Through IPC</a></div>"
+    )
+    ns = '{http://schemas.android.com/apk/res/android}'
+    try:
+        root = ET.parse(manifest).getroot()
+    except Exception as e:
+        return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>{mastg_ref}", 0
+
+    issues = []
+    app = root.find('application')
+    if app is not None:
+        if _parse_manifest_bool(app.get(ns + 'usesCleartextTraffic')) is True:
+            issues.append(('FAIL', 'Application allows cleartext traffic globally'))
+        if _parse_manifest_bool(app.get(ns + 'directBootAware')) is True:
+            issues.append(('WARN', 'Application is directBootAware; verify no sensitive data is available before user unlock'))
+
+    for tag in ('activity', 'service', 'receiver', 'provider'):
+        for comp in root.findall(f'.//{tag}'):
+            name = comp.get(ns + 'name', '(unnamed)')
+            if _parse_manifest_bool(comp.get(ns + 'directBootAware')) is True:
+                issues.append(('WARN', f'{tag} {name} is directBootAware; review device-protected storage use'))
+            if tag == 'provider' and _parse_manifest_bool(comp.get(ns + 'grantUriPermissions')) is True:
+                if not comp.findall('grant-uri-permission') and not comp.findall('path-permission'):
+                    issues.append(('WARN', f'provider {name} grants URI permissions without path restrictions'))
+
+    if not issues:
+        return 'PASS', f"<div>No additional manifest attack-surface misconfigurations detected</div>{mastg_ref}", 0
+
+    lines = []
+    for status, msg in issues:
+        lines.append(f"<div><strong>{status}:</strong> {html.escape(msg)}</div>")
+    overall = 'FAIL' if any(status == 'FAIL' for status, _ in issues) else 'WARN'
+    return overall, "\n".join(lines) + mastg_ref, len(issues)
+
+
+def check_framework_security_signals(base, manifest):
+    """
+    Detect cross-platform app frameworks and security-relevant configuration files.
+    This is informational/WARN only; it helps the scanner work better across
+    native Android, Flutter, React Native, Cordova/Ionic, MAUI/Xamarin and Unity.
+    """
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-PLATFORM/MASTG-KNOW-0018/' target='_blank'>MASTG-KNOW-0018: WebViews</a></div>"
+    signals = {
+        'Flutter': [r'libflutter\.so', r'io/flutter/', r'FlutterActivity'],
+        'React Native': [r'com/facebook/react/', r'ReactActivity', r'RNCWebView'],
+        'Cordova/Ionic': [r'org/apache/cordova/', r'cordova\.js', r'config\.xml'],
+        'MAUI/Xamarin': [r'Mono\.Android', r'crc64', r'Maui'],
+        'Unity': [r'libunity\.so', r'com/unity3d/player/'],
+    }
+    found = defaultdict(list)
+    config_hits = []
+    files = list(_iter_app_source_files(base, exts=('.smali', '.java', '.xml', '.json', '.properties', '.so')))
+    with ScanProgress("Framework Security Signals", len(files)) as scan_progress:
+        for full, rel in files:
+            scan_progress.update()
+            try:
+                text = rel + "\n" + open(full, errors='ignore').read(120000)
+            except Exception:
+                text = rel
+            for framework, patterns in signals.items():
+                if any(re.search(p, text, re.IGNORECASE) for p in patterns):
+                    found[framework].append(rel)
+            if re.search(r'(network_security_config|backup_rules|data_extraction_rules|assetlinks\.json|config\.xml)', rel, re.I):
+                config_hits.append(rel)
+
+    if not found and not config_hits:
+        return 'PASS', f"<div>No cross-platform framework-specific security signals detected</div>{mastg_ref}", 0
+
+    lines = []
+    if found:
+        lines.append("<div><strong>Detected app framework signals:</strong></div>")
+        for framework, hits in sorted(found.items()):
+            lines.append(f"<div style='margin-left:14px'>{html.escape(framework)}: {len(set(hits))} file(s)</div>")
+            for rel in sorted(set(hits))[:5]:
+                full = os.path.abspath(os.path.join(base, rel))
+                lines.append(f'<div style="margin-left:28px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
+    if config_hits:
+        lines.append("<div style='margin-top:8px'><strong>Security configuration files/signals:</strong></div>")
+        for rel in sorted(set(config_hits))[:20]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<div style="margin-left:14px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
+
+    return 'WARN', "\n".join(lines) + mastg_ref, len(found) + len(config_hits)
+
+
+def check_frida_webview_runtime_settings(base, wait_secs=10):
+    """
+    Dynamic MASTG-TEST-0251/0253 monitor for actual WebView file/content settings.
+    """
+    manifest = os.path.join(base, 'AndroidManifest.xml')
+    pkg_prefix = ET.parse(manifest).getroot().attrib.get('package', '')
+    out = subprocess.check_output(['adb', 'shell', 'pm', 'list', 'packages', pkg_prefix], text=True)
+    candidates = [l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('package:')]
+    if not candidates:
+        raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
+    spawn_name = candidates[0]
+
+    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    jscode = r"""
+    setImmediate(function(){
+      Java.perform(function(){
+        function safe(fn) { try { fn(); } catch(e) {} }
+        var WebView = Java.use('android.webkit.WebView');
+        var WebSettings = Java.use('android.webkit.WebSettings');
+
+        function reportSettings(settings, source) {
+          safe(function() {
+            send({
+              type: 'webview_settings',
+              source: source,
+              allowFileAccess: settings.getAllowFileAccess(),
+              allowContentAccess: settings.getAllowContentAccess(),
+              allowFileAccessFromFileURLs: settings.getAllowFileAccessFromFileURLs(),
+              allowUniversalAccessFromFileURLs: settings.getAllowUniversalAccessFromFileURLs(),
+              javaScriptEnabled: settings.getJavaScriptEnabled()
+            });
+          });
+        }
+
+        WebView.$init.overloads.forEach(function(ov) {
+          ov.implementation = function() {
+            var ret = ov.apply(this, arguments);
+            reportSettings(this.getSettings(), 'WebView.<init>');
+            return ret;
+          };
+        });
+
+        ['setAllowFileAccess','setAllowContentAccess','setAllowFileAccessFromFileURLs','setAllowUniversalAccessFromFileURLs','setJavaScriptEnabled'].forEach(function(name) {
+          safe(function() {
+            WebSettings[name].overload('boolean').implementation = function(v) {
+              var ret = this[name](v);
+              reportSettings(this, name + '(' + v + ')');
+              return ret;
+            };
+          });
+        });
+
+        send({type: 'ready', msg: 'WebView settings hooks installed'});
+      });
+    });
+    """
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".js", delete=False)
+    tmp.write(_build_frida_js(jscode, context="WEBVIEW_SETTINGS").encode())
+    tmp.flush()
+    tmp.close()
+
+    proc = subprocess.Popen(
+        _build_frida_command(tmp.name, spawn_name, context="WEBVIEW_SETTINGS"),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
+    )
+    instructions = [
+        f"App '{spawn_name}' is running with WebView settings monitoring",
+        "Open every screen that displays web content, login pages, help pages, ads, or embedded articles",
+        "Press ENTER when you have exercised those flows"
+    ]
+    logs = interactive_frida_monitor(proc, "WEBVIEW SETTINGS", instructions)
+
+    events = []
+    for line in logs:
+        msg = extract_frida_message(line)
+        if msg and msg.get('type') == 'send':
+            payload = msg.get('payload', {})
+            if payload.get('type') == 'webview_settings':
+                events.append(payload)
+
+    proc.terminate()
+    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.unlink(tmp.name)
+
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0253/' target='_blank'>"
+        "MASTG-TEST-0253: Runtime Use of Local File Access APIs in WebViews</a><br>"
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0251/' target='_blank'>"
+        "MASTG-TEST-0251: Runtime Use of Content Provider Access APIs in WebViews</a></div>"
+    )
+
+    if not events:
+        return TestResult(
+            name="Dynamic WebView Settings",
+            status="INFO",
+            summary_lines=["No WebView instances/settings observed during runtime"],
+            mastg_ref_html=mastg_ref,
+            is_dynamic=True,
+        )
+
+    dangerous = []
+    warn = []
+    for ev in events:
+        if ev.get('allowFileAccess') and ev.get('allowFileAccessFromFileURLs') and ev.get('allowUniversalAccessFromFileURLs'):
+            dangerous.append(ev)
+        elif ev.get('allowUniversalAccessFromFileURLs') or ev.get('allowFileAccessFromFileURLs') or ev.get('allowContentAccess'):
+            warn.append(ev)
+
+    rows = ["<table><thead><tr><th>Source</th><th>JS</th><th>File</th><th>Content</th><th>File URL</th><th>Universal File URL</th></tr></thead><tbody>"]
+    for ev in events[:60]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(ev.get('source', 'unknown')))}</td>"
+            f"<td>{html.escape(str(ev.get('javaScriptEnabled')))}</td>"
+            f"<td>{html.escape(str(ev.get('allowFileAccess')))}</td>"
+            f"<td>{html.escape(str(ev.get('allowContentAccess')))}</td>"
+            f"<td>{html.escape(str(ev.get('allowFileAccessFromFileURLs')))}</td>"
+            f"<td>{html.escape(str(ev.get('allowUniversalAccessFromFileURLs')))}</td>"
+            "</tr>"
+        )
+    rows.append("</tbody></table>")
+
+    status = "FAIL" if dangerous else ("WARN" if warn else "PASS")
+    return TestResult(
+        name="Dynamic WebView Settings",
+        status=status,
+        summary_lines=[
+            f"WebView settings observations: {len(events)}",
+            f"MASTG failure combinations observed: {len(dangerous)}",
+            f"Settings requiring review: {len(warn)}",
+        ],
+        mastg_ref_html=mastg_ref,
+        raw_html="".join(rows),
+        is_dynamic=True,
+    )
+
+
 def print_banner():
     banner = r"""
      ___   ____  _____ _____
@@ -16120,6 +16635,8 @@ HTML_SPECIAL_CHECKS = {
     "DataStore Encryption",     "Room Database Encryption",
     "Anti-Debugging",
     "GMS Security Provider",
+    "WebView File/Content Access", "Android App Link Verification",
+    "Manifest Attack Surface",  "Framework Security Signals",
     "Dependency Vulnerability Scan",
     "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
 }
@@ -16145,6 +16662,10 @@ SUMMARY_BUILDERS = {
     "DataStore Encryption": summary_with_count("Unencrypted DataStore files"),
     "Room Database Encryption": summary_with_count("Unencrypted Room databases"),
     "Manifest Storage Flags": summary_with_count("Manifest storage flag issues"),
+    "WebView File/Content Access": summary_with_count("WebView resource access findings"),
+    "Android App Link Verification": summary_with_count("App link verification issues"),
+    "Manifest Attack Surface": summary_with_count("Manifest attack-surface issues"),
+    "Framework Security Signals": summary_with_count("Framework/configuration signals"),
     "Dependency Vulnerability Scan": summary_with_count("Dependencies with known vulnerabilities"),
     "S3 Bucket Security": summary_with_count("Misconfigured buckets"),
 }
@@ -16797,16 +17318,20 @@ def main():
                 "Exported Components",
                 "Min SDK Version",
                 "In-App Updates",
-            "Allow Backup",
-            "StrictMode APIs",
-            "FLAG_SECURE Usage",
-            "Recent Screenshot Protection",
-            "WebView JavaScript Bridges",
-            "Clipboard Security",
-            "Notification Sensitive Data",
-            "PendingIntent Flags",
-        ]
-    },
+                "Allow Backup",
+                "StrictMode APIs",
+                "FLAG_SECURE Usage",
+                "Recent Screenshot Protection",
+                "WebView JavaScript Bridges",
+                "WebView File/Content Access",
+                "Dynamic WebView Settings",
+                "Clipboard Security",
+                "Notification Sensitive Data",
+                "PendingIntent Flags",
+                "Android App Link Verification",
+                "Manifest Attack Surface",
+            ]
+        },
         "MASVS-CODE": {
             "title": "Code Quality",
             "url":   "https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0002/",
@@ -16823,6 +17348,7 @@ def main():
                 "Insecure Fingerprint API",
                 "Raw SQL Queries",
                 "Insecure Package Context",
+                "Framework Security Signals",
                 "Dependency Vulnerability Scan",
             ]
         },
@@ -16942,6 +17468,7 @@ def main():
         make_check("Task Hijacking",          lambda: check_task_hijack(manifest, apk_path)),
         make_check("Exported Components",     lambda: check_exported_components(manifest, base)),
         make_check("Insecure WebView Usage",  lambda: check_insecure_webview(base)),
+        make_check("WebView File/Content Access", lambda: check_webview_file_content_access(base)),
         make_check("OS Command Injection",    lambda: check_os_command_injection(base)),
         make_check("Safe Browsing Enabled",   lambda: check_safe_browsing(manifest, base)),
         make_check("Weak Crypto Algorithms",  lambda: check_weak_crypto(base)),
@@ -16972,6 +17499,9 @@ def main():
         make_check("Room Database Encryption", lambda: check_room_encryption(base)),
         make_check("Anti-Debugging",          lambda: check_anti_debugging(base)),
         make_check("GMS Security Provider",   lambda: check_gms_security_provider(base)),
+        make_check("Android App Link Verification", lambda: check_app_link_verification(manifest)),
+        make_check("Manifest Attack Surface", lambda: check_manifest_attack_surface(manifest)),
+        make_check("Framework Security Signals", lambda: check_framework_security_signals(base, manifest)),
         make_check("Dependency Vulnerability Scan", lambda: check_dependency_vulnerability_scan(base)),
         make_check("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
@@ -17068,6 +17598,7 @@ def main():
             make_dynamic_check("Dynamic PendingIntent",        lambda: check_frida_pending_intent(base)),
             make_dynamic_check("Dynamic Crypto Keys",          lambda: check_frida_crypto_keys(base)),
             make_dynamic_check("Dynamic Clipboard",            lambda: check_frida_clipboard(base)),
+            make_dynamic_check("Dynamic WebView Settings",     lambda: check_frida_webview_runtime_settings(base)),
             make_dynamic_check("Storage Analysis",             run_storage_analysis),
         ]
         DYNAMIC_TO_STATIC = {
@@ -17083,6 +17614,7 @@ def main():
          "Dynamic PendingIntent":         "PendingIntent Flags",
          "Dynamic Crypto Keys":           "Hardcoded Keys",
          "Dynamic Clipboard":             "Clipboard Security",
+         "Dynamic WebView Settings":      "WebView File/Content Access",
         }
 
         # Interactive dynamic test selection
