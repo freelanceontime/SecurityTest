@@ -80,7 +80,7 @@ LIB_PATHS = (
     '/io/reactivex/', '/rx/', '/dagger/',
     '/net/sqlcipher/', '/org/sqlite/',
     '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
-    '/org/apache/', '/javax/',
+    '/org/apache/', '/java/', '/javax/',
     '/org/conscrypt/',  # Google's Conscrypt TLS/crypto provider
     '/com/livechatinc/',  # LiveChat SDK
     '/io/flutter/plugins/',  # Flutter plugins (webview, url_launcher, etc.)
@@ -93,6 +93,13 @@ LIB_PATHS = (
     '/io/ktor/',             # Ktor HTTP/WebSocket client
     '/com/neovisionaries/',  # nv-websocket-client (used by Twilio SDK)
     '/com/twilio/',          # Twilio Conversations / Twilsock SDK
+    '/com/google/gson/', '/com/google/crypto/tink/', '/com/google/common/',
+    '/org/chromium/', '/io/sentry/', '/io/requery/',
+    '/org/joda/time/', '/org/threeten/bp/', '/com/jakewharton/threetenabp/',
+    '/org/bson/', '/org/jsoup/', '/io/jsonwebtoken/',
+    '/j$/',  # Android desugar runtime
+    '/coil/', '/com/airbnb/lottie/', '/com/github/mikephil/charting/',
+    '/b0/',  # Obfuscated AndroidX BundleCompat shim
     '/lib/', '/jetified-'
 )
 
@@ -4883,31 +4890,6 @@ def check_serialize(base):
     """
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0034/' target='_blank'>MASTG-TEST-0034: Testing Object Persistence</a></div>"
-
-    # Library paths to exclude (Google GSON, Tink, Protobuf use serialization internally - these are safe)
-    lib_paths = (
-        '/androidx/', '/android/support/',
-        '/com/google/android/gms/', '/com/google/firebase/',
-        '/com/google/gson/', '/com/google/crypto/tink/', '/com/google/protobuf/',
-        '/com/google/common/', '/com/google/android/play/',
-        '/okhttp3/', '/retrofit2/', '/com/squareup/',
-        '/com/facebook/', '/kotlin/', '/kotlinx/',
-        '/org/chromium/', '/io/reactivex/',
-        '/io/sentry/',
-        '/org/conscrypt/',  # Conscrypt TLS library (key serialization)
-        '/org/apache/',     # Apache Commons libraries
-        '/io/requery/',     # Requery database ORM
-        '/io/flutter/plugins/',  # Flutter plugins (SharedPreferences etc)
-        '/b0/',             # Obfuscated AndroidX BundleCompat shim (safe compatibility wrapper)
-        '/lib/', '/jetified-'
-    )
-
-    def is_library_path(path):
-        """Check if path is library code"""
-        if INCLUDE_LIBS:
-            return False
-        normalized = '/' + path.replace('\\', '/')
-        return any(lib in normalized for lib in lib_paths)
 
     # Patterns to detect
     old_api_pattern = re.compile(r'getSerializable\(Ljava/lang/String;\)Ljava/io/Serializable;')
