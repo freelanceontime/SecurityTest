@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import json
+import zipfile
 import frida
 import html
 import xml.etree.ElementTree as ET
@@ -1881,6 +1882,31 @@ def run_cmd(cmd):
         return subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True, universal_newlines=True)
     except subprocess.CalledProcessError as e:
         return e.output
+
+def decompile_apk_or_exit(apk_path, base):
+    if not zipfile.is_zipfile(apk_path):
+        print(f"[!] Error: '{apk_path}' is not a valid APK/ZIP archive")
+        print("[!] Decompilation stopped; no report was generated.")
+        sys.exit(1)
+
+    result = subprocess.run(
+        ['apktool', 'd', apk_path, '-o', base, '-f', '-j', '1'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    manifest = os.path.join(base, 'AndroidManifest.xml')
+    if result.returncode != 0 or not os.path.exists(manifest):
+        print("[!] apktool decompilation failed; no report was generated.")
+        output = (result.stdout or "").strip()
+        if output:
+            print(output)
+        if result.returncode == 0:
+            print(f"[!] apktool completed but did not create {manifest}")
+        sys.exit(1)
+
+    return result.stdout
 
 def extract_apk_metadata(apk_path, manifest_path):
     """
@@ -17220,9 +17246,14 @@ def main():
         # Use single-threaded decompilation (-j 1) for large APKs to avoid OOM errors
         # Note: If apktool still fails with OOM, manually edit apktool wrapper:
         #   sudo sed -i 's/exec java /exec java -Xmx6G /' $(which apktool)
-        run_cmd(f"apktool d {apk_path} -o {base} -f -j 1")
-        with open(os.path.join(base, '.apk_source'), 'w') as m:
-            m.write(apk_path)
+        decompile_apk_or_exit(apk_path, base)
+        try:
+            with open(os.path.join(base, '.apk_source'), 'w') as m:
+                m.write(apk_path)
+        except OSError as e:
+            print(f"[!] Error: could not write scan metadata in '{base}': {e}")
+            print("[!] Check free disk space and rerun the scan.")
+            sys.exit(1)
     else:
         # Validate directory exists
         if not os.path.exists(args.dir):
