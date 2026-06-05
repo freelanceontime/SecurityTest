@@ -523,6 +523,31 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 logs.append(line)
             except queue.Empty:
                 break
+    else:
+        # Most dynamic checks launch with `frida -f <package>`. Ensure the CLI has
+        # fully exited before the next dynamic check starts, otherwise Frida can
+        # return "spawn already in progress for the specified package name".
+        if proc.poll() is None:
+            print("[*] Stopping Frida process...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("[!] Frida did not exit in time, forcing termination...")
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+
+        reader_thread.join(timeout=2)
+        while True:
+            try:
+                line = stdout_queue.get_nowait().rstrip()
+                print(line)
+                logs.append(line)
+            except queue.Empty:
+                break
 
     return logs
 
@@ -15655,55 +15680,102 @@ def check_frida_crypto_keys(base, wait_secs=10):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     jscode = r"""
-    setImmediate(function(){
-      if (Java.available) {
-        Java.perform(function(){
-          // Hook SecretKeySpec constructor
-          var SecretKeySpec = Java.use("javax.crypto.spec.SecretKeySpec");
-          SecretKeySpec.$init.overload("[B", "java.lang.String").implementation = function(keyBytes, algorithm) {
-            var keyLen = keyBytes.length;
-            var keyHex = "";
-            for (var i = 0; i < Math.min(8, keyLen); i++) {
-              keyHex += ("0" + (keyBytes[i] & 0xFF).toString(16)).slice(-2);
-            }
-            if (keyLen > 8) keyHex += "...";
+    setImmediate(function install(){
+      if (!Java.available) return setTimeout(install, 100);
+      Java.perform(function(){
+        function safe(label, fn) {
+          try { fn(); }
+          catch (e) { send({type:"crypto_hook_error", hook:label, error:String(e)}); }
+        }
 
-            send({
-              type: "secret_key",
-              algorithm: algorithm,
-              keyLength: keyLen * 8,
-              keyPreview: keyHex
-            });
-            return this.$init(keyBytes, algorithm);
-          };
-
-          // Hook KeyGenerator
-          var KeyGenerator = Java.use("javax.crypto.KeyGenerator");
-          KeyGenerator.init.overload("int").implementation = function(keySize) {
-            send({
-              type: "key_generator",
-              keySize: keySize
-            });
-            return this.init(keySize);
-          };
-
-          // Hook KeyPairGenerator
+        function previewBytes(arr) {
+          var out = "";
           try {
-            var KeyPairGenerator = Java.use("java.security.KeyPairGenerator");
-            KeyPairGenerator.initialize.overload("int").implementation = function(keySize) {
-              send({
-                type: "keypair_generator",
-                keySize: keySize
-              });
-              return this.initialize(keySize);
-            };
-          } catch(e) {}
+            var n = Math.min(arr.length, 8);
+            for (var i = 0; i < n; i++) {
+              out += ("0" + (arr[i] & 0xff).toString(16)).slice(-2);
+            }
+            if (arr.length > 8) out += "...";
+          } catch(e) {
+            out = "(unreadable)";
+          }
+          return out;
+        }
 
-          send({type: "ready", msg: "Crypto hooks installed"});
+        safe("SecretKeySpec(byte[],String)", function(){
+          var SecretKeySpec = Java.use("javax.crypto.spec.SecretKeySpec");
+          var ov = SecretKeySpec.$init.overload("[B", "java.lang.String");
+          ov.implementation = function(keyBytes, algorithm) {
+            try {
+              send({
+                type: "secret_key",
+                algorithm: String(algorithm),
+                keyLength: keyBytes.length * 8,
+                keyPreview: previewBytes(keyBytes)
+              });
+            } catch(e) {
+              send({type:"crypto_hook_error", hook:"SecretKeySpec", error:String(e)});
+            }
+            return ov.call(this, keyBytes, algorithm);
+          };
         });
-      } else {
-        setTimeout(arguments.callee, 100);
-      }
+
+        safe("SecretKeySpec(byte[],int,int,String)", function(){
+          var SecretKeySpec = Java.use("javax.crypto.spec.SecretKeySpec");
+          var ov = SecretKeySpec.$init.overload("[B", "int", "int", "java.lang.String");
+          ov.implementation = function(keyBytes, offset, len, algorithm) {
+            try {
+              send({
+                type: "secret_key",
+                algorithm: String(algorithm),
+                keyLength: len * 8,
+                keyPreview: previewBytes(keyBytes)
+              });
+            } catch(e) {
+              send({type:"crypto_hook_error", hook:"SecretKeySpec-range", error:String(e)});
+            }
+            return ov.call(this, keyBytes, offset, len, algorithm);
+          };
+        });
+
+        safe("KeyGenerator.init(int)", function(){
+          var KeyGenerator = Java.use("javax.crypto.KeyGenerator");
+          var ov = KeyGenerator.init.overload("int");
+          ov.implementation = function(keySize) {
+            try { send({type: "key_generator", keySize: keySize}); } catch(e) {}
+            return ov.call(this, keySize);
+          };
+        });
+
+        safe("KeyGenerator.init(int,SecureRandom)", function(){
+          var KeyGenerator = Java.use("javax.crypto.KeyGenerator");
+          var ov = KeyGenerator.init.overload("int", "java.security.SecureRandom");
+          ov.implementation = function(keySize, random) {
+            try { send({type: "key_generator", keySize: keySize, secureRandom: true}); } catch(e) {}
+            return ov.call(this, keySize, random);
+          };
+        });
+
+        safe("KeyPairGenerator.initialize(int)", function(){
+          var KeyPairGenerator = Java.use("java.security.KeyPairGenerator");
+          var ov = KeyPairGenerator.initialize.overload("int");
+          ov.implementation = function(keySize) {
+            try { send({type: "keypair_generator", keySize: keySize}); } catch(e) {}
+            return ov.call(this, keySize);
+          };
+        });
+
+        safe("KeyPairGenerator.initialize(int,SecureRandom)", function(){
+          var KeyPairGenerator = Java.use("java.security.KeyPairGenerator");
+          var ov = KeyPairGenerator.initialize.overload("int", "java.security.SecureRandom");
+          ov.implementation = function(keySize, random) {
+            try { send({type: "keypair_generator", keySize: keySize, secureRandom: true}); } catch(e) {}
+            return ov.call(this, keySize, random);
+          };
+        });
+
+        send({type: "ready", msg: "Crypto hooks installed"});
+      });
     });
     """
 
@@ -15728,6 +15800,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
     # Parse collected logs
     findings = []
     weak_keys = []
+    hook_errors = []
     for line in logs:
         msg = extract_frida_message(line)
         if msg:
@@ -15752,6 +15825,8 @@ def check_frida_crypto_keys(base, wait_secs=10):
                         findings.append(f"{marker} Generated keypair: {size} bits")
                         if size < 2048:
                             weak_keys.append(f"RSA with {size} bits")
+                    elif payload.get('type') == 'crypto_hook_error':
+                        hook_errors.append(f"{payload.get('hook', 'unknown')}: {payload.get('error', '')}")
             except:
                 pass
 
@@ -15761,16 +15836,29 @@ def check_frida_crypto_keys(base, wait_secs=10):
     os.unlink(tmp.name)
 
     if not findings:
+        raw = ""
+        if hook_errors:
+            raw = (
+                "<div class='info-box'><strong>Crypto hook diagnostics:</strong><br>"
+                + "<br>".join(html.escape(e) for e in hook_errors[:20])
+                + "</div>"
+            )
         return TestResult(
             name="Dynamic Crypto Keys",
             status="INFO",
-            summary_lines=["No cryptographic operations observed during runtime"],
+            summary_lines=[
+                "No cryptographic operations observed during runtime",
+                f"Hook diagnostics: {len(hook_errors)}" if hook_errors else "No hook errors reported",
+            ],
+            raw_html=raw,
             is_dynamic=True,
         )
 
     detail = [f"<div><strong>Cryptographic operations detected:</strong></div>"]
     if weak_keys:
         detail.append(f"<div><strong>WARNING: Weak keys found:</strong> {', '.join(set(weak_keys))}</div>")
+    if hook_errors:
+        detail.append("<div class='info-box'><strong>Crypto hook diagnostics:</strong><br>" + "<br>".join(html.escape(e) for e in hook_errors[:20]) + "</div>")
 
     detail.extend([f"<div>{html.escape(f)}</div>" for f in findings[:30]])
     if len(findings) > 30:
@@ -15783,6 +15871,7 @@ def check_frida_crypto_keys(base, wait_secs=10):
         summary_lines=[
             f"Crypto operations observed: {len(findings)}",
             f"Weak keys: {len(set(weak_keys))}" if weak_keys else "No weak keys detected",
+            f"Hook diagnostics: {len(hook_errors)}" if hook_errors else "No hook errors reported",
         ],
         raw_html="".join(detail),
         is_dynamic=True,
@@ -18635,7 +18724,7 @@ def main():
     ]
 
     configured_static_checks = len(checks)
-    configured_dynamic_checks = 14
+    configured_dynamic_checks = 13
     checks.append(make_check("MASVS Coverage Matrix", lambda: check_masvs_coverage_matrix(configured_static_checks, configured_dynamic_checks)))
 
     # Interactive test selection
@@ -18797,6 +18886,13 @@ def main():
                 frida_checks = []
 
             print("="*70 + "\n")
+
+        if frida_checks:
+            print("[*] Dynamic tests queued:")
+            for idx, (name, _) in enumerate(frida_checks, 1):
+                print(f"    {idx}. {name}")
+        elif args.usb:
+            print("[*] No dynamic tests queued.")
 
         for name, fn in frida_checks:
             print(f"[*] Running {name}...")
