@@ -18,7 +18,10 @@ import ast
 import select
 from collections import defaultdict
 import math
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 import hashlib
 import urllib.request
 import urllib.error
@@ -3151,6 +3154,231 @@ def check_dependency_vulnerability_scan(base):
         raw_html="".join(findings_html),
     )
 
+def check_flatbuffers_firebase_cpp(base):
+    """
+    Deterministic scanner for the FoodScanner-style FlatBuffers finding.
+    Generic dependency scanners often miss this because the evidence is embedded
+    in a native Firebase C++ shared object rather than a normal dependency file.
+    """
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0272/' target='_blank'>"
+        "MASTG-TEST-0272: Identify Dependencies with Known Vulnerabilities in the Android Project</a></div>"
+    )
+    findings = []
+    scanned = 0
+
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if fn != 'libFirebaseCppApp-12_10_1.so':
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            scanned += 1
+            try:
+                with open(full, 'rb') as f:
+                    blob = f.read()
+            except Exception:
+                continue
+
+            has_flatbuffers = b'FlatBuffers' in blob or b'flatbuffers' in blob
+            has_version = b'1.12.0' in blob
+            if has_flatbuffers and has_version:
+                snippets = []
+                for needle in (b'FlatBuffers', b'flatbuffers', b'1.12.0'):
+                    idx = blob.find(needle)
+                    if idx >= 0:
+                        start = max(0, idx - 80)
+                        end = min(len(blob), idx + 160)
+                        text = re.sub(rb'[^\x20-\x7e]+', b' ', blob[start:end])
+                        snippets.append(text.decode('ascii', errors='ignore').strip())
+                findings.append(
+                    FindingBlock(
+                        title=rel,
+                        subtitle="FlatBuffers 1.12.0 string evidence in Firebase C++ library",
+                        link=f"file://{os.path.abspath(full)}",
+                        code="\n".join(dict.fromkeys(snippets)) or "FlatBuffers 1.12.0",
+                        code_language="text",
+                    )
+                )
+
+    if not findings:
+        return TestResult(
+            name="Firebase C++ FlatBuffers Version",
+            status="PASS" if scanned else "INFO",
+            summary_lines=[
+                f"Firebase C++ app libraries scanned: {scanned}",
+                "FlatBuffers 1.12.0 evidence not found" if scanned else "Firebase C++ app library not found",
+            ],
+            mastg_ref_html=mastg_ref,
+        )
+
+    return TestResult(
+        name="Firebase C++ FlatBuffers Version",
+        status="WARN",
+        summary_lines=[
+            f"Firebase C++ app libraries scanned: {scanned}",
+            f"FlatBuffers 1.12.0 evidence found in {len(findings)} library file(s)",
+            "CVE applicability requires vendor/app reachability review; scanner CVE text commonly refers to the Rust crate",
+        ],
+        mastg_ref_html=mastg_ref,
+        findings=findings,
+    )
+
+def check_crashlytics_sensitive_storage(base):
+    """
+    Review Crashlytics files present in the scan workspace for privacy-sensitive user data.
+    This catches pulled runtime artifacts when the tester includes app-private
+    storage output in the scan directory. If no runtime artifacts exist, report an
+    INFO item with exact dynamic reproduction guidance.
+    """
+    mastg_ref = (
+        "<div><strong>Reference:</strong> "
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>"
+        "MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a><br>"
+        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0206/' target='_blank'>"
+        "MASTG-TEST-0206: Testing User Privacy Protection</a></div>"
+    )
+    crashlytics_files = []
+    sensitive_hits = []
+    runtime_dirs_seen = set()
+    patterns = [
+        ('postcode / postal code', re.compile(r'\b(?:post\s*code|postcode|postal(?:_|\s|-)?code|zip(?:_|\s|-)?code)?\b.{0,30}\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b', re.IGNORECASE)),
+        ('exact age / date of birth', re.compile(r'\b(age|user_age|exact_age|date_of_birth|dob|birthdate|birthday)\b.{0,60}\b(?:\d{1,3}|\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})\b', re.IGNORECASE)),
+        ('gender / demographic / family status', re.compile(r'\b(gender|sex|parent|is_parent|pregnan|ethnicity|race|demographic|household|children|child|carer|disability)\b', re.IGNORECASE)),
+        ('health / diet / food behaviour', re.compile(r'\b(health|medical|condition|diagnosis|allergy|allergen|diet|weight|bmi|calorie|nutrition|food[_ -]?scan|swaps?|product[_ -]?scan)\b', re.IGNORECASE)),
+        ('precise location', re.compile(r'\b(latitude|longitude|lat|lng|gps|geo(?:location)?|location|address|street|city)\b.{0,80}\b-?\d{1,3}\.\d{4,}\b', re.IGNORECASE)),
+        ('email address', re.compile(r'\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b', re.IGNORECASE)),
+        ('phone number', re.compile(r'\b(?:\+?\d[\d\s().-]{8,}\d)\b')),
+        ('persistent user identifier', re.compile(r'\b(pseudo_user_id|user_id|userid|user-id|firebase_id|installation|fid|app_instance_id|device_id|advertising_id|gaid|idfa|guid|uuid)\b', re.IGNORECASE)),
+        ('auth/session token', re.compile(r'\b(token|jwt|bearer|authorization|auth[_ -]?token|session[_ -]?id|refresh[_ -]?token|access[_ -]?token|cookie)\b', re.IGNORECASE)),
+        ('timing / session behaviour', re.compile(r'\b(timestamp|event_time|start_time|end_time|duration|elapsed|timer|session_length|session_duration|time_spent|screen_time|last_seen|created_at|updated_at)\b', re.IGNORECASE)),
+        ('screen / event trail', re.compile(r'\b(screen|screen_name|view|button|click|tap|event|journey|flow|page|route|navigation)\b', re.IGNORECASE)),
+    ]
+
+    def _redact_privacy_values(snippet):
+        redacted = snippet
+        redacted = re.sub(r'\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b', '<email:redacted>', redacted, flags=re.IGNORECASE)
+        redacted = re.sub(r'\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b', '<postcode:redacted>', redacted, flags=re.IGNORECASE)
+        redacted = re.sub(r'\b(?:\+?\d[\d\s().-]{8,}\d)\b', '<phone-or-id:redacted>', redacted)
+        redacted = re.sub(r'\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '<uuid:redacted>', redacted, flags=re.IGNORECASE)
+        redacted = re.sub(r'\beyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}(?:\.[A-Za-z0-9_\-]{10,})?\b', '<jwt:redacted>', redacted)
+        return redacted
+
+    for root, _, files in os.walk(base):
+        root_norm = root.replace('\\', '/').lower()
+        if 'crashlytics' in root_norm:
+            runtime_dirs_seen.add(root)
+        for fn in files:
+            rel = os.path.relpath(os.path.join(root, fn), base)
+            rel_norm = rel.replace('\\', '/').lower()
+            if 'crashlytics' not in rel_norm:
+                continue
+            full = os.path.join(root, fn)
+            crashlytics_files.append(rel)
+            try:
+                data = open(full, 'rb').read(512 * 1024)
+            except Exception:
+                continue
+            text = data.decode('utf-8', errors='ignore')
+            if not text:
+                continue
+            for label, rx in patterns:
+                for m in rx.finditer(text):
+                    line_no = text[:m.start()].count('\n') + 1
+                    start = max(0, m.start() - 120)
+                    end = min(len(text), m.end() + 120)
+                    snippet = _redact_privacy_values(text[start:end].replace('\r', ''))
+                    sensitive_hits.append((label, rel, line_no, snippet))
+                    break
+
+    if sensitive_hits:
+        findings = []
+        for label, rel, line_no, snippet in sensitive_hits[:30]:
+            full = os.path.join(base, rel)
+            findings.append(
+                FindingBlock(
+                    title=f"{rel}:{line_no}",
+                    subtitle=f"Sensitive Crashlytics data indicator: {label}",
+                    link=f"file://{os.path.abspath(full)}",
+                    code=snippet,
+                    code_language="text",
+                )
+            )
+        return TestResult(
+            name="Crashlytics Sensitive Data Storage",
+            status="FAIL",
+            summary_lines=[
+                f"Crashlytics files scanned: {len(crashlytics_files)}",
+                f"Privacy-sensitive indicators found: {len(sensitive_hits)}",
+                "Review all Crashlytics custom keys, user logs, timers, event trails, identifiers, demographics, location, health/diet, and auth/session data before release",
+            ],
+            mastg_ref_html=mastg_ref,
+            findings=findings,
+        )
+
+    guidance = (
+        "<div>No sensitive Crashlytics runtime artifacts were present in the static scan workspace.</div>"
+        "<div class='warning-box'>Static APK analysis cannot prove Crashlytics payload minimisation. "
+        "Run the app, complete onboarding, exercise representative flows, then inspect "
+        "<code>files/.crashlytics.v3/**/userlog</code> with "
+        "<code>adb shell run-as &lt;package&gt; find files/.crashlytics.v3 -name userlog -type f</code>.</div>"
+    )
+    return TestResult(
+        name="Crashlytics Sensitive Data Storage",
+        status="INFO" if not crashlytics_files else "PASS",
+        summary_lines=[
+            f"Crashlytics files scanned: {len(crashlytics_files)}",
+            "No sensitive indicators found in available artifacts" if crashlytics_files else "Runtime Crashlytics artifacts not available in scan workspace",
+        ],
+        mastg_ref_html=mastg_ref,
+        raw_html=guidance,
+    )
+
+def check_masvs_coverage_matrix(static_count, dynamic_count):
+    """
+    Report automation coverage honestly. This tool automates a broad Android subset,
+    but it does not implement every MASVS/MASTG Android test as a standalone check.
+    """
+    rows = [
+        ("MASVS-STORAGE", "Automated + dynamic", "Local storage, SharedPreferences, DataStore, Room, external storage, storage analysis, Crashlytics artifact review"),
+        ("MASVS-CRYPTO", "Partial automated", "Weak crypto, hardcoded keys, signature schemes; manual design review still required"),
+        ("MASVS-AUTH", "Partial automated", "Deep links and biometric API checks; server-side authz requires manual/API testing"),
+        ("MASVS-NETWORK", "Automated + dynamic", "TLS config, HTTP URLs, pinning, WebView SSL, GMS provider, dynamic TLS checks"),
+        ("MASVS-PLATFORM", "Automated + dynamic", "IPC/exported components, PendingIntent, WebView, keyboard caching, clipboard, screenshots, notifications"),
+        ("MASVS-CODE", "Automated + manual follow-up", "Dependency hygiene, insecure APIs, package context, logging, framework signals"),
+        ("MASVS-RESILIENCE", "Partial automated", "Debuggable, symbols, anti-debug, root detection, memtag; anti-tamper/obfuscation depth needs manual review"),
+        ("MASVS-PRIVACY", "Automated + manual follow-up", "Dangerous permissions, local privacy artifacts, logging/telemetry indicators; policy/data-flow inventory still required"),
+    ]
+    table_rows = []
+    for cat, coverage, notes in rows:
+        table_rows.append(
+            "<tr>"
+            f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(cat)}</td>"
+            f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(coverage)}</td>"
+            f"<td style='padding:6px; border:1px solid #dee2e6;'>{html.escape(notes)}</td>"
+            "</tr>"
+        )
+    table = (
+        "<div class='warning-box'>This scanner does not contain all 102 MASVS/MASTG Android tests as separate executable checks. "
+        "It provides broad automated coverage plus dynamic hooks, and the remaining items require manual design, backend, privacy, or runtime validation.</div>"
+        "<table style='width:100%; border-collapse:collapse; font-size:11px;'>"
+        "<thead><tr><th style='padding:6px; border:1px solid #dee2e6;'>MASVS Area</th>"
+        "<th style='padding:6px; border:1px solid #dee2e6;'>Coverage</th>"
+        "<th style='padding:6px; border:1px solid #dee2e6;'>Notes</th></tr></thead><tbody>"
+        + "".join(table_rows) + "</tbody></table>"
+    )
+    return TestResult(
+        name="MASVS Coverage Matrix",
+        status="INFO",
+        summary_lines=[
+            f"Automated static checks configured: {static_count}",
+            f"Dynamic Frida checks configured: {dynamic_count}",
+            "Not all 102 MASVS/MASTG Android tests are automated as standalone checks",
+        ],
+        raw_html=table,
+    )
+
 def check_s3_bucket_security(base):
     """
     Searches for AWS S3 bucket references in the decompiled code and tests for common misconfigurations:
@@ -3686,7 +3914,7 @@ def check_strict_mode(base):
     StrictMode should be disabled in production builds as it can leak debug info.
     Shows actual API calls with line numbers and context.
     """
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0263/' target='_blank'>MASTG-TEST-0263: Logging of StrictMode Violations</a></div>"
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0263/' target='_blank'>MASTG-TEST-0263: Logging of StrictMode Violations</a></div>"
 
     # StrictMode API patterns (SMALI patterns for decompiled APK)
     strictmode_apis = {
@@ -4768,40 +4996,163 @@ def check_min_sdk(manifest, apk_path=None, threshold=28):
         mastg_ref_html=mastg_ref,
     )
 
-def check_file_provider(res_dir):
+def check_file_provider(base, manifest=None):
     """
     FAIL on any of:
-      1) Insecure FileProvider path elements (root-path, external-path, etc.) with path="." or path="/"
-      2) Overly-broad <grant-uri-permission> or <path-permission>
-    Emits clickable file:// links with the XML filename and shows the actual insecure XML element.
+      1) FileProvider exported=true or missing grantUriPermissions=true
+      2) Missing FILE_PROVIDER_PATHS metadata/resource
+      3) Insecure FileProvider path elements (<root-path>, path=".", path="/", path="", traversal)
+      4) Overly-broad manifest <grant-uri-permission> or <path-permission>
+    WARN on broad external-path exposure because exploitability depends on what the app shares.
+    Emits clickable file:// links and shows the actual insecure XML/manifest element.
     """
 
-    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/' target='_blank'>MASTG-TEST-0001: Testing Local Storage for Sensitive Data</a></div>"
+    mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0357/' target='_blank'>MASTG-TEST-0357: References to Oversharing of File-Based Content Providers</a></div>"
 
     findings = []
+    res_dir = os.path.join(base, 'res')
     xml_dir = os.path.join(res_dir, 'xml')
+    manifest_path = manifest or os.path.join(base, 'AndroidManifest.xml')
+    android_ns = '{http://schemas.android.com/apk/res/android}'
+
+    def android_attr(elem, name, default=''):
+        return elem.get(android_ns + name, elem.get('android:' + name, elem.get(name, default)))
+
+    def add_finding(status, rel, subtitle, code, language='xml', abs_path=None):
+        findings.append((
+            status,
+            FindingBlock(
+                title=rel,
+                subtitle=f"{status}: {subtitle}",
+                link=f"file://{abs_path or os.path.abspath(os.path.join(base, rel))}",
+                code=code,
+                code_language=language,
+                open_by_default=True,
+            )
+        ))
+
+    def grab_snippet(full, search_terms):
+        try:
+            lines = open(full, errors='ignore').read().splitlines()
+        except Exception:
+            return ""
+        for idx, line in enumerate(lines):
+            if all(term in line for term in search_terms if term):
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                return "\n".join(lines[start:end])
+        return ""
+
+    def resolve_xml_resource(resource_value):
+        if not resource_value:
+            return None
+        if resource_value.startswith('@xml/'):
+            return resource_value.split('/', 1)[1] + '.xml'
+        if resource_value.startswith('@') and '/xml/' in resource_value:
+            return resource_value.rsplit('/', 1)[-1] + '.xml'
+        return None
+
+    providers = []
+    referenced_xml = set()
+    if os.path.exists(manifest_path):
+        try:
+            manifest_tree = ET.parse(manifest_path)
+            manifest_root = manifest_tree.getroot()
+            manifest_rel = os.path.relpath(manifest_path, base)
+            manifest_abs = os.path.abspath(manifest_path)
+            for provider in manifest_root.findall('.//provider'):
+                name = android_attr(provider, 'name')
+                authorities = android_attr(provider, 'authorities')
+                exported = android_attr(provider, 'exported')
+                grant_uri = android_attr(provider, 'grantUriPermissions')
+                metadata = []
+                is_file_provider = 'FileProvider' in (name or '')
+
+                for meta in provider.findall('meta-data'):
+                    meta_name = android_attr(meta, 'name')
+                    meta_res = android_attr(meta, 'resource')
+                    if meta_name in ('android.support.FILE_PROVIDER_PATHS', 'androidx.core.FILE_PROVIDER_PATHS'):
+                        is_file_provider = True
+                        xml_name = resolve_xml_resource(meta_res)
+                        metadata.append((meta_name, meta_res, xml_name))
+                        if xml_name:
+                            referenced_xml.add(xml_name)
+
+                if not is_file_provider:
+                    continue
+
+                providers.append((provider, metadata))
+
+                provider_summary = f'<provider android:name="{name}" android:authorities="{authorities}">'
+                if exported and exported.lower() != 'false':
+                    add_finding('FAIL', manifest_rel, 'FileProvider is exported', provider_summary, 'xml', manifest_abs)
+                elif exported == '':
+                    add_finding('WARN', manifest_rel, 'FileProvider does not explicitly set android:exported="false"', provider_summary, 'xml', manifest_abs)
+
+                if grant_uri.lower() != 'true':
+                    add_finding('FAIL', manifest_rel, 'FileProvider does not set android:grantUriPermissions="true"', provider_summary, 'xml', manifest_abs)
+
+                if not authorities:
+                    add_finding('FAIL', manifest_rel, 'FileProvider has no android:authorities value', provider_summary, 'xml', manifest_abs)
+
+                if not metadata:
+                    add_finding('FAIL', manifest_rel, 'FileProvider has no FILE_PROVIDER_PATHS metadata', provider_summary, 'xml', manifest_abs)
+                else:
+                    for meta_name, meta_res, xml_name in metadata:
+                        if not xml_name:
+                            add_finding('FAIL', manifest_rel, f'FILE_PROVIDER_PATHS metadata does not reference an @xml resource: {meta_res}', provider_summary, 'xml', manifest_abs)
+
+                for tag in ('grant-uri-permission', 'path-permission'):
+                    for perm in provider.findall(tag):
+                        p = android_attr(perm, 'path') or android_attr(perm, 'pathPrefix') or android_attr(perm, 'pathPattern') or ''
+                        if p in ('.', '/', '..', '') or p.startswith('../') or '/../' in p:
+                            snippet = grab_snippet(manifest_path, [tag, p])
+                            add_finding('FAIL', manifest_rel, f'Overly broad manifest {tag} path="{p}"', snippet or f"<{tag} path=\"{p}\"/>", 'xml', manifest_abs)
+        except Exception as e:
+            add_finding('WARN', os.path.relpath(manifest_path, base), f'Could not parse manifest for FileProvider checks: {e}', str(e), 'text', os.path.abspath(manifest_path))
 
     if not os.path.exists(xml_dir):
+        status = "PASS"
+        summary = ["No xml directory found"]
+        if findings:
+            status = "FAIL" if any(finding_status == 'FAIL' for finding_status, _ in findings) else "WARN"
+            summary = [
+                "No res/xml directory found",
+                f"Manifest/FileProvider validation findings: {len(findings)}",
+            ]
         return TestResult(
             name="FileProvider Paths",
-            status="PASS",
-            summary_lines=["No xml directory found"],
+            status=status,
+            summary_lines=summary,
             mastg_ref_html=mastg_ref,
+            findings=[f for _, f in findings],
         )
 
+    xml_files = []
     for root, _, files in os.walk(xml_dir):
         for f in files:
             if not f.endswith('.xml'):
                 continue
+            if referenced_xml and f not in referenced_xml:
+                continue
+            xml_files.append(os.path.join(root, f))
 
-            full = os.path.join(root, f)
+    # Fallback for decompiled workspaces where the manifest metadata was stripped or not decoded.
+    if not xml_files and not referenced_xml:
+        xml_files = [
+            os.path.join(root, f)
+            for root, _, files in os.walk(xml_dir)
+            for f in files
+            if f.endswith('.xml')
+        ]
+
+    for full in xml_files:
             rel  = os.path.relpath(full, res_dir)
             abs_path = os.path.abspath(full)
 
             try:
                 tree = ET.parse(full)
                 root_elem = tree.getroot()
-                lines = open(full, errors='ignore').read().splitlines()
 
                 # Check all FileProvider path types for insecure configurations
                 path_types = [
@@ -4814,20 +5165,21 @@ def check_file_provider(res_dir):
                     'external-media-path'  # External media directory
                 ]
 
-                def grab_snippet(search_terms):
-                    for idx, line in enumerate(lines):
-                        if all(term in line for term in search_terms):
-                            start = max(0, idx - 2)
-                            end = min(len(lines), idx + 3)
-                            return "\n".join(lines[start:end])
-                    return ""
-
                 for path_type in path_types:
                     for elem in root_elem.findall(f'.//{path_type}'):
                         path_attr = elem.get('path', '')
                         name_attr = elem.get('name', '')
 
-                        if path_attr in ('.', '/', ''):
+                        broad_or_unsafe = (
+                            path_type == 'root-path'
+                            or path_attr in ('.', '/', '')
+                            or path_attr == '..'
+                            or path_attr.startswith('../')
+                            or '/../' in path_attr
+                        )
+                        external_rootish = path_type == 'external-path'
+
+                        if broad_or_unsafe or external_rootish:
                             attrs = []
                             if name_attr:
                                 attrs.append(f'name="{name_attr}"')
@@ -4835,41 +5187,17 @@ def check_file_provider(res_dir):
                             xml_element = f"<{path_type} {' '.join(attrs)}/>"
 
                             if path_type == 'root-path':
-                                severity = "CRITICAL"
-                            elif path_attr in ('.', '/'):
-                                severity = "HIGH"
+                                severity = "FAIL"
+                                reason = 'root-path exposes the device root namespace'
+                            elif path_attr in ('.', '/', '') or path_attr == '..' or path_attr.startswith('../') or '/../' in path_attr:
+                                severity = "FAIL"
+                                reason = f'broad or unsafe path="{path_attr}"'
                             else:
-                                severity = "MEDIUM"
+                                severity = "WARN"
+                                reason = 'external-path can expose shared external storage if sensitive files are shared'
 
-                            snippet = grab_snippet([path_type, name_attr if name_attr else "", path_attr])
-                            findings.append(
-                                FindingBlock(
-                                    title=rel,
-                                    subtitle=f"{severity}: insecure {xml_element}",
-                                    link=f"file://{abs_path}",
-                                    code=snippet or xml_element,
-                                    code_language="xml",
-                                    open_by_default=True,
-                                )
-                            )
-
-                # Check for overly-broad grant-uri-permission / path-permission
-                for tag in ('grant-uri-permission', 'path-permission'):
-                    for perm in root_elem.findall(f'.//{tag}'):
-                        p = perm.get('path') or perm.get('pathPrefix') or perm.get('pathPattern') or ''
-                        if p in ('.', '/', '..') or p.startswith('../'):
-                            xml_element = f"<{tag} path=\"{p}\"/>"
-                            snippet = grab_snippet([tag, p])
-                            findings.append(
-                                FindingBlock(
-                                    title=rel,
-                                    subtitle=f"Insecure {tag} path=\"{p}\"",
-                                    link=f"file://{abs_path}",
-                                    code=snippet or xml_element,
-                                    code_language="xml",
-                                    open_by_default=True,
-                                )
-                            )
+                            snippet = grab_snippet(full, [path_type, name_attr if name_attr else "", path_attr])
+                            add_finding(severity, os.path.join('res', rel), f'{reason}: {xml_element}', snippet or xml_element, 'xml', abs_path)
 
             except Exception:
                 continue
@@ -4885,13 +5213,14 @@ def check_file_provider(res_dir):
     unique_files = len({f.title for f in findings})
     return TestResult(
         name="FileProvider Paths",
-        status="FAIL",
+        status="FAIL" if any(status == 'FAIL' for status, _ in findings) else "WARN",
         summary_lines=[
             f"Insecure FileProvider configurations: {len(findings)}",
             f"Affected files: {unique_files}",
+            "Static analysis cannot prove whether generated FileProvider URIs are reachable from attacker-controlled flows; review getUriForFile call sites for exported/share intents.",
         ],
         mastg_ref_html=mastg_ref,
-        findings=findings,
+        findings=[f for _, f in findings],
     )
 
 def check_serialize(base):
@@ -7481,10 +7810,10 @@ def check_keyboard_cache(base, manifest):
     3. Password fields without textPassword flag
     4. Sensitive field patterns (password, credit card, SSN, PIN, CVV, etc.)
 
-    MASVS: MASVS-STORAGE-2 (Sensitive Data Disclosure)
-    MASTG: MASTG-TEST-0001 (Testing Local Storage for Sensitive Data)
+    MASVS: MASVS-PLATFORM (Text input handling / sensitive UI data exposure)
+    MASTG: MASTG-TEST-0258 (References to Keyboard Caching Attributes in UI Elements)
     """
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0006/' target='_blank'>MASTG-TEST-0006: Determining Whether the Keyboard Cache Is Disabled for Text Input Fields</a></div>"
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0258/' target='_blank'>MASTG-TEST-0258: References to Keyboard Caching Attributes in UI Elements</a></div>"
 
     issues = []
 
@@ -12525,7 +12854,7 @@ def check_frida_strict_mode(base, wait_secs=7):
             library_strictmode_calls.append('\n'.join(current_call))
 
     # MASTG reference
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0264/' target='_blank'>MASTG-TEST-0264: Memory Corruption Bugs</a></div>"
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0264/' target='_blank'>MASTG-TEST-0264: Runtime Use of StrictMode APIs</a></div>"
 
     # Build report
     report_lines = []
@@ -15151,13 +15480,17 @@ def check_storage_analysis(base, package_name):
 
     detail.extend(findings)
 
+    findings.append(
+        "<div class='info-box'><em>Dynamic storage analysis records app-private filesystem changes after launch. "
+        "New files/directories are inventory evidence, not a security failure by themselves. "
+        "Use the SharedPreferences/DataStore, external storage, log, clipboard, database, and Crashlytics checks for deeper MASVS storage/privacy coverage.</em></div>"
+    )
+
     # Determine status
     if security_issues:
         status = 'FAIL'
-    elif new_dirs or modified_files:
-        status = 'WARN'
     else:
-        status = 'PASS'
+        status = 'INFO'
 
     return status, "".join(detail) + mastg_ref
 
@@ -15946,7 +16279,9 @@ def check_gms_security_provider(base):
     """
     MASTG-TEST-0023/0295: Testing the Security Provider
 
-    Check if GMS ProviderInstaller is used to update security provider.
+    Check whether app-owned code updates the Android security provider with
+    GMS ProviderInstaller. This is a network/TLS hardening check; static
+    analysis can identify references but cannot prove startup ordering.
 
     Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0023/
     """
@@ -15954,9 +16289,12 @@ def check_gms_security_provider(base):
         r'ProviderInstaller\.installIfNeeded',
         r'ProviderInstaller\.installIfNeededAsync',
         r'com/google/android/gms/security/ProviderInstaller',
+        r'Lcom/google/android/gms/security/ProviderInstaller;',
     ]
 
     provider_files = set()
+    library_provider_files = set()
+    gms_library_seen = False
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
@@ -15970,20 +16308,28 @@ def check_gms_security_provider(base):
     with ScanProgress("GMS Security Provider", len(files_to_scan)) as scan_progress:
         for full, rel in files_to_scan:
             scan_progress.update()
+            rel_norm = rel.replace('\\', '/')
+            is_lib = is_library_path(rel)
+            if '/com/google/android/gms/' in '/' + rel_norm:
+                gms_library_seen = True
             try:
                 content = open(full, errors='ignore').read()
             except Exception:
                 continue
 
             if any(rx.search(content) for rx in compiled):
-                provider_files.add(rel)
+                if is_lib:
+                    library_provider_files.add(rel)
+                else:
+                    provider_files.add(rel)
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0295/' target='_blank'>MASTG-TEST-0295: GMS Security Provider Not Updated</a></div>"
 
     if provider_files:
         lines = [
-            f"<div>GMS ProviderInstaller usage detected in {len(provider_files)} file(s)</div>",
-            "<div>Security provider will be updated with latest crypto patches.</div>"
+            f"<div>GMS ProviderInstaller usage detected in app-owned code: {len(provider_files)} file(s)</div>",
+            "<div>Static evidence supports the presence of a security provider update path.</div>",
+            "<div>Manual verification: confirm this executes before network traffic and handles GooglePlayServicesRepairableException / GooglePlayServicesNotAvailableException or ProviderInstallListener failures.</div>"
         ]
         for rel in sorted(provider_files)[:5]:
             full = os.path.abspath(os.path.join(base, rel))
@@ -15991,10 +16337,28 @@ def check_gms_security_provider(base):
         lines.append(mastg_ref)
         return 'PASS', "<br>\n".join(lines)
 
-    return 'WARN', (
-        "<div>No GMS ProviderInstaller usage detected</div>"
-        "<div>Recommendation: Call <code>ProviderInstaller.installIfNeeded(context)</code> at app startup.</div>"
-        "<div>This updates the security provider with fixes for Heartbleed, POODLE, etc.</div>"
+    if library_provider_files:
+        lines = [
+            f"<div>GMS ProviderInstaller references found only in library code: {len(library_provider_files)} file(s)</div>",
+            "<div>No app-owned startup call was identified. Treat this as a hardening review item, not proof of an exploitable TLS issue.</div>",
+        ]
+        for rel in sorted(library_provider_files)[:5]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f'<a href="file://{html.escape(full)}">{html.escape(rel)}</a>')
+        lines.append(mastg_ref)
+        return 'INFO', "<br>\n".join(lines)
+
+    if gms_library_seen:
+        return 'WARN', (
+            "<div>Google Play Services code is bundled/referenced, but no app-owned <code>ProviderInstaller.installIfNeeded</code> or <code>installIfNeededAsync</code> call was detected.</div>"
+            "<div>Recommendation: review whether the app relies on the platform TLS provider on legacy Android versions. If it does, call ProviderInstaller at startup and handle failures.</div>"
+            "<div>This is a network hardening concern, not standalone evidence that current TLS traffic is exploitable.</div>"
+            f"{mastg_ref}"
+        )
+
+    return 'INFO', (
+        "<div>No GMS ProviderInstaller usage detected, and no Google Play Services library code was identified in the scan workspace.</div>"
+        "<div>Not every app can or should use GMS ProviderInstaller. This is mainly relevant when the app depends on Google Play Services and relies on Android's platform TLS provider, especially for legacy-device support.</div>"
         f"{mastg_ref}"
     )
 
@@ -16275,14 +16639,15 @@ def check_manifest_attack_surface(manifest):
 def check_framework_security_signals(base, manifest):
     """
     Detect cross-platform app frameworks and security-relevant configuration files.
-    This is informational/WARN only; it helps the scanner work better across
+    This is informational only; it helps the scanner work better across
     native Android, Flutter, React Native, Cordova/Ionic, MAUI/Xamarin and Unity.
+    It is not itself a vulnerability test.
     """
-    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/knowledge/android/MASVS-PLATFORM/MASTG-KNOW-0018/' target='_blank'>MASTG-KNOW-0018: WebViews</a></div>"
+    mastg_ref = "<br><div><strong>Note:</strong> Framework detection is an inventory signal used to guide follow-up testing. Findings here should not be raised as MASVS issues without a specific vulnerable behavior from another check.</div>"
     signals = {
         'Flutter': [r'libflutter\.so', r'io/flutter/', r'FlutterActivity'],
         'React Native': [r'com/facebook/react/', r'ReactActivity', r'RNCWebView'],
-        'Cordova/Ionic': [r'org/apache/cordova/', r'cordova\.js', r'config\.xml'],
+        'Cordova/Ionic': [r'org/apache/cordova/', r'cordova\.js', r'(^|[\\/])config\.xml($|\n)'],
         'MAUI/Xamarin': [r'Mono\.Android', r'crc64', r'Maui'],
         'Unity': [r'libunity\.so', r'com/unity3d/player/'],
     }
@@ -16292,14 +16657,15 @@ def check_framework_security_signals(base, manifest):
     with ScanProgress("Framework Security Signals", len(files)) as scan_progress:
         for full, rel in files:
             scan_progress.update()
+            rel_norm = rel.replace('\\', '/')
             try:
-                text = rel + "\n" + open(full, errors='ignore').read(120000)
+                text = rel_norm + "\n" + open(full, errors='ignore').read(120000)
             except Exception:
-                text = rel
+                text = rel_norm
             for framework, patterns in signals.items():
                 if any(re.search(p, text, re.IGNORECASE) for p in patterns):
                     found[framework].append(rel)
-            if re.search(r'(network_security_config|backup_rules|data_extraction_rules|assetlinks\.json|config\.xml)', rel, re.I):
+            if re.search(r'(^|/)(network_security_config|backup_rules|data_extraction_rules|assetlinks)\.xml$|(^|/)assetlinks\.json$', rel_norm, re.I):
                 config_hits.append(rel)
 
     if not found and not config_hits:
@@ -16319,7 +16685,7 @@ def check_framework_security_signals(base, manifest):
             full = os.path.abspath(os.path.join(base, rel))
             lines.append(f'<div style="margin-left:14px"><a href="file://{html.escape(full)}">{html.escape(rel)}</a></div>')
 
-    return 'WARN', "\n".join(lines) + mastg_ref, len(found) + len(config_hits)
+    return 'INFO', "\n".join(lines) + mastg_ref, len(found) + len(config_hits)
 
 
 def check_frida_webview_runtime_settings(base, wait_secs=10):
@@ -17282,10 +17648,10 @@ def main():
                 "SharedPreferences Encryption",
                 "External Storage Usage",
                 "Manifest Storage Flags",
-                "Keyboard Cache",
                 "Storage Analysis",
                 "DataStore Encryption",
                 "Room Database Encryption",
+                "Crashlytics Sensitive Data Storage",
             ]
         },
         "MASVS-CRYPTO": {
@@ -17332,7 +17698,7 @@ def main():
                 "Min SDK Version",
                 "In-App Updates",
                 "Allow Backup",
-                "StrictMode APIs",
+                "Keyboard Cache",
                 "FLAG_SECURE Usage",
                 "Recent Screenshot Protection",
                 "WebView JavaScript Bridges",
@@ -17363,6 +17729,7 @@ def main():
                 "Insecure Package Context",
                 "Framework Security Signals",
                 "Dependency Vulnerability Scan",
+                "Firebase C++ FlatBuffers Version",
             ]
         },
         "MASVS-RESILIENCE": {
@@ -17388,6 +17755,7 @@ def main():
                 "Logging Statements",
                 "Clipboard Security",
                 "Dangerous Permissions",
+                "Crashlytics Sensitive Data Storage",
             ]
         },
     }
@@ -17472,7 +17840,7 @@ def main():
         make_check("In-App Updates",          lambda: check_updates(base)),
         make_check("Memory Tagging",          lambda: check_memtag(manifest)),
         make_check("Min SDK Version",         lambda: check_min_sdk(manifest, apk_path)),
-        make_check("FileProvider Paths",      lambda: check_file_provider(os.path.join(base,'res'))),
+        make_check("FileProvider Paths",      lambda: check_file_provider(base, manifest)),
         make_check("Insecure Serialize API",  lambda: check_serialize(base)),
         make_check("Custom URI Schemes",      lambda: check_uri_scheme(manifest)),
         make_check("Browsable DeepLinks",     lambda: check_browsable_deeplinks(manifest)),
@@ -17494,6 +17862,7 @@ def main():
         make_check("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
         make_check("External Storage Usage",  lambda: check_external_storage(base)),
         make_check("Manifest Storage Flags", lambda: check_manifest_storage_flags(manifest, base)),
+        make_check("Crashlytics Sensitive Data Storage", lambda: check_crashlytics_sensitive_storage(base)),
         make_check("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
         make_check("Biometric Authentication",lambda: check_biometric_auth(base)),
         make_check("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
@@ -17516,8 +17885,13 @@ def main():
         make_check("Manifest Attack Surface", lambda: check_manifest_attack_surface(manifest)),
         make_check("Framework Security Signals", lambda: check_framework_security_signals(base, manifest)),
         make_check("Dependency Vulnerability Scan", lambda: check_dependency_vulnerability_scan(base)),
+        make_check("Firebase C++ FlatBuffers Version", lambda: check_flatbuffers_firebase_cpp(base)),
         make_check("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
+
+    configured_static_checks = len(checks)
+    configured_dynamic_checks = 14
+    checks.append(make_check("MASVS Coverage Matrix", lambda: check_masvs_coverage_matrix(configured_static_checks, configured_dynamic_checks)))
 
     # Interactive test selection
     if not args.all_tests:
@@ -17540,7 +17914,11 @@ def main():
                 print("[*] Running all tests...")
             elif choice == 's':
                 # Interactive curses-based test selection
-                selected = curses.wrapper(curses_select_menu, checks, "SELECT TESTS (Use arrows, SPACE to toggle)")
+                if curses is None:
+                    print("[!] curses is not available in this Python environment; running all static tests.")
+                    selected = set(range(len(checks)))
+                else:
+                    selected = curses.wrapper(curses_select_menu, checks, "SELECT TESTS (Use arrows, SPACE to toggle)")
 
                 if selected is None:
                     print("\n[*] Exiting...")
@@ -17651,7 +18029,11 @@ def main():
                     print("[*] Running all dynamic tests...")
                 elif choice == 's':
                     # Interactive curses-based test selection
-                    selected = curses.wrapper(curses_select_menu, frida_checks, "SELECT DYNAMIC TESTS (Use arrows, SPACE to toggle)")
+                    if curses is None:
+                        print("[!] curses is not available in this Python environment; running all dynamic tests.")
+                        selected = set(range(len(frida_checks)))
+                    else:
+                        selected = curses.wrapper(curses_select_menu, frida_checks, "SELECT DYNAMIC TESTS (Use arrows, SPACE to toggle)")
 
                     if selected is None:
                         print("\n[*] Skipping all dynamic tests...")
