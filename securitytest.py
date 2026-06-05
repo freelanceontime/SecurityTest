@@ -13951,6 +13951,85 @@ def check_frida_sharedprefs(base, wait_secs=10):
         raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
     spawn_name = candidates[0]
 
+    def _pi_shell_quote(value):
+        value = str(value)
+        if value == "":
+            return "''"
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _pi_adb_cmd(parts):
+        return " ".join(_pi_shell_quote(part) for part in parts)
+
+    def _pi_component_name(raw_name):
+        if not raw_name:
+            return ""
+        if raw_name.startswith('.'):
+            return f"{pkg_name}/{raw_name}"
+        if '.' in raw_name:
+            return f"{pkg_name}/{raw_name}"
+        return f"{pkg_name}/.{raw_name}"
+
+    def _pending_intent_live_trigger_commands(limit=8):
+        commands = []
+        seen = set()
+
+        def add(label, parts):
+            cmd = _pi_adb_cmd(parts)
+            if cmd in seen:
+                return
+            seen.add(cmd)
+            commands.append((label, cmd))
+
+        add("Launch app", ['adb', 'shell', 'monkey', '-p', spawn_name, '-c', 'android.intent.category.LAUNCHER', '1'])
+
+        try:
+            root = ET.parse(manifest).getroot()
+        except Exception:
+            return commands[:limit]
+
+        ns = '{http://schemas.android.com/apk/res/android}'
+
+        for activity in root.findall('.//activity'):
+            name = activity.get(ns + 'name', '')
+            if not name:
+                continue
+            for filt in activity.findall('intent-filter'):
+                actions = {a.get(ns + 'name') for a in filt.findall('action')}
+                cats = {c.get(ns + 'name') for c in filt.findall('category')}
+                if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in cats:
+                    add(f"Start launcher activity {name}", ['adb', 'shell', 'am', 'start', '-W', '-n', _pi_component_name(name)])
+                if 'android.intent.action.VIEW' in actions and 'android.intent.category.BROWSABLE' in cats:
+                    data_nodes = filt.findall('data')
+                    schemes = [d.get(ns + 'scheme') for d in data_nodes if d.get(ns + 'scheme')]
+                    hosts = [d.get(ns + 'host') for d in data_nodes if d.get(ns + 'host')]
+                    paths = [d.get(ns + 'path') or d.get(ns + 'pathPrefix') or d.get(ns + 'pathPattern') for d in data_nodes]
+                    scheme = schemes[0] if schemes else 'https'
+                    host = hosts[0] if hosts else 'example.invalid'
+                    path = next((p for p in paths if p), '/')
+                    if not str(path).startswith('/'):
+                        path = '/' + str(path)
+                    uri = f"{scheme}://{host}{path}"
+                    add(f"Trigger deep link {name}", ['adb', 'shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', uri, '-n', _pi_component_name(name)])
+
+        for receiver in root.findall('.//receiver'):
+            name = receiver.get(ns + 'name', '')
+            exported = _parse_manifest_bool(receiver.get(ns + 'exported'))
+            if exported is not True or not name:
+                continue
+            actions = []
+            for filt in receiver.findall('intent-filter'):
+                actions.extend(a.get(ns + 'name') for a in filt.findall('action') if a.get(ns + 'name'))
+            for action in actions[:2]:
+                add(f"Broadcast to {name}", ['adb', 'shell', 'am', 'broadcast', '--receiver-include-background', '-a', action, '-n', _pi_component_name(name)])
+
+        for service in root.findall('.//service'):
+            name = service.get(ns + 'name', '')
+            exported = _parse_manifest_bool(service.get(ns + 'exported'))
+            if exported is True and name:
+                add(f"Start exported service {name}", ['adb', 'shell', 'am', 'startservice', '-n', _pi_component_name(name)])
+
+        return commands[:limit]
+
     subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -15265,11 +15344,17 @@ def check_frida_pending_intent(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
+    live_trigger_commands = _pending_intent_live_trigger_commands()
     instructions = [
         f"App '{spawn_name}' is running with PendingIntent monitoring",
-        "Trigger notifications, widgets, or deep links that use PendingIntent",
-        "Look for mutable or missing FLAG_IMMUTABLE below"
+        "Run one or more of these app-specific trigger commands in another terminal while this monitor is running:",
     ]
+    for label, cmd in live_trigger_commands:
+        instructions.append(f"{label}: {cmd}")
+    instructions.extend([
+        "Also inspect existing system-held PendingIntents with: adb shell dumpsys notification --noredact",
+        "Look for mutable or missing FLAG_IMMUTABLE below",
+    ])
     all_output = interactive_frida_monitor(proc, "PENDINGINTENT", instructions, send_exit_on_stop=True)
 
     events = []
@@ -15294,19 +15379,131 @@ def check_frida_pending_intent(base, wait_secs=10):
 
     mastg_ref = "<div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0030/' target='_blank'>MASTG-TEST-0030: Testing for Vulnerable Implementation of PendingIntent</a></div>"
 
+    def shell_quote(value):
+        value = str(value)
+        if value == "":
+            return "''"
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def adb_cmd(parts):
+        return " ".join(shell_quote(part) for part in parts)
+
+    def component_name(raw_name):
+        if not raw_name:
+            return ""
+        if raw_name.startswith('.'):
+            return f"{pkg_name}/{raw_name}"
+        if '.' in raw_name:
+            return f"{pkg_name}/{raw_name}"
+        return f"{pkg_name}/.{raw_name}"
+
+    def manifest_trigger_commands():
+        """
+        Commands to exercise likely PendingIntent-producing flows. These do not
+        replay a PendingIntent; they trigger app entry points while Frida is
+        listening so the hook can capture real PendingIntent creations.
+        """
+        commands = []
+        seen = set()
+
+        def add(label, parts, note=""):
+            cmd = adb_cmd(parts)
+            if cmd in seen:
+                return
+            seen.add(cmd)
+            commands.append((label, cmd, note))
+
+        add("Launch app", ['adb', 'shell', 'monkey', '-p', spawn_name, '-c', 'android.intent.category.LAUNCHER', '1'], "Start the app while the PendingIntent monitor is attached.")
+
+        try:
+            root = ET.parse(manifest).getroot()
+        except Exception:
+            return commands
+
+        ns = '{http://schemas.android.com/apk/res/android}'
+
+        for activity in root.findall('.//activity'):
+            name = activity.get(ns + 'name', '')
+            exported = _parse_manifest_bool(activity.get(ns + 'exported'))
+            filters = activity.findall('intent-filter')
+            is_launcher = False
+            for filt in filters:
+                actions = {a.get(ns + 'name') for a in filt.findall('action')}
+                cats = {c.get(ns + 'name') for c in filt.findall('category')}
+                if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in cats:
+                    is_launcher = True
+                if 'android.intent.action.VIEW' in actions and 'android.intent.category.BROWSABLE' in cats:
+                    schemes = [d.get(ns + 'scheme') for d in filt.findall('data') if d.get(ns + 'scheme')]
+                    hosts = [d.get(ns + 'host') for d in filt.findall('data') if d.get(ns + 'host')]
+                    paths = [d.get(ns + 'path') or d.get(ns + 'pathPrefix') or d.get(ns + 'pathPattern') for d in filt.findall('data')]
+                    scheme = schemes[0] if schemes else 'https'
+                    host = hosts[0] if hosts else 'example.invalid'
+                    path = next((p for p in paths if p), '/')
+                    if not str(path).startswith('/'):
+                        path = '/' + str(path)
+                    uri = f"{scheme}://{host}{path}"
+                    parts = ['adb', 'shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', uri]
+                    if name:
+                        parts.extend(['-n', component_name(name)])
+                    add(f"Trigger deep link for {name or 'activity'}", parts, "Use this while Frida is listening; replace the URI with a real valid app link if needed.")
+            if is_launcher and name:
+                add(f"Start launcher activity {name}", ['adb', 'shell', 'am', 'start', '-W', '-n', component_name(name)], "Launcher activity may initialize notifications, alarms, shortcuts, or background work.")
+            elif exported is True and name:
+                add(f"Start exported activity {name}", ['adb', 'shell', 'am', 'start', '-W', '-n', component_name(name)], "Only run if this exported activity is safe to open in the test environment.")
+
+        for receiver in root.findall('.//receiver'):
+            name = receiver.get(ns + 'name', '')
+            exported = _parse_manifest_bool(receiver.get(ns + 'exported'))
+            if exported is not True or not name:
+                continue
+            actions = []
+            for filt in receiver.findall('intent-filter'):
+                actions.extend(a.get(ns + 'name') for a in filt.findall('action') if a.get(ns + 'name'))
+            for action in actions[:4] or [f"{pkg_name}.TEST"]:
+                add(f"Send broadcast to {name}", ['adb', 'shell', 'am', 'broadcast', '--receiver-include-background', '-a', action, '-n', component_name(name)], "Use benign extras only. Watch Frida output for PendingIntent creation.")
+
+        for service in root.findall('.//service'):
+            name = service.get(ns + 'name', '')
+            exported = _parse_manifest_bool(service.get(ns + 'exported'))
+            if exported is True and name:
+                add(f"Start exported service {name}", ['adb', 'shell', 'am', 'startservice', '-n', component_name(name)], "Only run if starting this service is safe in the test environment.")
+
+        return commands[:20]
+
     if not events:
+        trigger_commands = manifest_trigger_commands()
+        raw_parts = [
+            "<div class='info-box'><em>No PendingIntent object was created during the monitored flow, so there is no captured PendingIntent to replay yet. "
+            "The commands below are app-specific triggers derived from the manifest. Run them while this dynamic test is active, then rerun/continue monitoring to capture real PendingIntent objects.</em></div>"
+        ]
+        if trigger_commands:
+            raw_parts.append("<div><strong>App-specific commands to trigger likely PendingIntent-producing flows while Frida is listening:</strong></div>")
+            for label, cmd, note in trigger_commands:
+                raw_parts.append(f"<div style='margin-left:14px'><strong>{html.escape(label)}</strong></div>")
+                raw_parts.append(f"<div style='margin-left:28px; word-break:break-all'><code>{html.escape(cmd)}</code></div>")
+                if note:
+                    raw_parts.append(f"<div style='margin-left:28px'><em>{html.escape(note)}</em></div>")
+        raw_parts.append("<div style='margin-top:8px'><strong>Inspection commands for existing system-held PendingIntents:</strong></div>")
+        for cmd in (
+            "adb shell dumpsys notification --noredact",
+            "adb shell dumpsys alarm",
+            "adb shell dumpsys activity intents",
+        ):
+            raw_parts.append(f"<div style='margin-left:28px'><code>{html.escape(cmd)}</code></div>")
+        raw_parts.append(
+            "<div class='info-box'><em>The scanner does not auto-fire arbitrary PendingIntent.send() calls by default because they can trigger destructive or account-changing behavior. "
+            "Once Frida observes a real PendingIntent, this report will generate replay-style adb commands from the captured action/component/data/extras.</em></div>"
+        )
         return TestResult(
             name="Dynamic PendingIntent",
             status="INFO",
             summary_lines=[
                 "No PendingIntent usage observed during runtime",
-                "Trigger flows that create notifications, widgets, alarms, shortcuts, media controls, or background actions while this monitor is running.",
+                f"Manifest-derived trigger commands generated: {len(trigger_commands)}",
+                "Run the listed commands while the PendingIntent monitor is active, then review Frida output.",
             ],
             mastg_ref_html=mastg_ref,
-            raw_html=(
-                "<div class='info-box'><em>No PendingIntent object was created during the monitored flow, so there is no app-specific replay command to generate. "
-                "Run the static PendingIntent Flags check and exercise any notification/alarm/widget/deep-link flows it identifies, then rerun this dynamic test.</em></div>"
-            ),
+            raw_html="".join(raw_parts),
             is_dynamic=True,
         )
 
@@ -15349,12 +15546,6 @@ def check_frida_pending_intent(base, wait_secs=10):
         )
         detail.append("\n".join(logs[-400:]))
         detail.append("\n</pre></details>")
-
-    def shell_quote(value):
-        value = str(value)
-        if value == "":
-            return "''"
-        return "'" + value.replace("'", "'\"'\"'") + "'"
 
     def build_adb_command(ev):
         method = ev.get('method') or ''
