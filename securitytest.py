@@ -79,6 +79,7 @@ LIB_PATHS = (
     '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
     '/com/google/android/libraries/',  # Google SDK libraries (Places, Maps, etc.)
     '/com/google/maps/android/',       # Google Maps Android SDK
+    '/com/google/vr/',                 # Google VR/AR Dynamite loader libraries
     '/okhttp3/', '/retrofit2/', '/com/squareup/',
     '/com/facebook/', '/kotlin/', '/kotlinx/',
     '/io/reactivex/', '/rx/', '/dagger/',
@@ -2549,6 +2550,17 @@ def check_dependency_vulnerability_scan(base):
     native_candidates = {}  # (name, version) -> {name, version, evidence:set}
     native_files_scanned = 0
     nvd_query_errors = 0
+    flatbuffers_native_evidence = set()
+    native_signature_rules = [
+        {
+            'name': 'flatbuffers',
+            'version': '1.12.0',
+            'markers_any': [b'FlatBuffers', b'flatbuffers'],
+            'markers_all': [b'1.12.0'],
+            'cves': ['CVE-2020-35864'],
+            'note': 'FlatBuffers 1.12.0 string evidence in a native shared object; CVE applicability requires vendor/reachability review because public CVE text commonly refers to the Rust crate.',
+        },
+    ]
 
     def _normalize_version(v):
         if not v:
@@ -2632,6 +2644,34 @@ def check_dependency_vulnerability_scan(base):
                 break
         return out
 
+    def _binary_matches_signature(bin_path, rule, chunk_size=1024 * 1024):
+        """
+        Search a native binary for dependency signature markers without relying
+        on manifest metadata or fixed library filenames.
+        """
+        found_any = not rule.get('markers_any')
+        found_all = {marker: False for marker in rule.get('markers_all', [])}
+        overlap = 256
+        tail = b''
+        try:
+            with open(bin_path, 'rb') as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    data = tail + chunk
+                    if not found_any:
+                        found_any = any(marker in data for marker in rule.get('markers_any', []))
+                    for marker in list(found_all.keys()):
+                        if marker in data:
+                            found_all[marker] = True
+                    if found_any and all(found_all.values()):
+                        return True
+                    tail = data[-overlap:]
+        except Exception:
+            return False
+        return found_any and all(found_all.values())
+
     native_string_patterns = [
         ('openssl', re.compile(r'\bOpenSSL\s+(\d+\.\d+\.\d+[a-z]?)\b', re.IGNORECASE)),
         ('zlib', re.compile(r'\bzlib(?:\s+version)?\s+(\d+\.\d+(?:\.\d+)?)\b', re.IGNORECASE)),
@@ -2661,6 +2701,12 @@ def check_dependency_vulnerability_scan(base):
         for lib_name, rx in native_string_patterns:
             for hit in rx.finditer(joined):
                 _add_native_candidate(lib_name, hit.group(1), f"{rel_path} (binary strings)")
+
+        for rule in native_signature_rules:
+            if _binary_matches_signature(full_path, rule):
+                _add_native_candidate(rule['name'], rule['version'], f"{rel_path} (native binary signature)")
+                if rule['name'] == 'flatbuffers' and rule['version'] == '1.12.0':
+                    flatbuffers_native_evidence.add(rel_path)
 
     def _read_text(path):
         try:
@@ -3113,7 +3159,33 @@ def check_dependency_vulnerability_scan(base):
             + "</div>"
         )
 
-    if vuln_dep_count == 0 and nvd_vuln_lib_count == 0:
+    deterministic_native_vuln_count = 0
+    if flatbuffers_native_evidence:
+        deterministic_native_vuln_count = 1
+        unique_cves.add('CVE-2020-35864')
+        evidence_html = "<br>".join(html.escape(x) for x in sorted(flatbuffers_native_evidence)[:8])
+        findings_html.append(
+            "<div style='margin:14px 0; padding:10px; border:1px solid #dee2e6; border-left:4px solid #fd7e14; border-radius:4px;'>"
+            "<div style='font-weight:700; margin-bottom:6px;'>native/.so / flatbuffers @ 1.12.0</div>"
+            f"<div style='font-size:11px; color:#666; margin-bottom:8px;'><strong>Evidence:</strong><br>{evidence_html}</div>"
+            "<table style='width:100%; border-collapse:collapse; font-size:11px;'>"
+            "<thead><tr>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>CVE ID</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Description</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Applicability</th>"
+            "<th style='padding:6px; border:1px solid #dee2e6; text-align:left;'>Severity</th>"
+            "</tr></thead><tbody>"
+            "<tr>"
+            "<td style='padding:6px; border:1px solid #dee2e6;'><a href='https://nvd.nist.gov/vuln/detail/CVE-2020-35864' target='_blank'>CVE-2020-35864</a></td>"
+            "<td style='padding:6px; border:1px solid #dee2e6;'>FlatBuffers 1.12.0 string evidence was found in Firebase C++ native libraries.</td>"
+            "<td style='padding:6px; border:1px solid #dee2e6;'>Review required: public CVE text commonly refers to the Rust flatbuffers crate/read_scalar issue, so native Firebase C++ reachability and vendor applicability should be confirmed before treating as exploitable.</td>"
+            "<td style='padding:6px; border:1px solid #dee2e6;'>Scanner dependency hit / applicability unclear</td>"
+            "</tr>"
+            "</tbody></table>"
+            "</div>"
+        )
+
+    if vuln_dep_count == 0 and nvd_vuln_lib_count == 0 and deterministic_native_vuln_count == 0:
         status = "PASS" if (query_errors == 0 and nvd_query_errors == 0) else "INFO"
         lines = [
             f"Dependencies checked against OSV: {len(dep_list)}",
@@ -3137,7 +3209,8 @@ def check_dependency_vulnerability_scan(base):
         f"Dependencies with known vulnerabilities (OSV): {vuln_dep_count}",
         f"Native libraries checked against NVD: {len(native_list)}",
         f"Native libraries with CVE matches (NVD): {nvd_vuln_lib_count}",
-        f"Total vulnerability records matched (OSV+NVD): {total_vulns + total_nvd_cves}",
+        f"Deterministic native dependency findings: {deterministic_native_vuln_count}",
+        f"Total vulnerability records matched (OSV+NVD+deterministic): {total_vulns + total_nvd_cves + deterministic_native_vuln_count}",
         f"Unique CVE IDs/aliases found: {len(unique_cves)}",
         f"Files scanned: {scanned_files}, dependency manifests parsed: {parsed_files}, native binaries scanned: {native_files_scanned}",
     ]
@@ -3148,7 +3221,7 @@ def check_dependency_vulnerability_scan(base):
 
     return TestResult(
         name="Dependency Vulnerability Scan",
-        status="FAIL",
+        status="FAIL" if (vuln_dep_count or nvd_vuln_lib_count) else "WARN",
         summary_lines=summary_lines,
         mastg_ref_html=data_source_html,
         raw_html="".join(findings_html),
@@ -3662,250 +3735,279 @@ def check_x509(base):
         "</div>"
     )
 
-    issues = []
+    findings = []
+    fail_count = 0
+    warn_count = 0
+    info_count = 0
     seen = set()
 
-    # Patterns for TrustManager
-    tm_method_re = re.compile(r'\.method\s+[^\n]*\b(checkServerTrusted|checkClientTrusted)\b')
-    # Match both throw-new and new-instance + throw patterns for CertificateException
-    cert_exc_throw_new_re = re.compile(r'throw-new.*CertificateException')
-    cert_exc_new_instance_re = re.compile(r'new-instance.*Ljava/security/cert/CertificateException;')
-    throw_re = re.compile(r'\bthrow\s+v\d+')
-    validity_re = re.compile(r'\.checkValidity\(')
-    verify_re = re.compile(r'(->verify\(|\.verify\()')
-    verify_remote_re = re.compile(r'verifyRemoteCertificate')
+    def add_finding(status, rel, path, line_no, title, code, language="smali", open_by_default=True):
+        nonlocal fail_count, warn_count, info_count
+        key = (status, rel, line_no, title)
+        if key in seen:
+            return
+        seen.add(key)
+        if status == "FAIL":
+            fail_count += 1
+        elif status == "WARN":
+            warn_count += 1
+        else:
+            info_count += 1
+        findings.append(
+            FindingBlock(
+                title=f"{rel}:{line_no}" if line_no else rel,
+                subtitle=f"{status}: {title}",
+                link=f"file://{os.path.abspath(path)}" + (f":{line_no}" if line_no else ""),
+                code=code,
+                code_language=language,
+                open_by_default=open_by_default,
+            )
+        )
 
-    # Patterns for HostnameVerifier
-    hv_method_re = re.compile(r'\.method\s+.*?verify\(')
-    hv_stub_re = re.compile(r'const/4\s+\S+,\s+0x1[\s\S]*?return', re.MULTILINE)
+    def get_method(lines, start_idx):
+        body = []
+        j = start_idx + 1
+        while j < len(lines) and not lines[j].startswith('.end method'):
+            body.append(lines[j])
+            j += 1
+        return body, j
 
-    # Patterns for SSLSocket endpoint identification
-    sslsocket_init_re = re.compile(r'(invoke-.*Ljavax/net/ssl/SSLSocket;-><init>|invoke-.*Ljavax/net/ssl/SSLSocketFactory;->createSocket)')
-    endpoint_algo_re = re.compile(r'Ljavax/net/ssl/SSLParameters;->setEndpointIdentificationAlgorithm')
+    def snippet_around(lines, idx, radius=3):
+        start = max(0, idx - radius)
+        end = min(len(lines), idx + radius + 1)
+        out = []
+        for j in range(start, end):
+            prefix = "-> " if j == idx else "   "
+            out.append(f"{prefix}{j+1:4d} | {lines[j]}")
+        return "\n".join(out)
 
-    # Patterns for certificate pinning
-    cert_pinner_re = re.compile(r'(Lokhttp3/CertificatePinner|certificatePinner|pinning)')
+    def method_snippet(lines, start_idx, body, max_lines=18):
+        out = [f"-> {start_idx+1:4d} | {lines[start_idx]}"]
+        shown = 0
+        for offset, line in enumerate(body, start_idx + 2):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(('.line', '.locals', '.param', '.prologue', '.annotation', '.end annotation')):
+                continue
+            out.append(f"   {offset:4d} | {line}")
+            shown += 1
+            if shown >= max_lines:
+                break
+        return "\n".join(out)
 
-    # Match actual instructions (not directives like .locals, .line, .annotation)
-    inst_re = re.compile(r'^\s+(?!\.(?:locals|line|annotation|end|prologue|param))\S+')
+    def has_real_trust_validation(text_body):
+        # Evidence that the method delegates or performs meaningful certificate validation.
+        positive_patterns = [
+            r'Ljava/security/cert/CertificateException;',
+            r'\bthrow\s+[vp]\d+',
+            r'->checkValidity\(',
+            r'->verify\(',
+            r'X509TrustManager;->checkServerTrusted',
+            r'TrustManagerImpl;->check',
+            r'->checkTrustedRecursive\(',
+            r'->verifyChain\(',
+            r'->n_checkServerTrusted',
+            r'->n_checkClientTrusted',
+            r'verifyRemoteCertificate',
+        ]
+        return any(re.search(p, text_body) for p in positive_patterns)
 
-    # Skip well-known library code that properly handles SSL/TLS
-    library_paths = [
-        'androidx/', 'android/support/', 'com/google/',
-        'okhttp3/', 'retrofit2/', 'com/squareup/okhttp/',
-        'org/apache/http/', 'io/grpc/', 'com/android/org/conscrypt/',
-        'org/conscrypt/',        # Google's Conscrypt TLS/crypto provider (standalone)
-        'com/neovisionaries/',   # nv-websocket-client - implements its own OkHostnameVerifier post-handshake
-        'com/twilio/',           # Twilio SDK (uses nv-websocket-client internally)
-        'io/ktor/',              # Ktor HTTP client
-        'com/bumptech/glide/',   # Glide image loader
-    ]
+    def is_empty_or_accept_all_trust_method(text_body):
+        instructions = [
+            l.strip() for l in text_body.splitlines()
+            if l.strip()
+            and not l.strip().startswith(('.line', '.locals', '.param', '.prologue', '.annotation', '.end annotation'))
+        ]
+        if not instructions:
+            return True
+        if all(i.startswith(('return-void', 'return-object', 'const/4 v0, 0x0', 'new-array')) for i in instructions[:6]):
+            return True
+        return not has_real_trust_validation(text_body)
 
-    # Patterns that indicate a manual equivalent of endpoint identification is present:
-    # the method calls verifyHostname, OkHostnameVerifier, or any HostnameVerifier.verify
-    manual_hostname_verify_re = re.compile(
-        r'(verifyHostname|OkHostnameVerifier|HostnameVerifier|->verify\(.*SSLSession|checkHostname)'
-    )
+    tm_method_re = re.compile(r'\.method\s+[^\n]*\b(checkServerTrusted|checkClientTrusted|getAcceptedIssuers)\b')
+    hv_method_re = re.compile(r'\.method\s+[^\n]*\bverify\(')
+    hv_true_re = re.compile(r'const/(?:4|16)\s+[vp]\d+,\s+(?:0x1|1)\b[\s\S]{0,500}?return\s+[vp]\d+', re.MULTILINE)
+    hv_false_re = re.compile(r'const/(?:4|16)\s+[vp]\d+,\s+(?:0x0|0)\b[\s\S]{0,500}?return\s+[vp]\d+', re.MULTILINE)
+    ssl_socket_re = re.compile(r'Ljavax/net/ssl/SSLSocketFactory;->createSocket|Ljavax/net/ssl/SSLSocket;-><init>')
+    endpoint_set_re = re.compile(r'Ljavax/net/ssl/SSLParameters;->setEndpointIdentificationAlgorithm')
+    endpoint_null_or_empty_re = re.compile(r'(const/4\s+[vp]\d+,\s+0x0|const-string\s+[vp]\d+,\s+"")')
+    manual_hostname_verify_re = re.compile(r'OkHostnameVerifier|HostnameVerifier;->verify|verifyHostname|checkHostname|HttpsURLConnection;->getDefaultHostnameVerifier')
+    webview_ssl_re = re.compile(r'onReceivedSslError')
+    ssl_proceed_re = re.compile(r'Llandroid/webkit/SslErrorHandler;->proceed\(')
+    allow_all_re = re.compile(r'ALLOW_ALL_HOSTNAME_VERIFIER|NoopHostnameVerifier|AllowAllHostnameVerifier|NullHostnameVerifier|TrustAll|acceptAll|DO_NOT_VERIFY', re.IGNORECASE)
+    sslcontext_init_re = re.compile(r'Ljavax/net/ssl/SSLContext;->init\(')
+    trustmanager_array_re = re.compile(r'\[Ljavax/net/ssl/TrustManager;')
+    custom_store_re = re.compile(r'CertificateFactory;->generateCertificate|KeyStore;->load|TrustManagerFactory;->init|openRawResource|AssetManager;->open')
 
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if not fn.endswith('.smali'):
+            if not fn.endswith(('.smali', '.java', '.kt', '.xml')):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, base)
-            if any(lib in rel.replace('\\', '/') for lib in library_paths):
+            if fn.endswith(('.smali', '.java', '.kt')) and is_library_path(rel):
                 continue
             files_to_scan.append((path, rel))
 
     with ScanProgress("SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)", len(files_to_scan)) as scan_progress:
         for path, rel in files_to_scan:
             scan_progress.update()
-
             try:
-                lines = open(path, errors='ignore').read().splitlines()
+                text = open(path, errors='ignore').read()
+                lines = text.splitlines()
             except Exception:
                 continue
-            i = 0
 
+            rel_norm = rel.replace('\\', '/')
+            if rel.endswith('.xml'):
+                if re.search(r'<certificates[^>]+src=["\']user["\']', text):
+                    add_finding("WARN", rel, path, 1, "Network security config trusts user-installed CAs", text[:2000], "xml", False)
+                if re.search(r'<debug-overrides[\s>]', text):
+                    add_finding("WARN", rel, path, 1, "Network security config contains debug-overrides", text[:2000], "xml", False)
+                if '<pin-set' in text:
+                    expiration_matches = re.findall(r'expiration=["\']([^"\']+)["\']', text)
+                    from datetime import datetime
+                    for exp_date_str in expiration_matches:
+                        try:
+                            exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d')
+                            if exp_date < datetime.now():
+                                add_finding("FAIL", rel, path, 1, f"Expired certificate pin expiration={exp_date_str}", text[:2000], "xml")
+                        except ValueError:
+                            add_finding("WARN", rel, path, 1, f"Certificate pin has unparsable expiration={exp_date_str}", text[:2000], "xml", False)
+                continue
+
+            i = 0
             while i < len(lines):
                 line = lines[i]
 
-                # -- TrustManager methods --
                 m = tm_method_re.search(line)
                 if m:
-                    name = m.group(1)
-                    start = i
-                    body = []
-                    j = i + 1
-                    while j < len(lines) and not lines[j].startswith('.end method'):
-                        body.append(lines[j])
-                        j += 1
-                    text_body = "\n".join(body)
+                    method_name = m.group(1)
+                    body, end_idx = get_method(lines, i)
+                    body_text = "\n".join(body)
+                    if method_name in ('checkServerTrusted', 'checkClientTrusted'):
+                        if is_empty_or_accept_all_trust_method(body_text):
+                            add_finding(
+                                "FAIL", rel, path, i + 1,
+                                f"{method_name} does not perform certificate validation",
+                                method_snippet(lines, i, body),
+                            )
+                    elif method_name == 'getAcceptedIssuers':
+                        if re.search(r'const/4\s+[vp]\d+,\s+0x0[\s\S]{0,300}?return-object', body_text):
+                            add_finding(
+                                "WARN", rel, path, i + 1,
+                                "getAcceptedIssuers returns null",
+                                method_snippet(lines, i, body),
+                                open_by_default=False,
+                            )
+                    i = end_idx
 
-                    key = (rel, start, name)
-                    if key not in seen:
-                        seen.add(key)
+                elif hv_method_re.search(line):
+                    body, end_idx = get_method(lines, i)
+                    body_text = "\n".join(body)
+                    if hv_true_re.search(body_text):
+                        add_finding(
+                            "FAIL", rel, path, i + 1,
+                            "HostnameVerifier.verify() always returns true",
+                            method_snippet(lines, i, body),
+                        )
+                    elif hv_false_re.search(body_text):
+                        add_finding(
+                            "INFO", rel, path, i + 1,
+                            "HostnameVerifier.verify() always returns false",
+                            method_snippet(lines, i, body),
+                            open_by_default=False,
+                        )
+                    i = end_idx
 
-                        # Check for Xamarin/Mono TrustManager (known vulnerable - CVE-like issue)
-                        is_xamarin = 'xamarin' in rel.lower() or 'mono/android' in rel.lower()
+                elif allow_all_re.search(line):
+                    add_finding(
+                        "FAIL", rel, path, i + 1,
+                        "Permissive hostname verifier / trust-all indicator",
+                        snippet_around(lines, i),
+                    )
 
-                        is_native_delegate = any(
-			    'invoke-direct' in l and (
-			    '->n_checkClientTrusted' in l or
-			    '->n_checkServerTrusted' in l
-			    )
-			    for l in body
-			)
-
-                        # Xamarin TrustManagers are known to be vulnerable even with native delegates
-                        if is_xamarin:
-                            is_native_delegate = False
-
-                        # Check if CertificateException is actually thrown (not just instantiated)
-                        has_cert_exception = (
-                            cert_exc_throw_new_re.search(text_body) or
-                            (cert_exc_new_instance_re.search(text_body) and throw_re.search(text_body))
+                elif endpoint_set_re.search(line):
+                    nearby = "\n".join(lines[max(0, i - 8):i + 2])
+                    if endpoint_null_or_empty_re.search(nearby):
+                        add_finding(
+                            "FAIL", rel, path, i + 1,
+                            "Endpoint identification algorithm disabled or set empty",
+                            snippet_around(lines, i, 8),
                         )
 
-                        if not (
-                            has_cert_exception
-                            or validity_re.search(text_body)
-                            or verify_re.search(text_body)
-                            or verify_remote_re.search(text_body)
-                            or is_native_delegate
-                        ):
-                            # Extract meaningful code snippet (actual instructions, not directives)
-                            snippet = []
-                            instructions = [b for b in body if inst_re.match(b)]
+                elif ssl_socket_re.search(line):
+                    method_start = i
+                    while method_start > 0 and not lines[method_start].startswith('.method'):
+                        method_start -= 1
+                    method_end = i
+                    while method_end < len(lines) and not lines[method_end].startswith('.end method'):
+                        method_end += 1
+                    method_text = "\n".join(lines[method_start:method_end + 1])
+                    if not endpoint_set_re.search(method_text) and not manual_hostname_verify_re.search(method_text):
+                        add_finding(
+                            "WARN", rel, path, i + 1,
+                            "Raw SSLSocket created without visible endpoint identity verification",
+                            snippet_around(lines, i, 5),
+                            open_by_default=False,
+                        )
 
-                            if is_xamarin and instructions:
-                                # For Xamarin, show all instructions to demonstrate the vulnerability
-                                snippet = instructions[:5]  # Show up to 5 instructions
-                            else:
-                                # For other cases, show first 3-5 instructions
-                                snippet = instructions[:3] if instructions else body[:5]
+                elif webview_ssl_re.search(line):
+                    method_start = i
+                    method_end = i
+                    while method_end < len(lines) and not lines[method_end].startswith('.end method'):
+                        method_end += 1
+                    method_text = "\n".join(lines[i:method_end + 1])
+                    if ssl_proceed_re.search(method_text):
+                        add_finding(
+                            "FAIL", rel, path, i + 1,
+                            "WebView onReceivedSslError() calls proceed()",
+                            "\n".join(lines[i:min(method_end + 1, i + 30)]),
+                        )
+                    i = method_end
 
-                            if not snippet:
-                                snippet = [b for b in body if b.strip()][:5]
+                elif sslcontext_init_re.search(line):
+                    nearby = "\n".join(lines[max(0, i - 20):i + 5])
+                    if trustmanager_array_re.search(nearby):
+                        add_finding(
+                            "WARN", rel, path, i + 1,
+                            "SSLContext.init() uses custom TrustManager array; review validation logic",
+                            snippet_around(lines, i, 8),
+                            open_by_default=False,
+                        )
 
-                            snippet_html = html.escape("\n".join(snippet))
-                            link = (
-                                f'<a href="file://{html.escape(path)}">'
-                                f'{html.escape(rel)}:{start+1}</a>'
-                            )
-
-                            # Add specific warning for Xamarin TrustManagers
-                            if is_xamarin:
-                                issues.append(
-                                    f"{link} - <strong style='color:#dc2626;'>{name}()</strong> Xamarin TrustManager vulnerability<br>"
-                                    f"<em>[WARNING] Method never throws CertificateException - accepts ANY certificate (self-signed, expired, etc.)</em><br>"
-                                    f"<em>Risk: Man-in-the-middle attacks can intercept HTTPS traffic</em><br>"
-                                    f"<pre>{snippet_html}</pre>"
-                                )
-                            else:
-                                issues.append(
-                                    f"{link} - <strong>{name}()</strong> missing validation<br>"
-                                    f"<pre>{snippet_html}</pre>"
-                                )
-                    i = j
-
-                # -- HostnameVerifier stubs --
-                elif hv_method_re.search(line):
-                    key = (rel, i)
-                    if key not in seen:
-                        seen.add(key)
-                        for k in range(i+1, min(i+20, len(lines))):
-                            if hv_stub_re.search(lines[k]):
-                                snippet = html.escape(lines[k].strip())
-                                link = (
-                                    f'<a href="file://{html.escape(path)}">'
-                                    f'{html.escape(rel)}:{k+1}</a>'
-                                )
-                                issues.append(
-                                    f"{link} - <strong>HostnameVerifier.verify()</strong> always returns true<br>"
-                                    f"<code>{snippet}</code>"
-                                )
-                                break
-                    while i < len(lines) and not lines[i].startswith('.end method'):
-                        i += 1
-
-                # -- SSLSocket endpoint identification check --
-                elif sslsocket_init_re.search(line):
-                    # Check if setEndpointIdentificationAlgorithm is called in the next 30 lines,
-                    # OR if a manual equivalent (verifyHostname / OkHostnameVerifier / HostnameVerifier.verify)
-                    # is present anywhere in the surrounding method body (within 60 lines).
-                    # Manual post-handshake verification is functionally equivalent to JSSE endpoint ID.
-                    has_endpoint_id = False
-                    has_manual_verify = False
-                    for k in range(i, min(i+60, len(lines))):
-                        if endpoint_algo_re.search(lines[k]):
-                            has_endpoint_id = True
-                            break
-                        if manual_hostname_verify_re.search(lines[k]):
-                            has_manual_verify = True
-                        # Stop at end of method
-                        if lines[k].startswith('.end method'):
-                            break
-
-                    if not has_endpoint_id and not has_manual_verify:
-                        key = (rel, i)
-                        if key not in seen:
-                            seen.add(key)
-                            snippet = html.escape(line.strip())
-                            link = (
-                                f'<a href="file://{html.escape(path)}">'
-                                f'{html.escape(rel)}:{i+1}</a>'
-                            )
-                            issues.append(
-                                f"{link} - <strong>SSLSocket</strong> created without endpoint identification algorithm<br>"
-                                f"<code>{snippet}</code><br>"
-                                f"<em>Missing: SSLParameters.setEndpointIdentificationAlgorithm(\"HTTPS\")</em>"
-                            )
+                elif custom_store_re.search(line):
+                    add_finding(
+                        "INFO", rel, path, i + 1,
+                        "Custom certificate store / TrustManagerFactory signal",
+                        snippet_around(lines, i, 4),
+                        open_by_default=False,
+                    )
 
                 i += 1
 
-    # Check for network_security_config.xml and expired certificates (MASTG-TEST-0243)
-    manifest_path = os.path.join(base, 'AndroidManifest.xml')
-    network_config_ref = None
-    if os.path.exists(manifest_path):
-        try:
-            manifest_content = open(manifest_path, errors='ignore').read()
-            if 'networkSecurityConfig' in manifest_content:
-                # Extract the network security config file reference
-                config_match = re.search(r'android:networkSecurityConfig="@xml/(\w+)"', manifest_content)
-                if config_match:
-                    network_config_ref = config_match.group(1)
-                    # Look for the XML file
-                    config_path = os.path.join(base, 'res', 'xml', f'{network_config_ref}.xml')
-                    if os.path.exists(config_path):
-                        config_content = open(config_path, errors='ignore').read()
-                        # Check for certificate pinning with expiration dates
-                        if '<pin' in config_content and 'expiration' in config_content:
-                            # Parse expiration dates
-                            expiration_matches = re.findall(r'expiration="([^"]+)"', config_content)
-                            from datetime import datetime
-                            current_date = datetime.now()
-                            for exp_date_str in expiration_matches:
-                                try:
-                                    # Parse date format: YYYY-MM-DD
-                                    exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d')
-                                    if exp_date < current_date:
-                                        issues.append(
-                                            f"<strong>EXPIRED Certificate Pin in network_security_config.xml</strong><br>"
-                                            f"Expiration date: {exp_date_str} (already expired)<br>"
-                                            f"<em>Reference: MASTG-TEST-0243</em>"
-                                        )
-                                except ValueError:
-                                    pass  # Invalid date format
-        except Exception:
-            pass
+    status = "FAIL" if fail_count else ("WARN" if warn_count else "PASS")
+    summary = [
+        f"Scanned app/network files: {len(files_to_scan)}",
+        f"High-risk TLS validation findings: {fail_count}",
+        f"TLS hardening review findings: {warn_count}",
+        f"Informational TLS signals: {info_count}",
+    ]
+    if fail_count == 0 and warn_count == 0 and info_count == 0:
+        summary.append("No permissive TrustManager, HostnameVerifier, endpoint-ID disablement, WebView SSL bypass, or custom trust-store signal detected in app-owned code")
 
-    if not issues:
-        return True, "None" + mastg_refs
-
-    # Group issues by category for better readability
-    return False, "<br>\n".join(issues) + mastg_refs
+    intro_html = (
+        "<div class='info-box'><em>This static check identifies insecure or review-worthy TLS validation code. "
+        "It cannot prove server-side TLS posture or runtime library behavior by itself; pair it with the dynamic TLS, pinning, and Burp/Frida tests.</em></div>"
+    )
+    return TestResult(
+        name="SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
+        status=status,
+        summary_lines=summary,
+        mastg_ref_html=mastg_refs,
+        findings=findings,
+        raw_html=intro_html,
+    )
 
 
 def check_strict_mode(base):
@@ -6921,7 +7023,13 @@ def check_safe_browsing(manifest, base):
                         i += 1
 
     if not webview_found:
-        return True, "No WebView usage detected" + mastg_ref
+        return (
+            'PASS',
+            "<div>No app-owned embedded WebView usage detected.</div>"
+            "<div class='info-box'><em>Library-only references such as AndroidX utility calls are ignored. "
+            "This means no WebView surface was found for this check; it does not prove native/Unity browser plugins are absent unless their code is present in the decompiled workspace.</em></div>"
+            f"{mastg_ref}"
+        )
 
     # --- manifest explicit opt-out? ---
     try:
@@ -7783,7 +7891,12 @@ def check_insecure_webview(base):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PLATFORM/MASTG-TEST-0031/' target='_blank'>MASTG-TEST-0031: Testing JavaScript Execution in WebViews</a></div>"
 
     if not hits:
-        return True, f"None{mastg_ref}"
+        return (
+            'PASS',
+            "<div>No app-owned WebView insecure configuration patterns detected.</div>"
+            "<div class='info-box'><em>The scanner did not find WebView settings, JavaScript bridge, file/content access, mixed-content, debugging, or SSL-error bypass patterns in app-owned code.</em></div>"
+            f"{mastg_ref}"
+        )
 
     details = "<br>\n".join(hits)
     details += mastg_ref
@@ -8426,6 +8539,7 @@ def check_package_context(base):
     lib_paths = (
         '/com/google/android/gms/',  # Google Play Services (DynamiteModule, etc.)
         '/com/google/firebase/',
+        '/com/google/vr/',           # Google VR/AR Dynamite loader
         '/androidx/', '/android/support/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
         '/okhttp3/', '/retrofit2/',
@@ -8748,9 +8862,10 @@ def check_certificate_pinning(base):
 
 def check_sharedprefs_encryption(base):
     """
-    Check if SharedPreferences usage implements encryption.
-    FAIL if plain SharedPreferences found without encryption.
-    Shows actual API calls with context for better understanding.
+    Check whether app-owned SharedPreferences usage appears to store sensitive
+    data without encryption. Plain SharedPreferences is acceptable for
+    non-sensitive state; this check fails only when the preference name or
+    nearby key strings indicate sensitive content.
     """
     # Exclude library/framework files - comprehensive list
     exclude_patterns = [
@@ -8788,12 +8903,14 @@ def check_sharedprefs_encryption(base):
 
     def is_library_file(path):
         """Check if path is library code"""
-        return any(re.search(pattern, path) for pattern in exclude_patterns)
+        normalized = path.replace('\\', '/')
+        return any(re.search(pattern, normalized) for pattern in exclude_patterns) or is_library_path(path)
 
     # Find actual SharedPreferences calls with context
     findings = {
         'encrypted': [],
-        'unencrypted': []
+        'unencrypted_sensitive': [],
+        'unencrypted_plain': [],
     }
 
     # Patterns to search for
@@ -8842,12 +8959,17 @@ def check_sharedprefs_encryption(base):
                         if re.search(pattern, line):
                             # Get preference name from context
                             pref_name = extract_preference_name(lines, line_num)
+                            context_strings = extract_preference_context_strings(lines, line_num)
+                            sensitive, sensitive_reasons = classify_sharedprefs_sensitivity(pref_name, context_strings)
 
-                            findings['unencrypted'].append({
+                            target_bucket = 'unencrypted_sensitive' if sensitive else 'unencrypted_plain'
+                            findings[target_bucket].append({
                                 'file': rel_path,
                                 'line': line_num,
                                 'snippet': line.strip(),
-                                'pref_name': pref_name
+                                'pref_name': pref_name,
+                                'context_strings': context_strings,
+                                'sensitive_reasons': sensitive_reasons,
                             })
                             break
 
@@ -8856,7 +8978,9 @@ def check_sharedprefs_encryption(base):
 
     # Build report
     encrypted_count = len(findings['encrypted'])
-    unencrypted_count = len(findings['unencrypted'])
+    sensitive_count = len(findings['unencrypted_sensitive'])
+    plain_count = len(findings['unencrypted_plain'])
+    unencrypted_count = sensitive_count + plain_count
 
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0287/' target='_blank'>MASTG-TEST-0287: Sensitive Data Stored Unencrypted via the SharedPreferences API</a></div>"
 
@@ -8866,8 +8990,10 @@ def check_sharedprefs_encryption(base):
     if encrypted_count > 0:
         summary_lines.append(f"Encrypted usage found: {encrypted_count} instance(s)")
         summary_lines.append("Note: EncryptedSharedPreferences is deprecated; prefer Keystore-backed value encryption or encrypted DataStore for new implementations")
-    if unencrypted_count > 0:
-        summary_lines.append(f"WARNING: Unencrypted usage found in app code: {unencrypted_count} instance(s)")
+    if sensitive_count > 0:
+        summary_lines.append(f"Sensitive-looking unencrypted SharedPreferences usage: {sensitive_count} instance(s)")
+    if plain_count > 0:
+        summary_lines.append(f"Plain SharedPreferences usage without sensitive indicators: {plain_count} instance(s)")
     if encrypted_count == 0 and unencrypted_count == 0:
         summary_lines.append("No SharedPreferences usage detected in app code")
 
@@ -8879,12 +9005,15 @@ def check_sharedprefs_encryption(base):
             mastg_ref_html=mastg_ref,
         )
 
-    files_with_unencrypted = {}
-    for finding in findings['unencrypted']:
+    files_with_sensitive = {}
+    for finding in findings['unencrypted_sensitive']:
         file_path = finding['file']
-        if file_path not in files_with_unencrypted:
-            files_with_unencrypted[file_path] = []
-        files_with_unencrypted[file_path].append(finding)
+        files_with_sensitive.setdefault(file_path, []).append(finding)
+
+    files_with_plain = {}
+    for finding in findings['unencrypted_plain']:
+        file_path = finding['file']
+        files_with_plain.setdefault(file_path, []).append(finding)
 
     finding_blocks = []
 
@@ -8927,20 +9056,57 @@ def check_sharedprefs_encryption(base):
                 )
             )
 
-    # Add section header for unencrypted usage (security issues)
-    finding_blocks.append(
-        FindingBlock(
-            title="[WARNING] UNENCRYPTED SharedPreferences Usage (Insecure)",
-            subtitle=f"Found {unencrypted_count} instance(s) - REQUIRES ATTENTION",
-            code="These store data in plaintext. Migrate sensitive values to Keystore-backed encryption (for SharedPreferences) or encrypted DataStore; avoid introducing deprecated EncryptedSharedPreferences in new code.",
-            code_language="",
-            open_by_default=True,
+    if sensitive_count:
+        finding_blocks.append(
+            FindingBlock(
+                title="[WARNING] Sensitive Data Indicators in Plain SharedPreferences",
+                subtitle=f"Found {sensitive_count} sensitive-looking instance(s)",
+                code="Plain SharedPreferences stores values in app-private plaintext XML. This is a MASVS issue only where keys/files contain sensitive data such as tokens, credentials, precise location, health/diet data, user demographics, or persistent identifiers. Migrate sensitive values to Keystore-backed value encryption or encrypted DataStore.",
+                code_language="",
+                open_by_default=True,
+            )
         )
-    )
 
-    for file_path in sorted(files_with_unencrypted.keys()):
+    for file_path in sorted(files_with_sensitive.keys()):
         full = os.path.abspath(os.path.join(base, file_path))
-        file_findings = files_with_unencrypted[file_path]
+        file_findings = files_with_sensitive[file_path]
+
+        code_lines = []
+        for finding in file_findings:
+            header = f"Line {finding['line']}"
+            if finding.get('pref_name'):
+                header += f", Preference name: {finding['pref_name']}"
+            if finding.get('sensitive_reasons'):
+                header += f", Sensitive indicators: {', '.join(finding['sensitive_reasons'])}"
+            code_lines.append(header)
+            if finding.get('context_strings'):
+                code_lines.append("Nearby strings: " + ", ".join(finding['context_strings'][:12]))
+            code_lines.append(finding['snippet'])
+            code_lines.append("")
+
+        finding_blocks.append(
+            FindingBlock(
+                title=f"  -> {file_path}",
+                subtitle=f"{len(file_findings)} sensitive-looking unencrypted call(s)",
+                link=f"file://{full}",
+                code="\n".join(code_lines).rstrip(),
+            )
+        )
+
+    if plain_count:
+        finding_blocks.append(
+            FindingBlock(
+                title="Plain SharedPreferences Usage Without Sensitive Indicators",
+                subtitle=f"Found {plain_count} instance(s)",
+                code="These calls use unencrypted SharedPreferences, but static analysis did not find sensitive key/file names nearby. Treat as informational unless dynamic testing or code review shows sensitive values are stored.",
+                code_language="",
+                open_by_default=False,
+            )
+        )
+
+    for file_path in sorted(files_with_plain.keys()):
+        full = os.path.abspath(os.path.join(base, file_path))
+        file_findings = files_with_plain[file_path]
 
         code_lines = []
         for finding in file_findings:
@@ -8948,21 +9114,24 @@ def check_sharedprefs_encryption(base):
             if finding.get('pref_name'):
                 header += f", Preference name: {finding['pref_name']}"
             code_lines.append(header)
+            if finding.get('context_strings'):
+                code_lines.append("Nearby strings: " + ", ".join(finding['context_strings'][:12]))
             code_lines.append(finding['snippet'])
             code_lines.append("")
 
         finding_blocks.append(
             FindingBlock(
-                title=f"  â†³ {file_path}",
-                subtitle=f"{len(file_findings)} unencrypted call(s)",
+                title=f"  -> {file_path}",
+                subtitle=f"{len(file_findings)} plain SharedPreferences call(s)",
                 link=f"file://{full}",
                 code="\n".join(code_lines).rstrip(),
+                open_by_default=False,
             )
         )
 
     return TestResult(
         name="SharedPreferences Encryption",
-        status="FAIL",
+        status="FAIL" if sensitive_count else "INFO",
         summary_lines=summary_lines,
         mastg_ref_html=mastg_ref,
         findings=finding_blocks,
@@ -8988,6 +9157,66 @@ def extract_preference_name(lines, call_line_num):
                 return name
 
     return None
+
+
+def extract_preference_context_strings(lines, call_line_num):
+    """
+    Extract nearby smali string constants around a SharedPreferences call.
+    These are used as evidence for preference file names or keys.
+    """
+    start = max(0, call_line_num - 20)
+    end = min(len(lines), call_line_num + 12)
+    strings = []
+    seen = set()
+    for line in lines[start:end]:
+        match = re.search(r'const-string(?:/jumbo)?\s+[vp]\d+,\s*"([^"]+)"', line)
+        if not match:
+            continue
+        value = match.group(1)
+        if not value or len(value) > 120:
+            continue
+        if value.startswith(('android.', 'java.', 'kotlin.', 'Landroid/')):
+            continue
+        if value not in seen:
+            strings.append(value)
+            seen.add(value)
+    return strings
+
+
+def classify_sharedprefs_sensitivity(pref_name, context_strings):
+    """
+    Return (is_sensitive, reasons) based on preference file/key names visible in
+    static smali context. This deliberately avoids treating all prefs as issues.
+    """
+    candidates = []
+    if pref_name:
+        candidates.append(pref_name)
+    candidates.extend(context_strings or [])
+
+    reasons = []
+    for value in candidates:
+        sensitive, categories = is_sensitive_keyword(value)
+        if sensitive:
+            label = value
+            if len(label) > 60:
+                label = label[:57] + "..."
+            reasons.append(f"{label} ({', '.join(categories)})")
+
+    # Additional privacy terms that are common in MASVS/privacy reviews.
+    privacy_re = re.compile(
+        r'\b(postcode|postal|zip|gender|age|dob|birth|ethnicity|race|health|diet|allerg|weight|bmi|'
+        r'location|lat|lng|longitude|latitude|token|auth|session|jwt|bearer|password|secret|'
+        r'user[_-]?id|device[_-]?id|advertising[_-]?id|gaid|fid|installation|email|phone)\b',
+        re.IGNORECASE,
+    )
+    for value in candidates:
+        if privacy_re.search(value):
+            label = value if len(value) <= 60 else value[:57] + "..."
+            reason = f"{label} (privacy/sensitive keyword)"
+            if reason not in reasons:
+                reasons.append(reason)
+
+    return bool(reasons), reasons[:10]
 
 def check_external_storage(base):
     """
@@ -10559,7 +10788,11 @@ def check_webview_javascript_bridge(base):
                 pass
 
     if not hits:
-        return True, "No JavaScript interfaces detected"
+        return (
+            'PASS',
+            "No app-owned WebView JavaScript bridge usage detected. "
+            "Specifically, no addJavascriptInterface calls were found in app-owned code."
+        )
 
     # Now check each interface class for @JavascriptInterface annotations
     secure_count = 0
@@ -11852,6 +12085,7 @@ def check_frida_tls_negotiation(base, wait_secs=12):
       - OkHttp RealConnection.connectTls* (reports negotiated TLS)
       - JSSE/Conscrypt SSLSocket.startHandshake & setEnabledProtocols
       - Native BoringSSL SSL_do_handshake / SSL_connect (WebView/Chromium/Cronet)
+      - Native libcurl CURLOPT_SSLVERSION and mbedTLS handshakes (Unity/libcurl)
     """
     # 1) resolve installed package from manifest prefix
     manifest = os.path.join(base, 'AndroidManifest.xml')
@@ -12048,6 +12282,136 @@ def check_frida_tls_negotiation(base, wait_secs=12):
           });
         }
       });
+
+      // ---- Native libcurl + mbedTLS layer (UnityWebRequest/libcurl) -----
+      safe(function () {
+        var resolver = new ApiResolver('module');
+        var hooked = {};
+
+        function key(sym) { return sym.moduleName + '!' + sym.name + '@' + sym.address; }
+
+        function readCString(p) {
+          try { return (p && !p.isNull()) ? Memory.readUtf8String(p) : '(null)'; }
+          catch (e) { return '(unreadable)'; }
+        }
+
+        function curlSslVersionName(v) {
+          var min = v & 0xffff;
+          var max = (v >>> 16) & 0xffff;
+          var names = {
+            0: 'DEFAULT',
+            1: 'TLSv1-or-later',
+            4: 'TLSv1.0',
+            5: 'TLSv1.1',
+            6: 'TLSv1.2',
+            7: 'TLSv1.3'
+          };
+          var minName = names[min] || ('UNKNOWN(' + min + ')');
+          var maxName = max ? (names[max] || ('UNKNOWN_MAX(' + max + ')')) : '';
+          return maxName ? (minName + '..' + maxName) : minName;
+        }
+
+        function attachCurlSetopt(sym) {
+          var k = key(sym);
+          if (hooked[k]) return;
+          hooked[k] = true;
+          Interceptor.attach(sym.address, {
+            onEnter: function (args) {
+              try {
+                var opt = args[1].toInt32();
+                var val = args[2].toInt32();
+                if (opt === 32) { // CURLOPT_SSLVERSION
+                  var decoded = curlSslVersionName(val);
+                  console.log('[CURL] CURLOPT_SSLVERSION=' + val + ' (' + decoded + ') mod=' + sym.moduleName);
+                  if (val === 1 || val === 4 || val === 5) {
+                    console.log('VERDICT: LEGACY_CURL_SSLVERSION value=' + val + ' decoded=' + decoded + ' mod=' + sym.moduleName);
+                  }
+                } else if (opt === 10002) { // CURLOPT_URL
+                  console.log('[CURL] CURLOPT_URL=' + readCString(args[2]) + ' mod=' + sym.moduleName);
+                }
+              } catch (e) {}
+            }
+          });
+        }
+
+        function attachMbedtlsHandshake(sym) {
+          var k = key(sym);
+          if (hooked[k]) return;
+          hooked[k] = true;
+          Interceptor.attach(sym.address, {
+            onEnter: function (args) { this.ssl = args[0]; this.mod = sym.moduleName; this.name = sym.name; },
+            onLeave: function () {
+              try {
+                var getv = Module.findExportByName(this.mod, 'mbedtls_ssl_get_version');
+                if (!getv) getv = Module.findExportByName(null, 'mbedtls_ssl_get_version');
+                if (!getv) {
+                  console.log('[MBEDTLS] handshake observed name=' + this.name + ' mod=' + this.mod + ' version=(get_version unavailable)');
+                  return;
+                }
+                var getVersion = new NativeFunction(getv, 'pointer', ['pointer']);
+                var ver = readCString(getVersion(this.ssl));
+                console.log('[MBEDTLS] negotiated tls=' + ver + ' name=' + this.name + ' mod=' + this.mod);
+                if (ver === 'TLSv1' || ver === 'TLSv1.1' || ver === 'TLSv1.0') {
+                  console.log('VERDICT: LEGACY_NEGOTIATED (mbedTLS:' + this.mod + ') tls=' + ver);
+                }
+              } catch (e) {}
+            }
+          });
+        }
+
+        function attachMbedtlsMinMax(sym) {
+          var k = key(sym);
+          if (hooked[k]) return;
+          hooked[k] = true;
+          Interceptor.attach(sym.address, {
+            onEnter: function (args) {
+              try {
+                var major = args[1].toInt32();
+                var minor = args[2].toInt32();
+                console.log('[MBEDTLS] ' + sym.name + ' major=' + major + ' minor=' + minor + ' mod=' + sym.moduleName);
+                if (sym.name.indexOf('min_version') >= 0 && major === 3 && (minor === 1 || minor === 2)) {
+                  console.log('VERDICT: LEGACY_MBEDTLS_MIN_VERSION major=' + major + ' minor=' + minor + ' mod=' + sym.moduleName);
+                }
+              } catch (e) {}
+            }
+          });
+        }
+
+        function armCurlMbedtls() {
+          [
+            'exports:*!curl_easy_setopt'
+          ].forEach(function (pat) {
+            try { resolver.enumerateMatches(pat, { onMatch: attachCurlSetopt, onComplete: function () {} }); } catch (e) {}
+          });
+
+          [
+            'exports:*!mbedtls_ssl_handshake',
+            'exports:*!mbedtls_ssl_handshake_step'
+          ].forEach(function (pat) {
+            try { resolver.enumerateMatches(pat, { onMatch: attachMbedtlsHandshake, onComplete: function () {} }); } catch (e) {}
+          });
+
+          [
+            'exports:*!mbedtls_ssl_conf_min_version',
+            'exports:*!mbedtls_ssl_conf_max_version'
+          ].forEach(function (pat) {
+            try { resolver.enumerateMatches(pat, { onMatch: attachMbedtlsMinMax, onComplete: function () {} }); } catch (e) {}
+          });
+
+          console.log('[CURL/MBEDTLS] hooks armed');
+        }
+
+        armCurlMbedtls();
+        var dlopen2 = Module.findExportByName(null, 'android_dlopen_ext') || Module.findExportByName(null, 'dlopen');
+        if (dlopen2) {
+          Interceptor.attach(dlopen2, {
+            onEnter: function (args) { this.path = args[0].isNull() ? null : Memory.readUtf8String(args[0]); },
+            onLeave: function () {
+              if (this.path && /curl|mbedtls|unity|main|native|ssl|crypto/i.test(this.path)) armCurlMbedtls();
+            }
+          });
+        }
+      });
     })();
     """
 
@@ -12083,8 +12447,10 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     legacy_enabled  = any('VERDICT: LEGACY_IN_ENABLED_SET'   in line for line in logs)
     legacy_set      = any('VERDICT: LEGACY_SET_BY_APP'       in line for line in logs)
     legacy_ctx      = any('VERDICT: LEGACY_CONTEXT_CREATED'  in line for line in logs)
+    legacy_curl     = any('VERDICT: LEGACY_CURL_SSLVERSION'  in line for line in logs)
+    legacy_mbed_min = any('VERDICT: LEGACY_MBEDTLS_MIN_VERSION' in line for line in logs)
     # Treat any form of legacy enablement as a violation
-    legacy_enabled  = legacy_enabled or legacy_set or legacy_ctx
+    legacy_enabled  = legacy_enabled or legacy_set or legacy_ctx or legacy_curl or legacy_mbed_min
     tls_v1_context  = sum(1 for line in logs if '[TLS-CTX]' in line and 'TLSv1' in line)
 
     # 6) cleanup
@@ -12099,8 +12465,10 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         okhttp_calls = sum(1 for l in logs if '[OKHTTP]' in l)
         jsse_calls = sum(1 for l in logs if '[JSSE]' in l)
         native_calls = sum(1 for l in logs if '[NATIVE TLS]' in l or 'VERDICT: LEGACY_NEGOTIATED (native' in l)
+        curl_calls = sum(1 for l in logs if '[CURL]' in l)
+        mbedtls_calls = sum(1 for l in logs if '[MBEDTLS]' in l)
     else:
-        tls_inits = okhttp_calls = jsse_calls = native_calls = 0
+        tls_inits = okhttp_calls = jsse_calls = native_calls = curl_calls = mbedtls_calls = 0
 
     # 8) Build informational report
     summary_parts = []
@@ -12118,11 +12486,15 @@ def check_frida_tls_negotiation(base, wait_secs=12):
         )
         if tls_v1_context > 0:
             summary_parts.append(f"<div style='margin-top:5px;'>- <strong>{tls_v1_context}</strong> call(s) to <code>SSLContext.getInstance(\"TLSv1\")</code> detected</div>")
+        if legacy_curl:
+            summary_parts.append("<div style='margin-top:5px;'>- <strong>libcurl</strong> was configured with a legacy-capable <code>CURLOPT_SSLVERSION</code>.</div>")
+        if legacy_mbed_min:
+            summary_parts.append("<div style='margin-top:5px;'>- <strong>mbedTLS</strong> minimum protocol version allowed TLS 1.0 or TLS 1.1.</div>")
         summary_parts.append("<div style='margin-top:5px;'><strong>Risk:</strong> BEAST, POODLE, downgrade attacks (TLS 1.0/1.1 were deprecated by RFC 8996, 2021).</div>")
-        summary_parts.append("<div><strong>Fix:</strong> Ensure the app does not call <code>setEnabledProtocols()</code> with legacy versions. On Android 10+ the platform defaults to TLS 1.2+ - do not override this.</div>")
+        summary_parts.append("<div><strong>Fix:</strong> Ensure the app does not call <code>setEnabledProtocols()</code> with legacy versions and does not configure libcurl/mbedTLS with TLS 1.0/1.1 minimum versions. On Android 10+ the platform defaults to TLS 1.2+ for JSSE traffic - do not override this.</div>")
     else:
         # Check if actual network connections happened
-        if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0:
+        if okhttp_calls > 0 or jsse_calls > 0 or native_calls > 0 or curl_calls > 0 or mbedtls_calls > 0:
             summary_parts.append("<div><strong>No legacy TLS detected</strong></div>")
             summary_parts.append("<div>App made network connections using modern TLS during this test session</div>")
         elif tls_inits > 0:
@@ -12137,10 +12509,12 @@ def check_frida_tls_negotiation(base, wait_secs=12):
     if okhttp_calls: summary_parts.append(f", {okhttp_calls} OkHttp connections")
     if jsse_calls: summary_parts.append(f", {jsse_calls} JSSE handshakes")
     if native_calls: summary_parts.append(f", {native_calls} native SSL calls")
+    if curl_calls: summary_parts.append(f", {curl_calls} libcurl events")
+    if mbedtls_calls: summary_parts.append(f", {mbedtls_calls} mbedTLS events")
     summary_parts.append("</div>")
 
     # Instructions if no network connections detected
-    if not legacy_neg and not legacy_enabled and okhttp_calls == 0 and jsse_calls == 0 and native_calls == 0:
+    if not legacy_neg and not legacy_enabled and okhttp_calls == 0 and jsse_calls == 0 and native_calls == 0 and curl_calls == 0 and mbedtls_calls == 0:
         summary_parts.append(
             "<div style='margin-top:8px; padding:8px; background:#fff3cd; border-left:3px solid #ffc107; font-size:11px'>"
             "<strong>Test Incomplete:</strong> No network connections detected during monitoring.<br>"
@@ -14771,6 +15145,54 @@ def check_frida_pending_intent(base, wait_secs=10):
           return null;
         }
 
+        function describeIntent(intent) {
+          var out = {
+            component: "",
+            action: "",
+            data: "",
+            type: "",
+            pkg: "",
+            categories: [],
+            extras: []
+          };
+          if (!intent) return out;
+          try {
+            var c = intent.getComponent();
+            if (c !== null) out.component = c.flattenToShortString() + "";
+          } catch(e) {}
+          try {
+            var a = intent.getAction();
+            if (a !== null) out.action = a + "";
+          } catch(e) {}
+          try {
+            var d = intent.getDataString();
+            if (d !== null) out.data = d + "";
+          } catch(e) {}
+          try {
+            var t = intent.getType();
+            if (t !== null) out.type = t + "";
+          } catch(e) {}
+          try {
+            var p = intent.getPackage();
+            if (p !== null) out.pkg = p + "";
+          } catch(e) {}
+          try {
+            var cats = intent.getCategories();
+            if (cats !== null) {
+              var it = cats.iterator();
+              while (it.hasNext()) out.categories.push(it.next() + "");
+            }
+          } catch(e) {}
+          try {
+            var b = intent.getExtras();
+            if (b !== null) {
+              var keys = b.keySet().toArray();
+              for (var i = 0; i < keys.length; i++) out.extras.push(keys[i] + "");
+            }
+          } catch(e) {}
+          return out;
+        }
+
         function extractFlags(args) {
           for (var i = args.length - 1; i >= 0; i--) {
             if (typeof args[i] === "number") return args[i];
@@ -14783,29 +15205,40 @@ def check_frida_pending_intent(base, wait_secs=10):
             ov.implementation = function() {
               var intent = extractIntent(arguments);
               var flags = extractFlags(arguments);
-              var target = "";
+              var requestCode = 0;
               try {
-                if (intent) {
-                  if (intent.getComponent() !== null) {
-                    target = intent.getComponent().flattenToShortString();
-                  } else if (intent.getAction() !== null) {
-                    target = intent.getAction();
-                  } else if (intent.getDataString() !== null) {
-                    target = intent.getDataString();
+                for (var i = 0; i < arguments.length; i++) {
+                  if (typeof arguments[i] === "number" && i > 0) {
+                    requestCode = arguments[i];
+                    break;
                   }
                 }
               } catch(e) {}
+              var info = describeIntent(intent);
+              var ret = ov.apply(this, arguments);
+              var creatorPackage = "";
+              try { creatorPackage = ret.getCreatorPackage() + ""; } catch(e) {}
+              var target = info.component || info.action || info.data || info.pkg || "";
               send({
                 type: "pending_intent",
                 method: name,
+                requestCode: requestCode,
                 flags: flags,
                 flags_hex: "0x" + (flags >>> 0).toString(16),
                 flags_text: describeFlags(flags),
                 hasImmutable: (flags & FLAG_IMMUTABLE) !== 0,
                 hasMutable: (flags & (FLAG_MUTABLE | FLAG_UPDATE_CURRENT)) !== 0,
-                target: target
+                target: target,
+                creatorPackage: creatorPackage,
+                component: info.component,
+                action: info.action,
+                data: info.data,
+                typeName: info.type,
+                packageName: info.pkg,
+                categories: info.categories,
+                extras: info.extras
               });
-              return ov.apply(this, arguments);
+              return ret;
             };
           });
         }
@@ -14865,8 +15298,15 @@ def check_frida_pending_intent(base, wait_secs=10):
         return TestResult(
             name="Dynamic PendingIntent",
             status="INFO",
-            summary_lines=["No PendingIntent usage observed during runtime"],
+            summary_lines=[
+                "No PendingIntent usage observed during runtime",
+                "Trigger flows that create notifications, widgets, alarms, shortcuts, media controls, or background actions while this monitor is running.",
+            ],
             mastg_ref_html=mastg_ref,
+            raw_html=(
+                "<div class='info-box'><em>No PendingIntent object was created during the monitored flow, so there is no app-specific replay command to generate. "
+                "Run the static PendingIntent Flags check and exercise any notification/alarm/widget/deep-link flows it identifies, then rerun this dynamic test.</em></div>"
+            ),
             is_dynamic=True,
         )
 
@@ -14882,6 +15322,23 @@ def check_frida_pending_intent(base, wait_secs=10):
         flags_text = html.escape(ev.get('flags_text') or "none")
         detail.append(f"<div style='margin-left:15px'><code>{method}</code> -> {target}</div>")
         detail.append(f"<div style='margin-left:30px'>Flags: {flags_hex} ({flags_text})</div>")
+        meta = []
+        for key, label in (
+            ('component', 'component'),
+            ('action', 'action'),
+            ('data', 'data'),
+            ('typeName', 'type'),
+            ('packageName', 'package'),
+            ('creatorPackage', 'creator'),
+        ):
+            val = ev.get(key)
+            if val:
+                meta.append(f"{label}=<code>{html.escape(str(val))}</code>")
+        extras = ev.get('extras') or []
+        if extras:
+            meta.append("extras=<code>" + html.escape(", ".join(str(x) for x in extras[:20])) + "</code>")
+        if meta:
+            detail.append(f"<div style='margin-left:30px'>{'; '.join(meta)}</div>")
     if len(events) > 30:
         detail.append(f"<div style='margin-left:15px'><em>...and {len(events) - 30} more</em></div>")
 
@@ -14893,24 +15350,81 @@ def check_frida_pending_intent(base, wait_secs=10):
         detail.append("\n".join(logs[-400:]))
         detail.append("\n</pre></details>")
 
-    if pkg_name:
-        demo_cmd = (
-            f"adb shell am broadcast --receiver-include-background "
-            f"-a {pkg_name}.MUTABLE_APPROVAL "
-            f"-n {pkg_name}/.vulnerabilities.MutablePendingIntentReceiver "
-            f'--es transfer_amount \"9999.00\" '
-            f'--es recipient \"4444444444\" '
-            f'--es current_account \"1234567890\" '
-            f'--es note \"malicious override\" '
-            f'--es auth_token \"Bearer attacker-token\"'
-        )
+    def shell_quote(value):
+        value = str(value)
+        if value == "":
+            return "''"
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def build_adb_command(ev):
+        method = ev.get('method') or ''
+        if method == 'getActivity':
+            cmd = ['adb', 'shell', 'am', 'start', '-W']
+        elif method == 'getBroadcast':
+            cmd = ['adb', 'shell', 'am', 'broadcast', '--receiver-include-background']
+        elif method in ('getService', 'getForegroundService'):
+            cmd = ['adb', 'shell', 'am', 'start-foreground-service' if method == 'getForegroundService' else 'startservice']
+        else:
+            return None
+
+        component = ev.get('component') or ''
+        action = ev.get('action') or ''
+        data = ev.get('data') or ''
+        type_name = ev.get('typeName') or ''
+        package_name = ev.get('packageName') or ''
+        categories = ev.get('categories') or []
+        extras = ev.get('extras') or []
+
+        if action:
+            cmd.extend(['-a', action])
+        if data:
+            cmd.extend(['-d', data])
+        if type_name:
+            cmd.extend(['-t', type_name])
+        for category in categories[:10]:
+            cmd.extend(['-c', str(category)])
+        if component:
+            if '/' in component:
+                cmd.extend(['-n', component])
+            elif pkg_name:
+                cmd.extend(['-n', f'{pkg_name}/{component}'])
+        elif package_name:
+            cmd.extend(['-p', package_name])
+        elif pkg_name:
+            cmd.extend(['-p', pkg_name])
+
+        for extra_key in extras[:12]:
+            safe_key = str(extra_key)
+            lower = safe_key.lower()
+            if any(s in lower for s in ('token', 'secret', 'password', 'auth', 'bearer', 'session')):
+                placeholder = 'REDACTED_TEST_VALUE'
+            else:
+                placeholder = 'TEST_VALUE'
+            cmd.extend(['--es', safe_key, placeholder])
+
+        return " ".join(shell_quote(part) for part in cmd)
+
+    replay_commands = []
+    seen_cmds = set()
+    for ev in events:
+        cmd = build_adb_command(ev)
+        if cmd and cmd not in seen_cmds:
+            replay_commands.append((ev, cmd))
+            seen_cmds.add(cmd)
+
+    if replay_commands:
+        detail.append("<div style='margin-top:8px'><strong>App-specific ADB replay commands generated from observed PendingIntent data:</strong></div>")
+        detail.append("<div class='info-box'><em>Run these while the app is installed. They mirror the observed target/action/data and add placeholder extras for observed keys. Replace placeholders with benign test values. The scanner does not auto-send PendingIntents because that can trigger destructive or account-changing app actions.</em></div>")
+        for ev, cmd in replay_commands[:10]:
+            label = html.escape((ev.get('method') or 'PendingIntent') + ' -> ' + (ev.get('target') or ev.get('action') or 'unknown'))
+            detail.append(f"<div style='margin-left:15px'><strong>{label}</strong></div>")
+            detail.append(f"<div style='margin-left:30px; word-break:break-all'><code>{html.escape(cmd)}</code></div>")
+        if len(replay_commands) > 10:
+            detail.append(f"<div style='margin-left:15px'><em>...and {len(replay_commands) - 10} more replay command(s)</em></div>")
+    else:
         detail.append(
-            "<div style='margin-top:8px'><strong>Reproduce via ADB (adjust extras as needed):</strong><br>"
-            f"<code>{html.escape(demo_cmd)}</code><br>"
-            "<em>If you can trigger the real notification, use "
-            "<code>adb shell dumpsys activity broadcasts</code> or "
-            "<code>adb shell dumpsys notification</code> to inspect the PendingIntent/intent payload and mirror the extras.</em>"
-            "</div>"
+            "<div class='info-box'><em>PendingIntent objects were observed, but the target was too implicit to generate a reliable ADB command. "
+            "Use <code>adb shell dumpsys notification</code>, <code>adb shell dumpsys alarm</code>, or <code>adb shell dumpsys activity intents</code> while the app is running to inspect the stored PendingIntent sender and correlate it with the Frida event above.</em></div>"
         )
 
     summary_lines = [
@@ -16597,6 +17111,10 @@ def check_app_link_verification(manifest):
 def check_manifest_attack_surface(manifest):
     """
     Extra manifest misconfiguration review for app-wide attack surface.
+
+    This is a hardening/triage check for manifest attributes that can expose
+    functionality or data before normal app unlock/runtime assumptions apply.
+    Detailed exported component and FileProvider checks are handled elsewhere.
     """
     mastg_ref = (
         "<br><div><strong>Reference:</strong> "
@@ -16610,28 +17128,64 @@ def check_manifest_attack_surface(manifest):
         return 'WARN', f"<div>Failed to parse manifest: {html.escape(str(e))}</div>{mastg_ref}", 0
 
     issues = []
+    info_notes = []
+
+    sdk_component_prefixes = (
+        'com.google.firebase.',
+        'com.google.android.gms.',
+        'androidx.',
+        'android.support.',
+        'com.google.android.datatransport.',
+        'com.google.android.play.',
+    )
+
+    def is_known_sdk_component(name):
+        return bool(name) and any(str(name).startswith(prefix) for prefix in sdk_component_prefixes)
+
     app = root.find('application')
     if app is not None:
         if _parse_manifest_bool(app.get(ns + 'usesCleartextTraffic')) is True:
-            issues.append(('FAIL', 'Application allows cleartext traffic globally'))
+            issues.append(('FAIL', 'Application allows cleartext traffic globally; all HTTP traffic is permitted unless overridden by network security config'))
         if _parse_manifest_bool(app.get(ns + 'directBootAware')) is True:
-            issues.append(('WARN', 'Application is directBootAware; verify no sensitive data is available before user unlock'))
+            issues.append(('WARN', 'Application is directBootAware. This is not a vulnerability by itself, but app code can run before user unlock; verify it only uses device-protected storage for non-sensitive boot-time state'))
 
     for tag in ('activity', 'service', 'receiver', 'provider'):
         for comp in root.findall(f'.//{tag}'):
             name = comp.get(ns + 'name', '(unnamed)')
             if _parse_manifest_bool(comp.get(ns + 'directBootAware')) is True:
-                issues.append(('WARN', f'{tag} {name} is directBootAware; review device-protected storage use'))
+                if is_known_sdk_component(name):
+                    info_notes.append(f'{tag} {name} is SDK-managed directBootAware component')
+                else:
+                    issues.append(('WARN', f'{tag} {name} is directBootAware. This is not automatically exploitable, but app-owned code may run before first unlock; review any device-protected storage use and boot-time data access'))
             if tag == 'provider' and _parse_manifest_bool(comp.get(ns + 'grantUriPermissions')) is True:
                 if not comp.findall('grant-uri-permission') and not comp.findall('path-permission'):
-                    issues.append(('WARN', f'provider {name} grants URI permissions without path restrictions'))
+                    if is_known_sdk_component(name):
+                        info_notes.append(f'provider {name} grants URI permissions without path restrictions; SDK-managed component')
+                    else:
+                        issues.append(('WARN', f'provider {name} grants URI permissions without manifest path restrictions. Review provider implementation and FileProvider path XML to ensure callers cannot receive broad file/content access'))
 
     if not issues:
-        return 'PASS', f"<div>No additional manifest attack-surface misconfigurations detected</div>{mastg_ref}", 0
+        lines = [
+            "<div>No additional app-owned manifest attack-surface misconfigurations detected</div>",
+            "<div class='info-box'><em>This check reviews app-level cleartext traffic, app-owned directBootAware components, and broad provider URI grant configuration. It does not treat SDK-managed Firebase/Google/AndroidX bootstrap components as app findings unless there is separate exported-component or provider exposure evidence.</em></div>",
+        ]
+        if info_notes:
+            lines.append("<div style='margin-top:8px'><strong>Informational SDK manifest signals:</strong></div>")
+            for note in sorted(set(info_notes)):
+                lines.append(f"<div style='margin-left:14px'>{html.escape(note)}</div>")
+            lines.append("<div class='info-box'><em>SDK-managed Firebase/Google/AndroidX manifest components are not counted as app attack-surface issues unless they are exported, permissionless, or otherwise expose app functionality.</em></div>")
+        return 'PASS', "\n".join(lines) + mastg_ref, 0
 
     lines = []
+    lines.append(
+        "<div class='info-box'><em>This check is a manifest hardening triage. Findings require context: directBootAware is only a concern when app-owned code exposes or stores sensitive data before user unlock; provider URI grants are only exploitable when callers can obtain broad content/file access.</em></div>"
+    )
     for status, msg in issues:
         lines.append(f"<div><strong>{status}:</strong> {html.escape(msg)}</div>")
+    if info_notes:
+        lines.append("<div style='margin-top:8px'><strong>Informational SDK manifest signals:</strong></div>")
+        for note in sorted(set(info_notes)):
+            lines.append(f"<div style='margin-left:14px'>{html.escape(note)}</div>")
     overall = 'FAIL' if any(status == 'FAIL' for status, _ in issues) else 'WARN'
     return overall, "\n".join(lines) + mastg_ref, len(issues)
 
