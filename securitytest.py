@@ -192,6 +192,7 @@ LIB_PATHS = (
     '/net/sqlcipher/', '/org/sqlite/',
     '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
     '/org/apache/', '/java/', '/javax/',
+    '/com/unity/',                         # Unity SDK/plugin code
     '/org/conscrypt/',  # Google's Conscrypt TLS/crypto provider
     '/com/livechatinc/',  # LiveChat SDK
     '/io/flutter/plugins/',  # Flutter plugins (webview, url_launcher, etc.)
@@ -3370,81 +3371,10 @@ def check_dependency_vulnerability_scan(base):
 
     return TestResult(
         name="Dependency Vulnerability Scan",
-        status="FAIL" if (vuln_dep_count or nvd_vuln_lib_count) else "WARN",
+        status="FAIL" if (vuln_dep_count or nvd_vuln_lib_count or deterministic_native_vuln_count) else "WARN",
         summary_lines=summary_lines,
         mastg_ref_html=data_source_html,
         raw_html="".join(findings_html),
-    )
-
-def check_flatbuffers_firebase_cpp(base):
-    """
-    Deterministic scanner for the FoodScanner-style FlatBuffers finding.
-    Generic dependency scanners often miss this because the evidence is embedded
-    in a native Firebase C++ shared object rather than a normal dependency file.
-    """
-    mastg_ref = (
-        "<div><strong>Reference:</strong> "
-        "<a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CODE/MASTG-TEST-0272/' target='_blank'>"
-        "MASTG-TEST-0272: Identify Dependencies with Known Vulnerabilities in the Android Project</a></div>"
-    )
-    findings = []
-    scanned = 0
-
-    for root, _, files in os.walk(base):
-        for fn in files:
-            if fn != 'libFirebaseCppApp-12_10_1.so':
-                continue
-            full = os.path.join(root, fn)
-            rel = os.path.relpath(full, base)
-            scanned += 1
-            try:
-                with open(full, 'rb') as f:
-                    blob = f.read()
-            except Exception:
-                continue
-
-            has_flatbuffers = b'FlatBuffers' in blob or b'flatbuffers' in blob
-            has_version = b'1.12.0' in blob
-            if has_flatbuffers and has_version:
-                snippets = []
-                for needle in (b'FlatBuffers', b'flatbuffers', b'1.12.0'):
-                    idx = blob.find(needle)
-                    if idx >= 0:
-                        start = max(0, idx - 80)
-                        end = min(len(blob), idx + 160)
-                        text = re.sub(rb'[^\x20-\x7e]+', b' ', blob[start:end])
-                        snippets.append(text.decode('ascii', errors='ignore').strip())
-                findings.append(
-                    FindingBlock(
-                        title=rel,
-                        subtitle="FlatBuffers 1.12.0 string evidence in Firebase C++ library",
-                        link=f"file://{os.path.abspath(full)}",
-                        code="\n".join(dict.fromkeys(snippets)) or "FlatBuffers 1.12.0",
-                        code_language="text",
-                    )
-                )
-
-    if not findings:
-        return TestResult(
-            name="Firebase C++ FlatBuffers Version",
-            status="PASS" if scanned else "INFO",
-            summary_lines=[
-                f"Firebase C++ app libraries scanned: {scanned}",
-                "FlatBuffers 1.12.0 evidence not found" if scanned else "Firebase C++ app library not found",
-            ],
-            mastg_ref_html=mastg_ref,
-        )
-
-    return TestResult(
-        name="Firebase C++ FlatBuffers Version",
-        status="WARN",
-        summary_lines=[
-            f"Firebase C++ app libraries scanned: {scanned}",
-            f"FlatBuffers 1.12.0 evidence found in {len(findings)} library file(s)",
-            "CVE applicability requires vendor/app reachability review; scanner CVE text commonly refers to the Rust crate",
-        ],
-        mastg_ref_html=mastg_ref,
-        findings=findings,
     )
 
 def check_crashlytics_sensitive_storage(base):
@@ -11372,7 +11302,7 @@ def check_pii_location_info(base):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-PRIVACY/MASTG-TEST-0254/' target='_blank'>MASTG-TEST-0254: Dangerous App Permissions</a></div>"
 
     if not issues:
-        return True, f"None{mastg_ref}"
+        return "PASS", f"None{mastg_ref}"
 
     # Add context note for informational purposes
     note = "<strong>Note:</strong> Location usage detected in app code. "
@@ -11682,6 +11612,7 @@ def check_insecure_randomness(base):
         '/j$/',  # Java 8+ backport library (j$ prefix)
         '/com/mux/',  # Mux video analytics SDK (non-crypto random for analytics)
         '/org/apache/',  # Apache Commons libraries (math operations)
+        '/com/unity/',  # Unity SDK/plugin code
         '/com/badlogic/gdx/',  # libGDX game engine (non-crypto random for game logic)
         '/com/bumptech/glide/',  # Glide image loading library (non-crypto random for cache keys)
         '/io/ktor/',             # Ktor HTTP/WebSocket client (non-crypto random for protocol)
@@ -11796,7 +11727,7 @@ def check_insecure_randomness(base):
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-CRYPTO/MASTG-TEST-0204/' target='_blank'>MASTG-TEST-0204: Insecure Random API Usage</a></div>"
 
     if not issues:
-        return True, f"None{mastg_ref}"
+        return "PASS", f"None{mastg_ref}"
 
     # Sort issues: CRITICAL first, then HIGH
     issues_critical = [i for i in issues if 'CRITICAL' in i]
@@ -11804,11 +11735,11 @@ def check_insecure_randomness(base):
     issues = issues_critical + issues_high
 
     result = []
-    result.append(f"<div style='margin:5px 0'><strong>Insecure random usage found:</strong> {len(issues)}</div>")
+    result.append(f"<div style='margin:5px 0'><strong>Potential insecure random usage found:</strong> {len(issues)}</div>")
     result.extend(issues)
     result.append(mastg_ref)
 
-    return False, "<br>\n".join(result)
+    return ("FAIL" if issues_critical else "WARN"), "<br>\n".join(result)
     
 def check_insecure_fingerprint_api(base):
     """
@@ -14886,30 +14817,109 @@ def check_frida_sharedprefs(base, wait_secs=10):
     if file_writes:
         summary_lines.append(f"Direct shared_prefs file writes: {len(file_writes)}")
 
-    plaintext_sensitive_writes = 0
+    def classify_plaintext_pref_entry(filename, key, value):
+        haystack = f"{key} {value}".lower()
+        key_l = str(key).lower()
+        filename_l = str(filename or "").lower()
+        value_s = str(value or "")
+
+        benign_state_keys = (
+            'session_count', 'player_session_count', 'fire-count', 'fire-global',
+            'last-used-date', 'welcome', 'modal', 'viewed', 'resolution',
+            '__unity_playerprefs_version__',
+        )
+        if any(marker in key_l for marker in benign_state_keys):
+            return "state", "runtime/app state counter or UI flag"
+        if 'firebaseheartbeat' in filename_l:
+            return "state", "Firebase SDK heartbeat metadata"
+
+        auth_patterns = (
+            r'\b(password|passwd|pwd|passphrase|passcode)\b',
+            r'\b(auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token)\b',
+            r'\b(jwt|bearer|authorization|oauth|cookie|secret|private[_-]?key|api[_-]?key|apikey)\b',
+            r'\b(session[_-]?id|sessionid|sid)\b',
+        )
+        if any(re.search(pattern, haystack, re.IGNORECASE) for pattern in auth_patterns):
+            return "confirmed", "credential/auth/session-token indicator"
+
+        pii_patterns = (
+            r'\b(postcode|postal[_ -]?code|zip[_ -]?code)\b',
+            r'\b(gender|sex|dob|date[_ -]?of[_ -]?birth|birthdate|exact[_ -]?age|user[_ -]?age)\b',
+            r'\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b',
+            r'\b(?:\+?\d[\d\s().-]{8,}\d)\b',
+        )
+        if any(re.search(pattern, f"{key} {value}", re.IGNORECASE) for pattern in pii_patterns):
+            return "confirmed", "privacy-sensitive user data indicator"
+
+        if re.fullmatch(r'[0-9a-fA-F]{32,}', value_s) or re.fullmatch(r'[0-9a-fA-F-]{36}', value_s):
+            return "potential", "persistent identifier-like value"
+        if any(marker in key_l for marker in ('userid', 'user_id', 'cloud_userid', 'firebase_id', 'installation', 'fid', 'uuid', 'guid', 'device_id')):
+            return "potential", "persistent identifier key"
+
+        key_sensitive, key_categories = is_sensitive_keyword(key)
+        value_sensitive, value_categories = is_sensitive_keyword(value)
+        if key_sensitive or value_sensitive:
+            categories = sorted(set(key_categories + value_categories))
+            return "potential", "keyword match: " + ", ".join(categories)
+
+        return "none", ""
+
+    confirmed_sensitive_writes = []
+    potential_sensitive_writes = []
     runtime_storage_events = 0
-    for data in prefs_accessed.values():
+    for prefs_name, data in prefs_accessed.items():
         runtime_storage_events += len(data.get('writes', []))
         if not data.get('encrypted'):
-            plaintext_sensitive_writes += sum(1 for w in data.get('writes', []) if w.get('sensitive'))
-    plaintext_sensitive_writes += sum(1 for op in datastore_ops if op.get('sensitive'))
-    for write_data in file_writes.values():
+            for w in data.get('writes', []):
+                severity, reason = classify_plaintext_pref_entry(prefs_name, w.get('key', ''), w.get('value', ''))
+                if severity == "confirmed":
+                    confirmed_sensitive_writes.append((prefs_name, w.get('key', ''), w.get('value', ''), reason))
+                elif severity == "potential":
+                    potential_sensitive_writes.append((prefs_name, w.get('key', ''), w.get('value', ''), reason))
+    for op in datastore_ops:
+        severity, reason = classify_plaintext_pref_entry("DataStore", op.get('key', ''), op.get('value', ''))
+        if severity == "confirmed":
+            confirmed_sensitive_writes.append(("DataStore", op.get('key', ''), op.get('value', ''), reason))
+        elif severity == "potential":
+            potential_sensitive_writes.append(("DataStore", op.get('key', ''), op.get('value', ''), reason))
+    for filename, write_data in file_writes.items():
         for item in write_data.get('details', []):
             key = item.get('key', '')
             value = item.get('value', '')
-            key_sensitive, _ = is_sensitive_keyword(key)
-            value_sensitive, _ = is_sensitive_keyword(value)
-            if key_sensitive or value_sensitive:
-                plaintext_sensitive_writes += 1
+            severity, reason = classify_plaintext_pref_entry(filename, key, value)
+            if severity == "confirmed":
+                confirmed_sensitive_writes.append((filename, key, value, reason))
+            elif severity == "potential":
+                potential_sensitive_writes.append((filename, key, value, reason))
             runtime_storage_events += 1
 
-    if plaintext_sensitive_writes:
+    if confirmed_sensitive_writes:
         status = "FAIL"
-        summary_lines.append(f"Plaintext sensitive runtime writes: {plaintext_sensitive_writes}")
+        summary_lines.append(f"Confirmed plaintext sensitive runtime writes: {len(confirmed_sensitive_writes)}")
+    elif potential_sensitive_writes:
+        status = "WARN"
+        summary_lines.append(f"Potential plaintext identifier/sensitive writes: {len(potential_sensitive_writes)}")
     elif runtime_storage_events:
         status = "WARN"
     else:
         status = "INFO"
+
+    if confirmed_sensitive_writes or potential_sensitive_writes:
+        detail.append("<div style='margin-top:8px'><strong>SharedPreferences sensitivity triage:</strong></div>")
+        for filename, key, value, reason in confirmed_sensitive_writes[:10]:
+            preview = str(value)[:80] + ('...' if len(str(value)) > 80 else '')
+            detail.append(
+                f"<div style='margin-left:15px'><strong>FAIL</strong> "
+                f"<code>{escape(str(filename))}</code> / <code>{escape(str(key))}</code> "
+                f"({escape(reason)}): <code>{escape(preview, quote=False)}</code></div>"
+            )
+        for filename, key, value, reason in potential_sensitive_writes[:10]:
+            preview = str(value)[:80] + ('...' if len(str(value)) > 80 else '')
+            detail.append(
+                f"<div style='margin-left:15px'><strong>WARN</strong> "
+                f"<code>{escape(str(filename))}</code> / <code>{escape(str(key))}</code> "
+                f"({escape(reason)}): <code>{escape(preview, quote=False)}</code></div>"
+            )
 
     return TestResult(
         name="Dynamic SharedPreferences",
@@ -18595,7 +18605,6 @@ def main():
                 "Insecure Package Context",
                 "Framework Security Signals",
                 "Dependency Vulnerability Scan",
-                "Firebase C++ FlatBuffers Version",
             ]
         },
         "MASVS-RESILIENCE": {
@@ -18751,7 +18760,6 @@ def main():
         make_check("Manifest Attack Surface", lambda: check_manifest_attack_surface(manifest)),
         make_check("Framework Security Signals", lambda: check_framework_security_signals(base, manifest)),
         make_check("Dependency Vulnerability Scan", lambda: check_dependency_vulnerability_scan(base)),
-        make_check("Firebase C++ FlatBuffers Version", lambda: check_flatbuffers_firebase_cpp(base)),
         make_check("S3 Bucket Security",      lambda: check_s3_bucket_security(base)),
     ]
 
