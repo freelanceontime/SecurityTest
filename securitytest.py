@@ -494,6 +494,20 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
         stdin_fd = sys.stdin.fileno()
         stdin_fl = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
         fcntl.fcntl(stdin_fd, fcntl.F_SETFL, stdin_fl | os.O_NONBLOCK)
+        # Drain any newline left by the previous dynamic test. Without this, the
+        # next monitor can immediately stop before the user sees the instructions.
+        try:
+            while select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.readline()
+        except Exception:
+            pass
+    else:
+        # Same stale-input drain for Windows consoles.
+        try:
+            while msvcrt.kbhit():
+                msvcrt.getwche()
+        except Exception:
+            pass
 
     # Real-time log collection with user prompt
     frida_stopped = False
@@ -14086,9 +14100,6 @@ def check_frida_sharedprefs(base, wait_secs=10):
         raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
     spawn_name = candidates[0]
 
-    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     jscode = r"""
     setImmediate(function(){
       if (Java.available) {
@@ -15401,7 +15412,7 @@ def check_frida_pending_intent(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
-    all_output = interactive_frida_monitor(proc, "PENDINGINTENT", instructions, send_exit_on_stop=True)
+    all_output = interactive_frida_monitor(proc, "PENDINGINTENT", instructions)
 
     events = []
     logs = []
@@ -15805,17 +15816,17 @@ def check_frida_crypto_keys(base, wait_secs=10):
     tmp.flush()
     tmp.close()
 
-    proc = subprocess.Popen(
-        _build_frida_command(tmp.name, spawn_name, context="CRYPTO_KEYS"),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
-    )
-
     # Interactive monitoring with user prompt
     instructions = [
         f"App '{spawn_name}' is running with cryptographic key monitoring",
         "Use features that might use encryption (login, data storage, API calls)",
         "Watch for cryptographic key operations below"
     ]
+    proc = subprocess.Popen(
+        _build_frida_command(tmp.name, spawn_name, context="CRYPTO_KEYS"),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
+    )
+
     logs = interactive_frida_monitor(proc, "CRYPTO KEYS", instructions)
 
     # Parse collected logs
