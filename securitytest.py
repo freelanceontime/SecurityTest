@@ -63,6 +63,13 @@ def _build_frida_command(builtin_script_path: str, spawn_name: str, context: str
     Loads user -l script first (if provided), then built-in dynamic-test script.
     This prioritizes app-specific bypass hooks (root/pinning) before scanner hooks.
     """
+    # Give the previous `frida -f <package>` session time to release its spawn
+    # state. Without this, back-to-back dynamic tests can fail with
+    # "spawn already in progress for the specified package name".
+    subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.75)
+
     cmd = ['frida']
     if CUSTOM_FRIDA_SCRIPT_PATH:
         cmd += ['-l', CUSTOM_FRIDA_SCRIPT_PATH, '-l', builtin_script_path]
@@ -74,6 +81,105 @@ def _build_frida_command(builtin_script_path: str, spawn_name: str, context: str
         print(f"[*] Loading Frida script: builtin ({context or 'DYNAMIC_TEST'})")
     cmd += ['-U', '-f', spawn_name]
     return cmd
+
+
+def _shell_quote_for_adb(value):
+    value = str(value)
+    if value == "":
+        return "''"
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _adb_command_string(parts):
+    return " ".join(_shell_quote_for_adb(part) for part in parts)
+
+
+def _manifest_component_name(pkg_name, raw_name):
+    if not raw_name:
+        return ""
+    if raw_name.startswith('.'):
+        return f"{pkg_name}/{raw_name}"
+    if '.' in raw_name:
+        return f"{pkg_name}/{raw_name}"
+    return f"{pkg_name}/.{raw_name}"
+
+
+def build_pending_intent_live_trigger_commands(manifest, pkg_name, spawn_name, limit=8):
+    commands = []
+    seen = set()
+
+    def add(label, parts):
+        cmd = _adb_command_string(parts)
+        if cmd in seen:
+            return
+        seen.add(cmd)
+        commands.append((label, cmd))
+
+    add("Launch app", ['adb', 'shell', 'monkey', '-p', spawn_name, '-c', 'android.intent.category.LAUNCHER', '1'])
+
+    try:
+        root = ET.parse(manifest).getroot()
+    except Exception:
+        return commands[:limit]
+
+    ns = '{http://schemas.android.com/apk/res/android}'
+
+    for activity in root.findall('.//activity'):
+        name = activity.get(ns + 'name', '')
+        if not name:
+            continue
+        exported = activity.get(ns + 'exported', '').lower() == 'true'
+        for filt in activity.findall('intent-filter'):
+            actions = {a.get(ns + 'name') for a in filt.findall('action')}
+            cats = {c.get(ns + 'name') for c in filt.findall('category')}
+            if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in cats:
+                add(f"Start launcher activity {name}", ['adb', 'shell', 'am', 'start', '-W', '-n', _manifest_component_name(pkg_name, name)])
+            if exported and 'android.intent.action.VIEW' in actions and 'android.intent.category.BROWSABLE' in cats:
+                data_nodes = filt.findall('data')
+                schemes = [d.get(ns + 'scheme') for d in data_nodes if d.get(ns + 'scheme')]
+                hosts = [d.get(ns + 'host') for d in data_nodes if d.get(ns + 'host')]
+                paths = [d.get(ns + 'path') or d.get(ns + 'pathPrefix') or d.get(ns + 'pathPattern') for d in data_nodes]
+                scheme = schemes[0] if schemes else 'https'
+                host = hosts[0] if hosts else 'example.invalid'
+                path = next((p for p in paths if p), '/')
+                if not str(path).startswith('/'):
+                    path = '/' + str(path)
+                uri = f"{scheme}://{host}{path}"
+                add(f"Trigger deep link {name}", ['adb', 'shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', uri, '-n', _manifest_component_name(pkg_name, name)])
+
+    for receiver in root.findall('.//receiver'):
+        name = receiver.get(ns + 'name', '')
+        exported = receiver.get(ns + 'exported', '').lower() == 'true'
+        if not exported or not name:
+            continue
+        actions = []
+        for filt in receiver.findall('intent-filter'):
+            actions.extend(a.get(ns + 'name') for a in filt.findall('action') if a.get(ns + 'name'))
+        for action in actions[:2]:
+            add(f"Send broadcast to {name}", ['adb', 'shell', 'am', 'broadcast', '--receiver-include-background', '-a', action, '-n', _manifest_component_name(pkg_name, name)])
+
+    for service in root.findall('.//service'):
+        name = service.get(ns + 'name', '')
+        exported = service.get(ns + 'exported', '').lower() == 'true'
+        if exported and name:
+            add(f"Start service {name}", ['adb', 'shell', 'am', 'startservice', '-n', _manifest_component_name(pkg_name, name)])
+
+    return commands[:limit]
+
+
+def build_pending_intent_live_instructions(manifest, pkg_name, spawn_name):
+    instructions = [
+        f"App '{spawn_name}' is running with PendingIntent monitoring",
+        "Run one or more of these app-specific trigger commands in another terminal while this monitor is running:",
+    ]
+    for label, cmd in build_pending_intent_live_trigger_commands(manifest, pkg_name, spawn_name):
+        instructions.append(f"{label}: {cmd}")
+    instructions.extend([
+        "Also inspect existing system-held PendingIntents with: adb shell dumpsys notification --noredact",
+        "Look for mutable or missing FLAG_IMMUTABLE below",
+    ])
+    return instructions
+
 LIB_PATHS = (
     '/androidx/', '/android/support/',
     '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
@@ -462,6 +568,10 @@ def interactive_frida_monitor(proc, test_name, instructions, send_exit_on_stop=F
                 if "Process crashed:" in line:
                     stop_reason = "Target process crashed."
                     FRIDA_LAST_STOP_REASON = "crash"
+                    frida_stopped = True
+                elif "Failed to spawn:" in line or "spawn already in progress" in line:
+                    stop_reason = "Frida failed to spawn the app."
+                    FRIDA_LAST_STOP_REASON = "spawn_failed"
                     frida_stopped = True
 
             # If Frida exited and there's no new output, do not auto-continue.
@@ -13976,85 +14086,6 @@ def check_frida_sharedprefs(base, wait_secs=10):
         raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
     spawn_name = candidates[0]
 
-    def _pi_shell_quote(value):
-        value = str(value)
-        if value == "":
-            return "''"
-        return "'" + value.replace("'", "'\"'\"'") + "'"
-
-    def _pi_adb_cmd(parts):
-        return " ".join(_pi_shell_quote(part) for part in parts)
-
-    def _pi_component_name(raw_name):
-        if not raw_name:
-            return ""
-        if raw_name.startswith('.'):
-            return f"{pkg_name}/{raw_name}"
-        if '.' in raw_name:
-            return f"{pkg_name}/{raw_name}"
-        return f"{pkg_name}/.{raw_name}"
-
-    def _pending_intent_live_trigger_commands(limit=8):
-        commands = []
-        seen = set()
-
-        def add(label, parts):
-            cmd = _pi_adb_cmd(parts)
-            if cmd in seen:
-                return
-            seen.add(cmd)
-            commands.append((label, cmd))
-
-        add("Launch app", ['adb', 'shell', 'monkey', '-p', spawn_name, '-c', 'android.intent.category.LAUNCHER', '1'])
-
-        try:
-            root = ET.parse(manifest).getroot()
-        except Exception:
-            return commands[:limit]
-
-        ns = '{http://schemas.android.com/apk/res/android}'
-
-        for activity in root.findall('.//activity'):
-            name = activity.get(ns + 'name', '')
-            if not name:
-                continue
-            for filt in activity.findall('intent-filter'):
-                actions = {a.get(ns + 'name') for a in filt.findall('action')}
-                cats = {c.get(ns + 'name') for c in filt.findall('category')}
-                if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in cats:
-                    add(f"Start launcher activity {name}", ['adb', 'shell', 'am', 'start', '-W', '-n', _pi_component_name(name)])
-                if 'android.intent.action.VIEW' in actions and 'android.intent.category.BROWSABLE' in cats:
-                    data_nodes = filt.findall('data')
-                    schemes = [d.get(ns + 'scheme') for d in data_nodes if d.get(ns + 'scheme')]
-                    hosts = [d.get(ns + 'host') for d in data_nodes if d.get(ns + 'host')]
-                    paths = [d.get(ns + 'path') or d.get(ns + 'pathPrefix') or d.get(ns + 'pathPattern') for d in data_nodes]
-                    scheme = schemes[0] if schemes else 'https'
-                    host = hosts[0] if hosts else 'example.invalid'
-                    path = next((p for p in paths if p), '/')
-                    if not str(path).startswith('/'):
-                        path = '/' + str(path)
-                    uri = f"{scheme}://{host}{path}"
-                    add(f"Trigger deep link {name}", ['adb', 'shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', uri, '-n', _pi_component_name(name)])
-
-        for receiver in root.findall('.//receiver'):
-            name = receiver.get(ns + 'name', '')
-            exported = _parse_manifest_bool(receiver.get(ns + 'exported'))
-            if exported is not True or not name:
-                continue
-            actions = []
-            for filt in receiver.findall('intent-filter'):
-                actions.extend(a.get(ns + 'name') for a in filt.findall('action') if a.get(ns + 'name'))
-            for action in actions[:2]:
-                add(f"Broadcast to {name}", ['adb', 'shell', 'am', 'broadcast', '--receiver-include-background', '-a', action, '-n', _pi_component_name(name)])
-
-        for service in root.findall('.//service'):
-            name = service.get(ns + 'name', '')
-            exported = _parse_manifest_bool(service.get(ns + 'exported'))
-            if exported is True and name:
-                add(f"Start exported service {name}", ['adb', 'shell', 'am', 'startservice', '-n', _pi_component_name(name)])
-
-        return commands[:limit]
-
     subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -15214,6 +15245,7 @@ def check_frida_pending_intent(base, wait_secs=10):
     if not candidates:
         raise RuntimeError(f"No installed package matching {pkg_prefix!r}")
     spawn_name = candidates[0]
+    instructions = build_pending_intent_live_instructions(manifest, pkg_name, spawn_name)
 
     subprocess.run(['adb', 'shell', 'am', 'force-stop', spawn_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -15369,17 +15401,6 @@ def check_frida_pending_intent(base, wait_secs=10):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1024*1024
     )
 
-    live_trigger_commands = _pending_intent_live_trigger_commands()
-    instructions = [
-        f"App '{spawn_name}' is running with PendingIntent monitoring",
-        "Run one or more of these app-specific trigger commands in another terminal while this monitor is running:",
-    ]
-    for label, cmd in live_trigger_commands:
-        instructions.append(f"{label}: {cmd}")
-    instructions.extend([
-        "Also inspect existing system-held PendingIntents with: adb shell dumpsys notification --noredact",
-        "Look for mutable or missing FLAG_IMMUTABLE below",
-    ])
     all_output = interactive_frida_monitor(proc, "PENDINGINTENT", instructions, send_exit_on_stop=True)
 
     events = []
@@ -18906,7 +18927,19 @@ def main():
             try:
                 res = fn()
             except Exception as e:
+                print(f"[!] {name} failed before completion: {e}")
                 res = ('FAIL', f"<strong>Error: {html.escape(str(e))}</strong>")
+
+            if FRIDA_LAST_STOP_REASON == "spawn_failed":
+                print(f"[!] {name} hit a Frida spawn-in-progress condition.")
+                print("[*] Waiting for the previous spawn to settle, then retrying once...")
+                time.sleep(2)
+                FRIDA_LAST_STOP_REASON = None
+                try:
+                    res = fn()
+                except Exception as e:
+                    print(f"[!] {name} retry failed before completion: {e}")
+                    res = ('FAIL', f"<strong>Error after spawn retry: {html.escape(str(e))}</strong>")
 
             if CUSTOM_FRIDA_SCRIPT_PATH and FRIDA_LAST_STOP_REASON == "crash":
                 print("[!] Dynamic test crashed while user -l script was active.")
