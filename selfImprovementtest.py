@@ -19,7 +19,7 @@ Assumed environment
 Self-update source
   https://github.com/freelanceontime/SecurityTest/blob/main/selfImprovedtests.py
 """
-import sys, os, re, json, platform, subprocess, hashlib, shutil
+import sys, os, re, json, platform, subprocess, hashlib, shutil, argparse
 import urllib.request, urllib.error, datetime
 from pathlib import Path
 
@@ -1643,17 +1643,109 @@ def run_tests(session: dict, improvements: dict) -> None:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="selfImprovementtest.py",
+        description=(
+            "AI-Assisted Android Security Test Runner  (OWASP MASTG)\n"
+            "Runs Kali Linux + ADB + Frida + Claude Code\n\n"
+            "Quick start (interactive):\n"
+            "  python selfImprovementtest.py\n\n"
+            "Quick start (pre-filled):\n"
+            "  python selfImprovementtest.py \\\n"
+            "    --app MyApp \\\n"
+            "    --pkg com.example.app \\\n"
+            "    --apk /root/Desktop/MyApp.apk \\\n"
+            "    --src /root/Desktop/MyApp_decompiled/ \\\n"
+            "    --level l1"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--app", metavar="NAME",
+        help="App name used in the report filename  (e.g. MyBankingApp)",
+    )
+    p.add_argument(
+        "--pkg", metavar="PACKAGE",
+        help="Android package name  (e.g. com.example.myapp)",
+    )
+    p.add_argument(
+        "--apk", metavar="PATH",
+        help="Path to the APK file  (e.g. /root/Desktop/MyApp.apk)",
+    )
+    p.add_argument(
+        "--src", metavar="PATH",
+        help=(
+            "Path to the decompiled APK folder produced by jadx or apktool\n"
+            "(e.g. /root/Desktop/MyApp_decompiled/).  Claude uses this as its\n"
+            "working directory so it can grep/strings/navigate the source."
+        ),
+    )
+    p.add_argument(
+        "--level", metavar="LEVEL",
+        choices=["l1", "l2", "both", "custom", "L1", "L2", "BOTH", "CUSTOM"],
+        help=(
+            "Pre-select a test level without the interactive menu:\n"
+            "  l1     Standard Security (100 tests)\n"
+            "  l2     Defense-in-Depth / Resilience (31 tests)\n"
+            "  both   Full suite (131 tests)\n"
+            "  custom Opens selection menu with nothing pre-selected"
+        ),
+    )
+    p.add_argument(
+        "--new", action="store_true",
+        help="Force a new session even if a resumable one exists",
+    )
+    p.add_argument(
+        "--reset", action="store_true",
+        help="Delete the saved session state and start fresh",
+    )
+    p.add_argument(
+        "--list", action="store_true",
+        help="List all embedded tests and exit",
+    )
+    p.add_argument(
+        "--no-update", action="store_true",
+        help="Skip the GitHub update check",
+    )
+    return p.parse_args()
+
+
 def main() -> None:
     _enable_ansi()
-    _clear()
+    args = _parse_args()
 
+    # ── --list ────────────────────────────────────────────────────────────────
+    if args.list:
+        prev_sec = None
+        for t in TESTS:
+            if t["section"] != prev_sec:
+                lc = _Y if t["level"] == "L2" else _C
+                print(f"\n{lc}{_B}[{t['level']}] {t['section']}{_R}")
+                prev_sec = t["section"]
+            print(f"  • {t['name']}")
+        print(f"\n  Total: {len(TESTS)} tests  "
+              f"(L1: {sum(1 for t in TESTS if t['level']=='L1')}  "
+              f"L2: {sum(1 for t in TESTS if t['level']=='L2')})")
+        sys.exit(0)
+
+    _clear()
     print(f"\n{_B}{'=' * 72}{_R}")
     print(f"{_B}  selfImprovementtest.py  v{__version__}  –  {len(TESTS)} tests embedded{_R}")
     print(f"{_B}  AI-Assisted Android Security Testing  |  OWASP MASTG{_R}")
     print(f"{_B}  Platform: Kali Linux  |  ADB + Frida  |  Claude Code CLI{_R}")
     print(f"{_B}{'=' * 72}{_R}\n")
 
-    check_for_update()
+    if not args.no_update:
+        check_for_update()
+
+    # ── --reset ───────────────────────────────────────────────────────────────
+    if args.reset:
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+            print(f"  {_G}[✓] Session state cleared.{_R}")
+        else:
+            print(f"  [~] No session state to clear.")
 
     state        = load_state()
     improvements = load_improvements()
@@ -1661,53 +1753,96 @@ def main() -> None:
     if not check_pending_jira(state):
         print("[*] Exiting.\n"); sys.exit(0)
 
-    # Resume existing session?
+    # ── Resume or new session ─────────────────────────────────────────────────
     session: dict | None = None
     pending = [t for t in state.get("tests", [])
                if t.get("status") not in ("completed", "skipped")]
-    if state.get("tests") and pending:
+
+    if state.get("tests") and pending and not args.new and not args.reset:
         done  = sum(1 for t in state["tests"] if t.get("status") == "completed")
         total = len(state["tests"])
-        print(f"  {_Y}[?] Resumable session:{_R}  {state.get('app_name','?')}  ({done}/{total} done)")
+        print(f"  {_Y}[?] Resumable session:{_R}  {_B}{state.get('app_name','?')}{_R}")
+        print(f"      Package : {state.get('package_name','?')}")
+        print(f"      Source  : {state.get('decompiled_path','?')}")
+        print(f"      Progress: {done}/{total} tests completed")
         print()
-        print("  1  Resume"); print("  2  New session"); print("  Q  Quit"); print()
+        print("  1  Resume this session")
+        print("  2  Start a new session")
+        print("  Q  Quit")
+        print()
         ch = input("  Choice (1/2/Q): ").strip().upper()
         if ch == "Q":  sys.exit(0)
         if ch == "1":  session = state
 
+    # ── New session setup ─────────────────────────────────────────────────────
     if session is None:
         print()
         _box("NEW TEST SESSION")
         print()
-        app_name    = input("  App name (used in report filename): ").strip() or "UnknownApp"
-        pkg_name    = input("  Package name  (e.g. com.example.app): ").strip()
-        apk_path    = input("  APK file path (optional, Enter to skip): ").strip()
-        decomp_path = input("  Decompiled APK folder (e.g. /root/Desktop/AppName/): ").strip()
-        print()
 
+        # Use CLI args if provided, otherwise prompt interactively
+        if args.app:
+            app_name = args.app
+            print(f"  App name       : {_G}{app_name}{_R}  (from --app)")
+        else:
+            app_name = input("  App name (used in report filename): ").strip() or "UnknownApp"
+
+        if args.pkg:
+            pkg_name = args.pkg
+            print(f"  Package        : {_G}{pkg_name}{_R}  (from --pkg)")
+        else:
+            pkg_name = input("  Package name  (e.g. com.example.app): ").strip()
+
+        if args.apk:
+            apk_path = args.apk
+            print(f"  APK file       : {_G}{apk_path}{_R}  (from --apk)")
+        else:
+            apk_path = input("  APK file path (optional, Enter to skip): ").strip()
+
+        if args.src:
+            decomp_path = args.src
+            print(f"  Decompiled src : {_G}{decomp_path}{_R}  (from --src)")
+        else:
+            decomp_path = input(
+                "  Decompiled APK folder (e.g. /root/Desktop/AppName/): "
+            ).strip()
+
+        # Validate decompiled path if given
+        if decomp_path and not os.path.isdir(decomp_path):
+            print(f"\n  {_Y}[!] Warning: '{decomp_path}' does not exist or is not a directory.{_R}")
+            print(f"      Claude will still run but may not find source files.")
+
+        print()
         l1 = sum(1 for t in TESTS if t["level"] == "L1")
         l2 = sum(1 for t in TESTS if t["level"] == "L2")
-        print(f"  {_G}[✓]{_R} {len(TESTS)} tests embedded  ({_C}L1: {l1}{_R}  {_Y}L2: {l2}{_R})")
+        print(f"  {_G}[✓]{_R} {len(TESTS)} tests embedded  "
+              f"({_C}L1: {l1}{_R}  {_Y}L2: {l2}{_R})")
 
-        level_filter = choose_level_filter(len(TESTS))
-        if level_filter is None:
-            print("[*] Exiting.\n"); sys.exit(0)
+        # Level filter — use --level flag or interactive menu
+        if args.level:
+            level_filter = args.level.upper()
+            if level_filter == "BOTH": level_filter = "BOTH"
+            print(f"  Level filter   : {_G}{level_filter}{_R}  (from --level)")
+        else:
+            level_filter = choose_level_filter(len(TESTS))
+            if level_filter is None:
+                print("[*] Exiting.\n"); sys.exit(0)
 
         if   level_filter == "L1":   presel = {i for i,t in enumerate(TESTS) if t["level"]=="L1"}
         elif level_filter == "L2":   presel = {i for i,t in enumerate(TESTS) if t["level"]=="L2"}
         elif level_filter == "BOTH": presel = set(range(len(TESTS)))
         else:                        presel = set()
 
-        title   = f"SELECT TESTS [{level_filter}]  –  SPACE=toggle  ENTER=confirm  A=all  N=none  Q=quit"
+        title   = (f"SELECT TESTS [{level_filter}]  –  "
+                   "SPACE=toggle  ENTER=confirm  A=all  N=none  Q=quit")
         sel_idx = run_selection_menu(list(TESTS), presel, title)
 
         if not sel_idx:
             print("\n[*] No tests selected. Exiting.\n"); sys.exit(0)
 
-        # Copy selected tests into session (with status/result fields)
         selected = []
         for i in sorted(sel_idx):
-            t = dict(TESTS[i])   # copy so we can add mutable fields
+            t = dict(TESTS[i])
             t["status"] = "pending"
             t["result"] = None
             selected.append(t)
@@ -1716,16 +1851,20 @@ def main() -> None:
                               apk_path, decomp_path, level_filter)
         save_state(session)
 
+    # ── Confirm & run ─────────────────────────────────────────────────────────
     show_checklist(session)
     done = sum(1 for t in session["tests"] if t.get("status") == "completed")
     rem  = len(session["tests"]) - done
-    print(f"  {rem} tests queued for Claude.")
-    print(f"  {_Y}Ensure 'claude' is in PATH and your ADB device is connected.{_R}")
-    if session.get("decompiled_path"):
-        print(f"  Claude CWD: {_C}{session['decompiled_path']}{_R}")
-    print()
+
+    print(f"  App      : {_B}{session.get('app_name','?')}{_R}")
+    print(f"  Package  : {session.get('package_name') or _D+'(not set)'+_R}")
+    print(f"  Source   : {_C}{session.get('decompiled_path') or '(not set)'}{_R}")
+    print(f"  APK      : {session.get('apk_path') or _D+'(not set)'+_R}")
+    print(f"  Queued   : {rem} tests remaining")
+    print(f"\n  {_Y}Ensure 'claude' is in PATH and your ADB device is connected.{_R}\n")
+
     ans = input("  Start testing? [Y/n]: ").strip().lower()
-    if ans in ("n","no","q"):
+    if ans in ("n", "no", "q"):
         print("[*] Session saved.\n"); sys.exit(0)
 
     run_tests(session, improvements)
