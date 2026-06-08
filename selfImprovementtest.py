@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations  # allow X | Y type hints on Python 3.9
 """
 selfImprovementtest.py  –  AI-Assisted Android Security Test Runner
 ======================================================================
