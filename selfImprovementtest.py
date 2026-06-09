@@ -1198,6 +1198,64 @@ def _augment_grep(cmd, decomp_path):
     return f"{cmd} {target}"
 
 
+def _resolve_codex_binary() -> str:
+    """Find Codex even when Python was started with a limited PATH."""
+    candidates = []
+
+    env_bin = os.environ.get("CODEX_BIN", "").strip()
+    if env_bin:
+        candidates.append(env_bin)
+
+    for name in ("codex", "codex.cmd", "codex.CMD"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+
+    if IS_WIN:
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        candidates += [
+            os.path.join(appdata, "npm", "codex.cmd"),
+            os.path.join(appdata, "npm", "codex.CMD"),
+            os.path.join(localappdata, "Programs", "codex", "codex.exe"),
+        ]
+    else:
+        candidates += [
+            "/usr/local/bin/codex",
+            "/usr/bin/codex",
+            os.path.expanduser("~/.local/bin/codex"),
+            os.path.expanduser("~/.npm-global/bin/codex"),
+            os.path.expanduser("~/node_modules/.bin/codex"),
+        ]
+        for shell in ("/usr/bin/zsh", "/bin/zsh", "/usr/bin/bash", "/bin/bash"):
+            if os.path.exists(shell):
+                try:
+                    cp = subprocess.run(
+                        [shell, "-lc", "command -v codex"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    found = (cp.stdout or "").strip().splitlines()
+                    if found:
+                        candidates.append(found[0])
+                except Exception:
+                    pass
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(candidate))
+        if os.path.exists(expanded):
+            return expanded
+
+    raise FileNotFoundError(
+        "codex not found. Set CODEX_BIN to the full Codex path. "
+        "Example on Kali: export CODEX_BIN=$(command -v codex). "
+        f"PATH={os.environ.get('PATH', '')}"
+    )
+
+
 # ── Claude runner ─────────────────────────────────────────────────────────────
 def run_claude(prompt, cwd=None, timeout=600, model="claude",
                ollama_model="", ollama_host=OLLAMA_HOST, test_name=""):
@@ -1398,6 +1456,33 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             out = "\n\n".join(all_responses)
 
         elif model == "codex":
+            codex_bin = _resolve_codex_binary()
+            proc = subprocess.run(
+                [
+                    codex_bin, "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--skip-git-repo-check",
+                    "--color", "never",
+                    "-",
+                ],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                cwd=cwd or str(SCRIPT_DIR),
+            )
+            spinning[0] = False
+            spin_t.join(2)
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+            if len(out.strip()) < 80:
+                print(f"  {_Y}â”‚ [!] Codex produced very little output.{_R}")
+                print(f"  {_Y}â”‚     Raw (first 200 chars): {out[:200]!r}{_R}")
+                print(f"  {_Y}â”‚     Ensure 'codex' is authenticated: run 'codex' interactively first.{_R}")
+
+        elif model == "__codex_pty_legacy_disabled__":
             # ── Codex — requires a real TTY (isatty check) ────────────────────
             # Run inside a PTY.  Codex reads its task from stdin so we send the
             # prompt after a short startup pause rather than as a CLI argument
