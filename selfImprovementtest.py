@@ -884,11 +884,8 @@ def check_for_update() -> None:
     print(f"\r  {_Y}{_B}[!] A newer version is available on GitHub!{_R}")
     ans = input("      Download and apply now? [y/N]: ").strip().lower()
     if ans in ("y", "yes"):
-        backup = SCRIPT_PATH.with_suffix(".py.bak")
-        shutil.copy2(SCRIPT_PATH, backup)
         SCRIPT_PATH.write_bytes(remote)
-        print(f"  {_G}[✓] Updated. Old version backed up to {backup.name}")
-        print(f"      Please restart the script.{_R}")
+        print(f"  {_G}[✓] Updated successfully. Please restart the script.{_R}")
         sys.exit(0)
 
 
@@ -1098,8 +1095,6 @@ def build_prompt(test, session, improvement, model="claude"):
             f"  - The `content` value for the test named \"{test['name']}\" in the TESTS list\n"
             f"    (search for  name=\"{test['name']}\"  and update its `content` key)\n"
             "  - Nothing else – do NOT alter test names, levels, sections, or script logic\n\n"
-            "Before editing, back up the script:\n"
-            f"  cp {SCRIPT_PATH} {SCRIPT_PATH.with_suffix('.py.bak')}\n\n"
             "If you make changes, note what you changed and why in the NOTES section above.\n"
         )
     else:
@@ -1449,15 +1444,15 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         pass
 
                 # ── Phase 1: startup handshake ────────────────────────────
-                # Read output for up to 12 s, auto-answering any prompts
-                # that appear before Codex is ready to receive our task.
-                # Trust / y-n prompts to auto-answer
+                # Auto-answer any trust / y-n / update prompts, then wait
+                # for Codex's input cursor before sending our task.
                 _TRUST_PAT = re.compile(
-                    r"trust|proceed|continue|allow|permission|y/n|yes/no|\[y\]|\(y\)",
+                    r"trust|proceed|continue|allow|permission"
+                    r"|y/n|yes/no|\[y\]|\[y/n\]|\(y\)|download.*apply",
                     re.IGNORECASE,
                 )
-                # Codex input prompt: >, ❯, ❱ on their own at end of output
-                # (NOT > inside URLs like https://github.com/...)
+                # Codex input cursor must be alone at end of output
+                # (so we don't match ">" inside URLs)
                 _READY_PAT = re.compile(
                     r"(?:^|\n)\s*[>❯❱]\s*$"
                     r"|what\s+would\s+you\s+like"
@@ -1465,13 +1460,10 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     r"|your\s+task\s*:",
                     re.IGNORECASE | re.MULTILINE,
                 )
-                # Update banner — just wait it out, don't treat as ready
-                _UPDATE_PAT = re.compile(r"update available", re.IGNORECASE)
 
-                startup_deadline = time.time() + 20   # longer to handle banners
+                startup_deadline = time.time() + 25
                 ready            = False
-                saw_update       = False
-                update_wait_end  = 0.0
+                _trust_cooldown  = 0.0  # don't re-trigger for 1 s after answering
 
                 while time.time() < startup_deadline:
                     data = _pty_read_chunk()
@@ -1480,29 +1472,17 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         seen_so_far += _strip_esc(
                             data.decode("utf-8", errors="replace")
                         )
-                        window = seen_so_far[-400:]
+                        window = seen_so_far[-500:]
 
-                        # Update banner — give it 3 extra seconds to clear
-                        if _UPDATE_PAT.search(window) and not saw_update:
-                            saw_update      = True
-                            update_wait_end = time.time() + 3
-                            seen_so_far     = ""
-                            continue
-
-                        # Don't evaluate ready/trust until update banner clears
-                        if saw_update and time.time() < update_wait_end:
-                            seen_so_far = ""
-                            continue
-
-                        # Auto-answer trust / confirmation prompts
-                        if _TRUST_PAT.search(window):
-                            time.sleep(0.4)
+                        # Auto-answer any y/n prompts (trust, update, etc.)
+                        if time.time() > _trust_cooldown and _TRUST_PAT.search(window):
+                            time.sleep(0.3)
                             _pty_send("y\n")
-                            seen_so_far = ""
-                            time.sleep(0.5)
+                            seen_so_far  = ""
+                            _trust_cooldown = time.time() + 1.0
                             continue
 
-                        # Codex input cursor is visible — it's ready
+                        # Codex input cursor visible → ready for our task
                         if _READY_PAT.search(window):
                             ready = True
                             break
@@ -1511,13 +1491,41 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         break   # Codex exited during startup
 
                 if not ready:
-                    time.sleep(1.0)   # timed out — send anyway
+                    time.sleep(1.5)   # banner still clearing — proceed anyway
 
                 # ── Phase 2: send the security-test prompt ─────────────────
                 _pty_send(prompt + "\n")
 
-                # ── Phase 3: read until Codex finishes ────────────────────
-                deadline = time.time() + timeout
+                # ── Phase 3: read until Codex finishes ─────────────────────
+                # codex --yolo stays open after finishing (interactive mode),
+                # so we stop when:
+                #  a) its input cursor reappears after substantial output, OR
+                #  b) no new output for IDLE_SECS seconds after min content, OR
+                #  c) process exits, OR
+                #  d) hard timeout
+                _DONE_PAT  = re.compile(
+                    r"(?:^|\n)\s*[>❯❱]\s*$", re.MULTILINE
+                )
+                IDLE_SECS       = 45
+                MIN_DONE_CHARS  = 200   # ignore done-prompt before this much output
+                deadline        = time.time() + timeout
+                p3_text         = ""
+                last_data_t     = time.time()
+
+                def _drain_pty():
+                    while True:
+                        try:
+                            r2, _, _ = _select.select([master_fd], [], [], 0.05)
+                            if not r2:
+                                break
+                            d2 = _os.read(master_fd, 8192)
+                            if d2:
+                                chunks.append(d2)
+                            else:
+                                break
+                        except OSError:
+                            break
+
                 while time.time() < deadline:
                     try:
                         r, _, _ = _select.select([master_fd], [], [], 1.0)
@@ -1526,26 +1534,43 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     if r:
                         try:
                             data = _os.read(master_fd, 8192)
-                            if data:
-                                chunks.append(data)
                         except OSError:
                             break
+                        if data:
+                            chunks.append(data)
+                            p3_text += _strip_esc(
+                                data.decode("utf-8", errors="replace")
+                            )
+                            last_data_t = time.time()
+
+                    # Process exited — drain and leave
                     if proc.poll() is not None:
-                        time.sleep(0.5)   # brief drain
-                        while True:
-                            try:
-                                r, _, _ = _select.select([master_fd], [], [], 0.05)
-                                if not r:
-                                    break
-                                data = _os.read(master_fd, 8192)
-                                if data:
-                                    chunks.append(data)
-                                else:
-                                    break
-                            except OSError:
-                                break
+                        time.sleep(0.4)
+                        _drain_pty()
                         break
+
+                    # After enough output, check whether Codex is back at its
+                    # input prompt (task finished, waiting for next instruction)
+                    if len(p3_text.strip()) >= MIN_DONE_CHARS:
+                        if _DONE_PAT.search(p3_text[-300:]):
+                            _drain_pty()
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=3)
+                            except Exception:
+                                proc.kill()
+                            break
+                        # Also exit if idle for too long (command still running?)
+                        if time.time() - last_data_t > IDLE_SECS:
+                            _drain_pty()
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=3)
+                            except Exception:
+                                proc.kill()
+                            break
                 else:
+                    # Hard timeout
                     proc.kill()
                     proc.wait()
 
