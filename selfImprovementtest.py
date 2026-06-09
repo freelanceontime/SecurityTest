@@ -1008,7 +1008,7 @@ def _choose_model():
     """Ask the user to pick the AI runner. Returns a cfg dict."""
     print(f"  {_B}AI model:{_R}")
     print(f"  {_G}1{_R}  Claude  (claude -p)               {_D}← default{_R}")
-    print(f"  {_C}2{_R}  Codex   (codex --yolo)")
+    print(f"  {_C}2{_R}  Codex   (codex exec)")
     print(f"  {_Y}3{_R}  Ollama  (remote at {OLLAMA_HOST}:{OLLAMA_PORT})")
     while True:
         ch = input("  Choice [1/2/3, default=1]: ").strip()
@@ -1016,7 +1016,7 @@ def _choose_model():
             print(f"  {_G}[✓] Using Claude{_R}")
             return {"model": "claude", "ollama_model": "", "ollama_host": OLLAMA_HOST}
         if ch == "2":
-            print(f"  {_C}[✓] Using Codex  (codex --yolo){_R}")
+            print(f"  {_C}[✓] Using Codex  (codex exec){_R}")
             return {"model": "codex", "ollama_model": "", "ollama_host": OLLAMA_HOST}
         if ch == "3":
             return _pick_ollama_model()
@@ -1437,7 +1437,13 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 # Prompt is passed as a positional argument so multiline
                 # content is not misinterpreted as multiple Enter keypresses.
                 proc = subprocess.Popen(
-                    ["codex", "--yolo", prompt],
+                    [
+                        "codex", "exec",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--skip-git-repo-check",
+                        "--color", "never",
+                        prompt,
+                    ],
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
@@ -1810,14 +1816,26 @@ def parse_result(output, test_name):
         "raw_output": output,
     }
 
-    r["completed"] = (
-        f"TEST_COMPLETED: {test_name}" in output
-        or "===TEST_RESULT_START===" in output
-    )
+    r["completed"] = f"TEST_COMPLETED: {test_name}" in output
 
-    m = re.search(r"===TEST_RESULT_START===(.*?)===TEST_RESULT_END===", output, re.DOTALL)
+    matches = list(re.finditer(
+        r"===TEST_RESULT_START===(.*?)===TEST_RESULT_END===",
+        output,
+        re.DOTALL,
+    ))
+    m = None
+    for candidate in reversed(matches):
+        blk0 = candidate.group(1)
+        if "PASS|FAIL|INFO|SKIP" in blk0:
+            continue
+        if "<finding 1 with evidence" in blk0 or "<exact command" in blk0:
+            continue
+        if re.search(r"STATUS:\s*(PASS|FAIL|INFO|SKIP)\b", blk0, re.IGNORECASE):
+            m = candidate
+            break
     if m:
         blk = m.group(1)
+        r["completed"] = True
 
         def _field(key: str) -> str:
             pat = rf"{re.escape(key)}:\s*\n?(.*?)(?=\n[A-Z_]{{3,}}:|===|$)"
@@ -1887,10 +1905,17 @@ def save_result_file(test: dict, result: dict, session_id: str) -> Path:
     if result.get("improved_prompt"):
         lines += ["## Improved Prompt (next run)", "", "```", result["improved_prompt"], "```", ""]
     if result.get("raw_output"):
+        raw_output = result["raw_output"]
+        if len(raw_output) > 12000:
+            raw_output = (
+                raw_output[:3000]
+                + "\n\n... [middle of raw output truncated] ...\n\n"
+                + raw_output[-9000:]
+            )
         lines += [
             "## Raw Output",
             "<details><summary>Expand</summary>", "",
-            "```", result["raw_output"][:6000], "```",
+            "```", raw_output, "```",
             "</details>",
         ]
 
