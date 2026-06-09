@@ -42,6 +42,10 @@ GITHUB_RAW = (
 
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info", "N/A", "SKIP", "UNKNOWN"]
 
+# ── Ollama remote ─────────────────────────────────────────────────────────────
+OLLAMA_HOST = "192.168.1.212"
+OLLAMA_PORT = 11434
+
 # ── ANSI helpers ──────────────────────────────────────────────────────────────
 IS_WIN = platform.system() == "Windows"
 _B = "\033[1m"; _R  = "\033[0m";  _HL  = "\033[7m"
@@ -940,8 +944,9 @@ def save_state(state: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
-def new_session(tests: list, app_name: str, pkg_name: str,
-                apk_path: str, decomp_path: str, level_filter: str) -> dict:
+def new_session(tests, app_name, pkg_name,
+                apk_path, decomp_path, level_filter,
+                model="claude", ollama_model="", ollama_host=OLLAMA_HOST):
     return {
         "session_id":       datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
         "app_name":         app_name,
@@ -949,12 +954,77 @@ def new_session(tests: list, app_name: str, pkg_name: str,
         "apk_path":         apk_path,
         "decompiled_path":  decomp_path,
         "level_filter":     level_filter,
+        "model":            model,
+        "ollama_model":     ollama_model,
+        "ollama_host":      ollama_host,
         "created_at":       datetime.datetime.now().isoformat(),
         "last_run":         None,
         "tests":            tests,
         "pending_jira":     False,
         "last_report_path": None,
     }
+
+
+def _list_ollama_models(host=OLLAMA_HOST, port=OLLAMA_PORT):
+    """Return list of model names available on the Ollama server, or []."""
+    try:
+        url = f"http://{host}:{port}/api/tags"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
+def _pick_ollama_model(host=OLLAMA_HOST, port=OLLAMA_PORT):
+    """Interactively select an Ollama model. Returns model cfg dict."""
+    print(f"\n  {_C}[*] Connecting to Ollama at {host}:{port}…{_R}", end="", flush=True)
+    models = _list_ollama_models(host, port)
+
+    if models:
+        print(f" {_G}OK{_R}  ({len(models)} model(s) available)\n")
+        for i, m in enumerate(models, 1):
+            print(f"  {_C}{i}{_R}  {m}")
+        print()
+        while True:
+            ch = input(f"  Select model [1-{len(models)}]: ").strip()
+            if ch.isdigit() and 1 <= int(ch) <= len(models):
+                chosen = models[int(ch) - 1]
+                print(f"  {_G}[✓] Using Ollama: {chosen}{_R}")
+                return {"model": "ollama", "ollama_model": chosen, "ollama_host": host}
+            if ch:  # allow typing a name directly
+                print(f"  {_G}[✓] Using Ollama: {ch}{_R}")
+                return {"model": "ollama", "ollama_model": ch, "ollama_host": host}
+    else:
+        print(f" {_Y}unreachable or no models found{_R}")
+        name = input(
+            f"  Enter model name manually (e.g. llama3:latest), or Enter to cancel: "
+        ).strip()
+        if name:
+            print(f"  {_G}[✓] Using Ollama: {name}{_R}")
+            return {"model": "ollama", "ollama_model": name, "ollama_host": host}
+        print(f"  {_Y}Cancelled – falling back to Claude.{_R}")
+        return {"model": "claude", "ollama_model": "", "ollama_host": host}
+
+
+def _choose_model():
+    """Ask the user to pick the AI runner. Returns a cfg dict."""
+    print(f"  {_B}AI model:{_R}")
+    print(f"  {_G}1{_R}  Claude  (claude -p)               {_D}← default{_R}")
+    print(f"  {_C}2{_R}  Codex   (codex --yolo)")
+    print(f"  {_Y}3{_R}  Ollama  (remote at {OLLAMA_HOST}:{OLLAMA_PORT})")
+    while True:
+        ch = input("  Choice [1/2/3, default=1]: ").strip()
+        if ch in ("", "1"):
+            print(f"  {_G}[✓] Using Claude{_R}")
+            return {"model": "claude", "ollama_model": "", "ollama_host": OLLAMA_HOST}
+        if ch == "2":
+            print(f"  {_C}[✓] Using Codex  (codex --yolo){_R}")
+            return {"model": "codex", "ollama_model": "", "ollama_host": OLLAMA_HOST}
+        if ch == "3":
+            return _pick_ollama_model()
+        print(f"  {_Y}Enter 1, 2, or 3.{_R}")
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -1053,47 +1123,118 @@ TEST_COMPLETED: {test["name"]}
 
 
 # ── Claude runner ─────────────────────────────────────────────────────────────
-def run_claude(prompt: str, cwd: str | None = None, timeout: int = 600) -> tuple[bool, str]:
-    """Run  claude -p <prompt>  and stream output live. Returns (ok, full_output)."""
+def run_claude(prompt, cwd=None, timeout=600, model="claude",
+               ollama_model="", ollama_host=OLLAMA_HOST):
+    """Run the selected AI model with the given prompt. Returns (ok, full_output)."""
+    import threading
+
     w = 70
     print(f"\n  {_C}┌{'─' * w}┐{_R}")
     print(f"  {_C}│{'  Claude output':^{w}}│{_R}")
     print(f"  {_C}├{'─' * w}┤{_R}")
 
-    lines: list[str] = []
+    # Spinner so the user knows the process is alive
+    spinning = [True]
+    tick = [0]
+
+    def _spin():
+        chars = r"|/-\\"
+        while spinning[0]:
+            c = chars[tick[0] % len(chars)]
+            print(
+                f"\r  {_C}│ {c} Waiting for Claude… {tick[0]}s{_R}{'':>{w - 28}}  ",
+                end="", flush=True,
+            )
+            time.sleep(1)
+            tick[0] += 1
+        # clear the spinner line so box lines look clean
+        print(f"\r  {_C}│{' ' * w}│{_R}")
+
+    spin_t = threading.Thread(target=_spin, daemon=True)
+    spin_t.start()
+
     try:
-        proc = subprocess.Popen(
-            ["claude", "-p", prompt],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=cwd or str(SCRIPT_DIR),
-        )
-        for raw in proc.stdout:
-            lines.append(raw)
-            clean = raw.rstrip()
+        if model == "ollama":
+            # ── Ollama HTTP API ───────────────────────────────────────────────
+            url = f"http://{ollama_host}:{OLLAMA_PORT}/api/generate"
+            payload = json.dumps({
+                "model":  ollama_model,
+                "prompt": prompt,
+                "stream": False,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            # urlopen blocks until done; spinner thread shows progress meanwhile
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+            spinning[0] = False
+            spin_t.join(2)
+            out = data.get("response", "")
+
+        else:
+            # ── CLI models (Claude / Codex) ───────────────────────────────────
+            # subprocess.run uses communicate() internally — avoids line-buffer hangs.
+            if model == "codex":
+                cmd = ["codex", "--yolo", prompt]
+            else:
+                cmd = ["claude", "-p", prompt]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                cwd=cwd or str(SCRIPT_DIR),
+            )
+            spinning[0] = False
+            spin_t.join(2)
+            out = result.stdout or ""
+            err = (result.stderr or "").strip()
+            if not out and err:
+                out = err
+
+        for raw in out.splitlines():
+            clean = raw.strip()
             if clean and not clean.startswith("===") and not clean.startswith("TEST_COMPLETED"):
                 print(f"  {_D}│ {clean[:w - 2]:<{w - 2}} │{_R}")
-        proc.wait()
-        full = "".join(lines)
-        print(f"  {_C}└{'─' * w}┘{_R}\n")
-        return True, full
 
+        print(f"  {_C}└{'─' * w}┘{_R}\n")
+        return True, out
+
+    except urllib.error.URLError as exc:
+        spinning[0] = False
+        spin_t.join(2)
+        print(f"  {_Y}│ [ERROR] Ollama unreachable: {exc.reason}{_R}")
+        print(f"  {_C}└{'─' * w}┘{_R}\n")
+        return False, f"[ERROR] Ollama unreachable: {exc.reason}"
     except subprocess.TimeoutExpired:
-        proc.kill()
-        full = "".join(lines)
-        return False, full or f"[ERROR] claude timed out after {timeout}s"
+        spinning[0] = False
+        spin_t.join(2)
+        print(f"  {_Y}│ [TIMEOUT] No response after {timeout}s{_R}")
+        print(f"  {_C}└{'─' * w}┘{_R}\n")
+        return False, f"[ERROR] {model} timed out after {timeout}s"
     except FileNotFoundError:
-        return False, "[ERROR] 'claude' not found – install Claude Code CLI and add it to PATH."
+        spinning[0] = False
+        spin_t.join(2)
+        binary = "codex" if model == "codex" else "claude"
+        print(f"  {_Y}│ [ERROR] '{binary}' not found in PATH{_R}")
+        print(f"  {_C}└{'─' * w}┘{_R}\n")
+        return False, f"[ERROR] '{binary}' not found – is it installed and in PATH?"
     except Exception as exc:
+        spinning[0] = False
+        spin_t.join(2)
+        print(f"  {_Y}│ [ERROR] {exc}{_R}")
+        print(f"  {_C}└{'─' * w}┘{_R}\n")
         return False, f"[ERROR] {exc}"
 
 
 # ── Result parser ─────────────────────────────────────────────────────────────
-def parse_result(output: str, test_name: str) -> dict:
-    r: dict = {
+def parse_result(output, test_name):
+    r = {
         "status": "UNKNOWN", "severity": "Info",
         "findings": [], "commands_used": [], "notes": "",
         "false_positives": [], "jira_summary": "",
@@ -1119,7 +1260,7 @@ def parse_result(output: str, test_name: str) -> dict:
         vm = re.search(r"SEVERITY:\s*(Critical|High|Medium|Low|Info|N/A)", blk, re.IGNORECASE)
         if vm: r["severity"] = vm.group(1).title()
 
-        def _bullets(raw: str) -> list[str]:
+        def _bullets(raw):
             return [
                 l.lstrip("-•*# \t").strip() for l in raw.splitlines()
                 if l.strip() and l.strip().lower() not in ("none", "-", "n/a")
@@ -1408,7 +1549,7 @@ def _draw_select(items: list, selected: set, current: int,
     print(f"{_B}{'=' * w}{_R}")
 
 
-def _plain_select(items: list, presel: set, title: str) -> set | None:
+def _plain_select(items, presel, title):
     if not items:
         return set()
     sel, cur = set(presel), 0
@@ -1506,7 +1647,7 @@ def _curses_select(stdscr, items, presel, title):
         elif k in (ord("q"),ord("Q"),27): return None
 
 
-def run_selection_menu(items: list, presel: set, title: str) -> set | None:
+def run_selection_menu(items, presel, title):
     if _HAS_CURSES:
         try:
             return _curses.wrapper(_curses_select, items, presel, title)
@@ -1515,7 +1656,7 @@ def run_selection_menu(items: list, presel: set, title: str) -> set | None:
     return _plain_select(items, presel, title)
 
 
-def choose_level_filter(total: int) -> str | None:
+def choose_level_filter(total):
     print()
     _box("SELECT TEST LEVEL")
     print(f"  Tests embedded in this script: {_B}{total}{_R}\n")
@@ -1536,8 +1677,210 @@ def choose_level_filter(total: int) -> str | None:
 
 
 # ── Main test execution loop ──────────────────────────────────────────────────
-def run_tests(session: dict, improvements: dict) -> None:
-    tests = session["tests"]
+def _preflight_ai(model="claude", ollama_host=OLLAMA_HOST):
+    """Verify the selected AI runner is reachable before starting tests."""
+    if model == "ollama":
+        print(f"  {_C}[*] Checking Ollama at {ollama_host}:{OLLAMA_PORT}…{_R}", end="", flush=True)
+        try:
+            url = f"http://{ollama_host}:{OLLAMA_PORT}/api/tags"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            count = len(data.get("models", []))
+            print(f" {_G}OK{_R}  ({count} model(s))")
+            return True
+        except urllib.error.URLError as e:
+            print(f"\n  {_Y}[!] Cannot reach Ollama: {e.reason}{_R}")
+            print(f"  {_Y}    Ensure the server is running and accessible at {ollama_host}:{OLLAMA_PORT}{_R}\n")
+            return False
+        except Exception as e:
+            print(f"\n  {_Y}[!] Ollama check failed: {e}{_R}\n")
+            return False
+
+    binary = "codex" if model == "codex" else "claude"
+    print(f"  {_C}[*] Checking {binary} CLI…{_R}", end="", flush=True)
+    try:
+        r = subprocess.run(
+            [binary, "--version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            ver = r.stdout.strip() or r.stderr.strip()
+            print(f" {_G}OK{_R} ({ver})")
+            return True
+        print(f"\n  {_Y}[!] '{binary} --version' returned exit {r.returncode}{_R}")
+        print(f"  {_Y}    stderr: {r.stderr.strip()[:120]}{_R}")
+        if model == "claude":
+            print(f"  {_Y}    Run 'claude' in a terminal and complete auth, then re-run.{_R}\n")
+        else:
+            print(f"  {_Y}    Run 'codex' in a terminal to verify setup.{_R}\n")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"\n  {_Y}[!] '{binary} --version' timed out.{_R}")
+        if model == "claude":
+            print(f"  {_Y}    Open a new terminal, run 'claude', complete auth, then retry.{_R}\n")
+        return False
+    except FileNotFoundError:
+        print(f"\n  {_Y}[!] '{binary}' not found in PATH.{_R}")
+        if model == "claude":
+            print(f"  {_Y}    Install: npm install -g @anthropic-ai/claude-code{_R}\n")
+        else:
+            print(f"  {_Y}    Install: npm install -g @openai/codex{_R}\n")
+        return False
+
+
+def _build_feedback_prompt(test, session, improvements, previous_output, feedback):
+    """Rebuild the test prompt adding tester feedback + previous analysis for revision."""
+    imp = get_improvement(improvements, test["name"])
+    base = build_prompt(test, session, imp)
+    return f"""{base}
+
+## ── TESTER FEEDBACK: PLEASE REVISE YOUR ANALYSIS ──────────────────────────
+
+The security tester reviewed your analysis and provided the following correction or context.
+Apply it to reconsider every finding before producing the revised result.
+
+  "{feedback}"
+
+Guidelines for common feedback types:
+- "staging / test / dev build" → findings tied solely to debug/test configuration
+  (android:debuggable, test credentials, profiler flags) should be noted as
+  EXPECTED IN NON-PRODUCTION and their severity downgraded or moved to NOTES.
+- "firebase / google API keys are public" → google-services.json API keys are
+  client-side identifiers intentionally shipped with Android apps; they are NOT
+  secret. Move any such finding to FALSE_POSITIVES with this explanation.
+- "this is expected" / "not an issue" → reclassify as INFO or FALSE_POSITIVE.
+- "severity too high" → downgrade to the next lower tier and justify.
+- "re-check X" → re-examine only that finding; leave others unchanged.
+
+## ── YOUR PREVIOUS ANALYSIS (for context only) ─────────────────────────────
+
+{previous_output}
+
+## ── REVISED OUTPUT ─────────────────────────────────────────────────────────
+
+Now output the COMPLETE revised structured result, incorporating the feedback above.
+Only include genuine, unexplained vulnerabilities in FINDINGS.
+Explain what changed and why in NOTES.
+
+===TEST_RESULT_START===
+STATUS: PASS|FAIL|INFO|SKIP
+SEVERITY: Critical|High|Medium|Low|Info|N/A
+FINDINGS:
+- <revised finding 1, or "None">
+COMMANDS_USED:
+- <same or updated list>
+NOTES:
+<what changed from the previous analysis and why>
+FALSE_POSITIVES:
+- <all false positives, including any reclassified per feedback>
+JIRA_TICKET_SUMMARY:
+<revised one-line Jira summary; blank if PASS>
+JIRA_TICKET_DESCRIPTION:
+<revised Jira description>
+JIRA_TICKET_RECOMMENDATION:
+<revised developer recommendations>
+===TEST_RESULT_END===
+
+===PROMPT_IMPROVEMENT_START===
+<updated test guidance incorporating lessons from both runs>
+===PROMPT_IMPROVEMENT_END===
+
+TEST_COMPLETED: {test["name"]}
+"""
+
+
+def _show_result_summary(result):
+    st  = result["status"]
+    sev = result["severity"]
+    col = _G if st == "PASS" else _Y if st == "INFO" else _RE
+    print(f"\n  Result: {col}{_B}{st}{_R}  |  Severity: {sev}")
+    if result["findings"]:
+        print(f"  Findings ({len(result['findings'])}):")
+        for f in result["findings"][:3]:
+            print(f"    {_RE}•{_R} {f[:85]}")
+        if len(result["findings"]) > 3:
+            print(f"    {_D}… {len(result['findings'])-3} more — see result file{_R}")
+
+
+def _feedback_loop(test, result, output, session, improvements, cwd,
+                   model="claude", ollama_model="", ollama_host=OLLAMA_HOST):
+    """
+    After showing results, let the tester accept, provide feedback to re-run,
+    or skip.  Returns (final_result, final_output, action) where action is
+    'accepted', 'skipped', or 'quit'.
+    """
+    MAX_RERUNS = 5
+    reruns = 0
+
+    while True:
+        print(f"\n  {'─' * 70}")
+        print(f"  {_B}What would you like to do?{_R}")
+        print(f"  {_G}[Enter]{_R}  Accept these results and continue")
+        print(f"  {_C}[F]{_R}      Give feedback and re-run this test")
+        print(f"  {_Y}[S]{_R}      Skip (mark as skipped, move on)")
+        print(f"  {_RE}[Q]{_R}      Save progress and quit")
+        if reruns:
+            print(f"  {_D}  (re-run {reruns}/{MAX_RERUNS}){_R}")
+        ch = input("\n  > ").strip().upper()
+
+        if ch in ("", "A"):
+            return result, output, "accepted"
+
+        if ch == "S":
+            return result, output, "skipped"
+
+        if ch == "Q":
+            return result, output, "quit"
+
+        if ch == "F":
+            if reruns >= MAX_RERUNS:
+                print(f"  {_Y}[!] Maximum re-runs ({MAX_RERUNS}) reached. Accept or skip.{_R}")
+                continue
+
+            print(f"\n  {_C}Describe what Claude got wrong or should reconsider:{_R}")
+            print(f"  {_D}Examples:{_R}")
+            print(f"  {_D}  - 'This is a staging build — debug flag and test creds are expected'{_R}")
+            print(f"  {_D}  - 'Firebase API keys in google-services.json are public, not secrets'{_R}")
+            print(f"  {_D}  - 'Severity is too high for X finding — it is only in test builds'{_R}")
+            feedback = input(f"\n  Feedback: ").strip()
+            if not feedback:
+                print(f"  {_Y}No feedback entered — try again.{_R}")
+                continue
+
+            model_label = "Codex" if model == "codex" else "Claude"
+            print(f"\n  {_C}[*] Re-running with your feedback ({model_label})…{_R}")
+            rerun_prompt = _build_feedback_prompt(
+                test, session, improvements, output, feedback
+            )
+            success, new_output = run_claude(
+                rerun_prompt, cwd=cwd, model=model,
+                ollama_model=ollama_model, ollama_host=ollama_host,
+            )
+
+            if not success or not new_output.strip():
+                print(f"  {_RE}[!] Re-run produced no output. Keeping previous result.{_R}")
+                continue
+
+            new_result = parse_result(new_output, test["name"])
+            reruns += 1
+            result = new_result
+            output = new_output
+
+            _show_result_summary(result)
+            continue
+
+        print(f"  {_Y}Unrecognised key — press Enter, F, S, or Q.{_R}")
+
+
+def run_tests(session, improvements):
+    tests        = session["tests"]
+    model        = session.get("model", "claude")
+    ollama_model = session.get("ollama_model", "")
+    ollama_host  = session.get("ollama_host", OLLAMA_HOST)
+
+    if not _preflight_ai(model, ollama_host=ollama_host):
+        input("  Press Enter to continue anyway, or Ctrl-C to abort… ")
 
     for i, test in enumerate(tests):
         if test.get("status") == "completed":
@@ -1565,13 +1908,17 @@ def run_tests(session: dict, improvements: dict) -> None:
             print(f"    {pl[:88]}")
         print(f"    …{_R}\n")
 
-        print(f"  {_C}[*] Sending to Claude (timeout 10 min)…{_R}")
+        model_label = "Codex" if model == "codex" else "Claude"
+        print(f"  {_C}[*] Sending to {model_label} (timeout 10 min)…{_R}")
         cwd = session.get("decompiled_path") or str(SCRIPT_DIR)
-        success, output = run_claude(prompt, cwd=cwd)
+        success, output = run_claude(
+            prompt, cwd=cwd, model=model,
+            ollama_model=ollama_model, ollama_host=ollama_host,
+        )
 
         # Handle runner errors
         if not success and not output.strip():
-            print(f"\n  {_RE}[!] Claude failed to produce output.{_R}")
+            print(f"\n  {_RE}[!] {model_label} failed to produce output.{_R}")
             print("  R=Retry  S=Skip  Q=Save & quit")
             ch = input("  Choice: ").strip().upper()
             if ch == "R":
@@ -1592,7 +1939,25 @@ def run_tests(session: dict, improvements: dict) -> None:
             if ch == "S":
                 test["status"] = "skipped"; save_state(session); continue
 
-        # Persist
+        # Show initial summary and open feedback loop
+        _show_result_summary(result)
+        result, output, action = _feedback_loop(
+            test, result, output, session, improvements, cwd,
+            model, ollama_model, ollama_host,
+        )
+
+        if action == "quit":
+            test["result"] = result
+            test["status"] = "completed"
+            save_state(session)
+            return
+
+        if action == "skipped":
+            test["status"] = "skipped"
+            save_state(session)
+            continue
+
+        # Persist accepted result
         test["result"] = result
         test["status"] = "completed"
         session["last_run"] = datetime.datetime.now().isoformat()
@@ -1604,17 +1969,6 @@ def run_tests(session: dict, improvements: dict) -> None:
 
         rf = save_result_file(test, result, session["session_id"])
 
-        # Summary
-        st  = result["status"]
-        sev = result["severity"]
-        col = _G if st=="PASS" else _Y if st=="INFO" else _RE
-        print(f"\n  Result: {col}{_B}{st}{_R}  |  Severity: {sev}")
-        if result["findings"]:
-            print(f"  Findings ({len(result['findings'])}):")
-            for f in result["findings"][:3]:
-                print(f"    {_RE}•{_R} {f[:85]}")
-            if len(result["findings"]) > 3:
-                print(f"    {_D}… {len(result['findings'])-3} more — see result file{_R}")
         if result.get("improved_prompt"):
             print(f"  {_G}[✓] Prompt improved for next run{_R}")
         print(f"  {_D}Saved: {rf}{_R}")
@@ -1734,7 +2088,7 @@ def main() -> None:
     print(f"\n{_B}{'=' * 72}{_R}")
     print(f"{_B}  selfImprovementtest.py  v{__version__}  –  {len(TESTS)} tests embedded{_R}")
     print(f"{_B}  AI-Assisted Android Security Testing  |  OWASP MASTG{_R}")
-    print(f"{_B}  Platform: Kali Linux  |  ADB + Frida  |  Claude Code CLI{_R}")
+    print(f"{_B}  Platform: Kali Linux  |  ADB + Frida  |  Claude / Codex CLI{_R}")
     print(f"{_B}{'=' * 72}{_R}\n")
 
     if not args.no_update:
@@ -1755,7 +2109,7 @@ def main() -> None:
         print("[*] Exiting.\n"); sys.exit(0)
 
     # ── Resume or new session ─────────────────────────────────────────────────
-    session: dict | None = None
+    session = None
     pending = [t for t in state.get("tests", [])
                if t.get("status") not in ("completed", "skipped")]
 
@@ -1779,6 +2133,13 @@ def main() -> None:
     if session is None:
         print()
         _box("NEW TEST SESSION")
+        print()
+
+        # AI model selection
+        model_cfg    = _choose_model()
+        model        = model_cfg["model"]
+        ollama_model = model_cfg.get("ollama_model", "")
+        ollama_host  = model_cfg.get("ollama_host", OLLAMA_HOST)
         print()
 
         # Use CLI args if provided, otherwise prompt interactively
@@ -1849,7 +2210,8 @@ def main() -> None:
             selected.append(t)
 
         session = new_session(selected, app_name, pkg_name,
-                              apk_path, decomp_path, level_filter)
+                              apk_path, decomp_path, level_filter,
+                              model, ollama_model, ollama_host)
         save_state(session)
 
     # ── Confirm & run ─────────────────────────────────────────────────────────
@@ -1857,12 +2219,22 @@ def main() -> None:
     done = sum(1 for t in session["tests"] if t.get("status") == "completed")
     rem  = len(session["tests"]) - done
 
+    _model = session.get("model", "claude")
+    if _model == "codex":
+        _model_label = "Codex  (codex --yolo)"
+    elif _model == "ollama":
+        _om   = session.get("ollama_model", "?")
+        _oh   = session.get("ollama_host", OLLAMA_HOST)
+        _model_label = f"Ollama  {_om}  @ {_oh}:{OLLAMA_PORT}"
+    else:
+        _model_label = "Claude  (claude -p)"
     print(f"  App      : {_B}{session.get('app_name','?')}{_R}")
     print(f"  Package  : {session.get('package_name') or _D+'(not set)'+_R}")
     print(f"  Source   : {_C}{session.get('decompiled_path') or '(not set)'}{_R}")
     print(f"  APK      : {session.get('apk_path') or _D+'(not set)'+_R}")
+    print(f"  Model    : {_C}{_model_label}{_R}")
     print(f"  Queued   : {rem} tests remaining")
-    print(f"\n  {_Y}Ensure 'claude' is in PATH and your ADB device is connected.{_R}\n")
+    print(f"\n  {_Y}Ensure ADB device is connected and the AI CLI is in PATH.{_R}\n")
 
     ans = input("  Start testing? [Y/n]: ").strip().lower()
     if ans in ("n", "no", "q"):
