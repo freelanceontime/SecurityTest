@@ -1206,11 +1206,18 @@ def _augment_grep(cmd, decomp_path):
 def run_claude(prompt, cwd=None, timeout=600, model="claude",
                ollama_model="", ollama_host=OLLAMA_HOST):
     """Run the selected AI model with the given prompt. Returns (ok, full_output)."""
-    import threading
+    import threading, time
+
+    if model == "ollama":
+        label = f"Ollama  ({ollama_model})"
+    elif model == "codex":
+        label = "Codex output"
+    else:
+        label = "Claude output"
 
     w = 70
     print(f"\n  {_C}┌{'─' * w}┐{_R}")
-    print(f"  {_C}│{'  Claude output':^{w}}│{_R}")
+    print(f"  {_C}│{label:^{w}}│{_R}")
     print(f"  {_C}├{'─' * w}┤{_R}")
 
     # Spinner so the user knows the process is alive
@@ -1222,7 +1229,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
         while spinning[0]:
             c = chars[tick[0] % len(chars)]
             print(
-                f"\r  {_C}│ {c} Waiting for Claude… {tick[0]}s{_R}{'':>{w - 28}}  ",
+                f"\r  {_C}│ {c} Waiting for {label.split()[0]}… {tick[0]}s{_R}{'':>{w - 30}}  ",
                 end="", flush=True,
             )
             time.sleep(1)
