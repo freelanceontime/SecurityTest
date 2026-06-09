@@ -1065,6 +1065,45 @@ def build_prompt(test, session, improvement, model="claude"):
         for cmd in cmds[:10]:
             extras += f"- `{cmd}`\n"
 
+    # Build optional sections as plain strings (can't nest triple-quotes in f-strings)
+    if model == "ollama":
+        _ollama_section = (
+            "\n## RUNNING COMMANDS (Ollama mode)\n"
+            "You do not have built-in tool access, but you CAN run commands on this Kali Linux machine.\n"
+            "Wrap each command you want executed in <run_command> tags — one command per block:\n\n"
+            "  <run_command>adb devices</run_command>\n"
+            "  <run_command>grep -r \"password\" --include=\"*.smali\" -l</run_command>\n\n"
+            "The script will execute the command and return output as:\n"
+            "  <command_output>\n"
+            "  $ your command\n"
+            "  ... output ...\n"
+            "  </command_output>\n\n"
+            "Rules:\n"
+            "- Run commands in batches of 2-5 at a time, then analyse the output before continuing\n"
+            "- Only output the ===TEST_RESULT_START=== block once you have enough evidence\n"
+            "- Do NOT include <run_command> tags inside the result block\n"
+        )
+    else:
+        _ollama_section = ""
+
+    if model in ("claude", "codex"):
+        _script_section = (
+            "\n## SCRIPT SELF-IMPROVEMENT (optional)\n"
+            "You are running with filesystem access. If during this test you discover that\n"
+            f"the embedded test guidance for \"{test['name']}\" is incomplete or misleading,\n"
+            "you may edit this script directly to improve it:\n\n"
+            f"  {SCRIPT_PATH}\n\n"
+            "What you may change:\n"
+            f"  - The `content` value for the test named \"{test['name']}\" in the TESTS list\n"
+            f"    (search for  name=\"{test['name']}\"  and update its `content` key)\n"
+            "  - Nothing else – do NOT alter test names, levels, sections, or script logic\n\n"
+            "Before editing, back up the script:\n"
+            f"  cp {SCRIPT_PATH} {SCRIPT_PATH.with_suffix('.py.bak')}\n\n"
+            "If you make changes, note what you changed and why in the NOTES section above.\n"
+        )
+    else:
+        _script_section = ""
+
     return f"""\
 You are an expert Android application security tester performing OWASP MASTG tests.
 
@@ -1091,25 +1130,7 @@ Level   : {test["level"]}  {"(Standard Security)" if test["level"] == "L1" else 
 4. Flag any findings that are library/framework code (not app code) as low-priority.
 5. Note any false positives explicitly so future runs can skip them.
 6. When done, output the result block below EXACTLY – do not alter the delimiters.
-{"" if model != "ollama" else """
-## RUNNING COMMANDS (Ollama mode)
-You do not have built-in tool access, but you CAN run commands on this Kali Linux machine.
-Wrap each command you want executed in <run_command> tags — one command per block:
-
-  <run_command>adb devices</run_command>
-  <run_command>grep -r "password" /path/to/smali --include="*.smali" -l</run_command>
-
-The script will execute the command and return output as:
-  <command_output>
-  $ your command
-  ... output ...
-  </command_output>
-
-Rules:
-- Run commands in batches of 2-5 at a time, then analyse the output before continuing
-- Only output the ===TEST_RESULT_START=== block once you have enough evidence
-- Do NOT include <run_command> tags inside the result block
-"""}
+{_ollama_section}
 
 ===TEST_RESULT_START===
 STATUS: PASS|FAIL|INFO|SKIP
@@ -1137,24 +1158,7 @@ Now suggest an improved version of the TEST GUIDANCE section for the next run:
 
 Finally, mark this test complete by printing this exact line:
 TEST_COMPLETED: {test["name"]}
-{"" if model not in ("claude", "codex") else f"""
-## SCRIPT SELF-IMPROVEMENT (optional)
-You are running with filesystem access. If during this test you discover that
-the embedded test guidance for "{test["name"]}" is incomplete or misleading,
-you may edit this script directly to improve it:
-
-  {SCRIPT_PATH}
-
-What you may change:
-  - The `content` value for the test named "{test["name"]}" in the TESTS list
-    (search for  name="{test["name"]}"  and update its `content` key)
-  - Nothing else – do NOT alter test names, levels, sections, or script logic
-
-Before editing, back up the script:
-  cp {SCRIPT_PATH} {SCRIPT_PATH.with_suffix(".py.bak")}
-
-If you make changes, note what you changed and why in the NOTES section above.
-"""}"""
+{_script_section}"""
 
 
 # ── Grep augmentation ────────────────────────────────────────────────────────
