@@ -37,7 +37,7 @@ REPORTS_DIR   = SCRIPT_DIR / "reports"
 
 GITHUB_RAW = (
     "https://raw.githubusercontent.com/"
-    "freelanceontime/SecurityTest/main/selfImprovedtests.py"
+    "freelanceontime/SecurityTest/main/selfImprovementtest.py"
 )
 
 SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info", "N/A", "SKIP", "UNKNOWN"]
@@ -960,7 +960,6 @@ def new_session(tests, app_name, pkg_name,
         "created_at":       datetime.datetime.now().isoformat(),
         "last_run":         None,
         "tests":            tests,
-        "pending_jira":     False,
         "last_report_path": None,
     }
 
@@ -1041,7 +1040,7 @@ _ENV_CONTEXT = """\
                     burpsuite / mitmproxy  (for traffic interception)
 """
 
-def build_prompt(test: dict, session: dict, improvement: dict) -> str:
+def build_prompt(test, session, improvement, model="claude"):
     all_tests = session["tests"]
     idx       = next((i for i, t in enumerate(all_tests) if t["name"] == test["name"]), 0)
     total     = len(all_tests)
@@ -1119,7 +1118,24 @@ Now suggest an improved version of the TEST GUIDANCE section for the next run:
 
 Finally, mark this test complete by printing this exact line:
 TEST_COMPLETED: {test["name"]}
-"""
+{"" if model not in ("claude", "codex") else f"""
+## SCRIPT SELF-IMPROVEMENT (optional)
+You are running with filesystem access. If during this test you discover that
+the embedded test guidance for "{test["name"]}" is incomplete or misleading,
+you may edit this script directly to improve it:
+
+  {SCRIPT_PATH}
+
+What you may change:
+  - The `content` value for the test named "{test["name"]}" in the TESTS list
+    (search for  name="{test["name"]}"  and update its `content` key)
+  - Nothing else – do NOT alter test names, levels, sections, or script logic
+
+Before editing, back up the script:
+  cp {SCRIPT_PATH} {SCRIPT_PATH.with_suffix(".py.bak")}
+
+If you make changes, note what you changed and why in the NOTES section above.
+"""}"""
 
 
 # ── Claude runner ─────────────────────────────────────────────────────────────
@@ -1451,27 +1467,6 @@ def show_checklist(session: dict) -> None:
     print(f"\n  {_B}{_hr()}{_R}")
 
 
-# ── Pending-Jira warning ──────────────────────────────────────────────────────
-def check_pending_jira(state: dict) -> bool:
-    if not state.get("pending_jira"):
-        return True
-    rp = state.get("last_report_path", "N/A")
-    print(f"\n  {'=' * 70}")
-    print(f"  {_Y}{_B}[!] PENDING JIRA UPLOAD FROM LAST SESSION{_R}")
-    print(f"  {'=' * 70}")
-    print(f"  Report not yet uploaded to Jira:\n  {_C}{rp}{_R}\n")
-    print("  1  Upload now (confirm when done to clear flag)")
-    print("  2  Skip and start next run anyway")
-    print("  Q  Quit")
-    ch = input("\n  Choice (1/2/Q): ").strip().upper()
-    if ch == "Q":
-        return False
-    if ch == "1":
-        print("\n  Upload the report, then press Enter to continue…")
-        input()
-    state["pending_jira"] = False
-    save_state(state)
-    return True
 
 
 # ── Interactive test selection ────────────────────────────────────────────────
@@ -1729,10 +1724,10 @@ def _preflight_ai(model="claude", ollama_host=OLLAMA_HOST):
         return False
 
 
-def _build_feedback_prompt(test, session, improvements, previous_output, feedback):
+def _build_feedback_prompt(test, session, improvements, previous_output, feedback, model="claude"):
     """Rebuild the test prompt adding tester feedback + previous analysis for revision."""
     imp = get_improvement(improvements, test["name"])
-    base = build_prompt(test, session, imp)
+    base = build_prompt(test, session, imp, model=model)
     return f"""{base}
 
 ## ── TESTER FEEDBACK: PLEASE REVISE YOUR ANALYSIS ──────────────────────────
@@ -1851,7 +1846,7 @@ def _feedback_loop(test, result, output, session, improvements, cwd,
             model_label = "Codex" if model == "codex" else "Claude"
             print(f"\n  {_C}[*] Re-running with your feedback ({model_label})…{_R}")
             rerun_prompt = _build_feedback_prompt(
-                test, session, improvements, output, feedback
+                test, session, improvements, output, feedback, model=model
             )
             success, new_output = run_claude(
                 rerun_prompt, cwd=cwd, model=model,
@@ -1899,7 +1894,7 @@ def run_tests(session, improvements):
         if imp.get("run_count", 0):
             print(f"  {_C}[~] Refinement from {imp['run_count']} prior run(s) loaded{_R}")
 
-        prompt = build_prompt(test, session, imp)
+        prompt = build_prompt(test, session, imp, model=model)
 
         # Brief prompt preview
         preview = [l for l in prompt.splitlines() if l.strip()][:6]
@@ -1908,13 +1903,27 @@ def run_tests(session, improvements):
             print(f"    {pl[:88]}")
         print(f"    …{_R}\n")
 
-        model_label = "Codex" if model == "codex" else "Claude"
+        model_label = "Codex" if model == "codex" else ("Ollama" if model == "ollama" else "Claude")
         print(f"  {_C}[*] Sending to {model_label} (timeout 10 min)…{_R}")
         cwd = session.get("decompiled_path") or str(SCRIPT_DIR)
+
+        # Snapshot script hash so we can detect if Claude/Codex self-improves it
+        _can_edit = model in ("claude", "codex")
+        _hash_before = hashlib.sha256(SCRIPT_PATH.read_bytes()).hexdigest() if _can_edit else None
+
         success, output = run_claude(
             prompt, cwd=cwd, model=model,
             ollama_model=ollama_model, ollama_host=ollama_host,
         )
+
+        # Report any script self-modification
+        if _can_edit:
+            _hash_after = hashlib.sha256(SCRIPT_PATH.read_bytes()).hexdigest()
+            if _hash_after != _hash_before:
+                print(f"  {_G}[✓] Script was updated by {model_label} during this test.{_R}")
+                bak = SCRIPT_PATH.with_suffix(".py.bak")
+                if bak.exists():
+                    print(f"  {_D}    Backup: {bak}{_R}")
 
         # Handle runner errors
         if not success and not output.strip():
@@ -1988,13 +1997,11 @@ def run_tests(session, improvements):
     rfile = REPORTS_DIR / f"{safe}_{session['session_id']}.md"
     rfile.write_text(report_md, encoding="utf-8")
 
-    session["pending_jira"]     = True
     session["last_report_path"] = str(rfile)
     save_state(session)
 
-    print(f"  {_G}Jira-ready report:{_R}  {_C}{rfile}{_R}")
-    print(f"  Individual results: {_C}{RESULTS_DIR / session['session_id']}{_R}")
-    print(f"\n  {_Y}[!] Upload the report to Jira before starting the next run.{_R}\n")
+    print(f"  {_G}Report:{_R}  {_C}{rfile}{_R}")
+    print(f"  Individual results: {_C}{RESULTS_DIR / session['session_id']}{_R}\n")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -2104,9 +2111,6 @@ def main() -> None:
 
     state        = load_state()
     improvements = load_improvements()
-
-    if not check_pending_jira(state):
-        print("[*] Exiting.\n"); sys.exit(0)
 
     # ── Resume or new session ─────────────────────────────────────────────────
     session = None
