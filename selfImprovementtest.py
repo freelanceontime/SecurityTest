@@ -34,6 +34,7 @@ STATE_FILE    = SCRIPT_DIR / "session_state.json"
 IMPROVEMENTS  = SCRIPT_DIR / "prompt_improvements.json"
 RESULTS_DIR   = SCRIPT_DIR / "test_results"
 REPORTS_DIR   = SCRIPT_DIR / "reports"
+APP_RESULTS_DIR = RESULTS_DIR / "by_app"
 
 GITHUB_RAW = (
     "https://raw.githubusercontent.com/"
@@ -73,19 +74,128 @@ def _hr(w: int = 72) -> str:
     return "─" * w
 
 
+def _candidate_cli_paths(binary: str) -> list[str]:
+    """Return likely executable paths for CLIs hidden by non-interactive PATHs."""
+    candidates: list[str] = []
+
+    home = Path.home()
+    candidates.extend([
+        str(home / ".local" / "bin" / binary),
+        str(home / "bin" / binary),
+        f"/usr/local/bin/{binary}",
+        f"/opt/homebrew/bin/{binary}",
+    ])
+
+    nvm_dir = Path(os.environ.get("NVM_DIR", home / ".nvm"))
+    versions = nvm_dir / "versions" / "node"
+    if versions.is_dir():
+        def _node_version_key(node_dir: Path) -> tuple[int, int, int]:
+            nums = re.findall(r"\d+", node_dir.name)
+            parts = [int(n) for n in nums[:3]]
+            return tuple((parts + [0, 0, 0])[:3])
+
+        for node_dir in sorted(versions.iterdir(), key=_node_version_key, reverse=True):
+            candidates.append(str(node_dir / "bin" / binary))
+
+    found = shutil.which(binary)
+    if found:
+        candidates.append(found)
+
+    seen: set[str] = set()
+    return [p for p in candidates if not (p in seen or seen.add(p))]
+
+
+def _resolve_cli(binary: str) -> str | None:
+    """Find an executable CLI even when launched outside the user's login shell."""
+    candidates = _candidate_cli_paths(binary)
+    if binary == "codex":
+        for path in candidates:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                native = _resolve_codex_native(path)
+                if native:
+                    return native
+
+    for path in _candidate_cli_paths(binary):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _resolve_codex_native(codex_entry: str) -> str | None:
+    """Return Codex's native binary when codex_entry is the npm Node shim."""
+    try:
+        entry = Path(codex_entry).resolve()
+        package_root = entry.parent.parent
+        node_modules = package_root / "node_modules"
+        if not node_modules.is_dir():
+            return None
+        for candidate in node_modules.glob(
+            "@openai/codex-*/vendor/*/bin/codex"
+        ):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    except Exception:
+        return None
+    return None
+
+
+def _cli_env(executable: str | None = None) -> dict[str, str]:
+    """Build subprocess env with the resolved CLI directory prepended to PATH."""
+    env = os.environ.copy()
+    if executable:
+        exe_dir = str(Path(executable).parent)
+        paths = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != exe_dir]
+        env["PATH"] = os.pathsep.join([exe_dir] + paths)
+    return env
+
+
+def _clean_terminal_text(value: str | None) -> str:
+    """Remove pasted terminal control sequences from saved prompt values."""
+    if not isinstance(value, str):
+        return ""
+    value = re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", value)
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+    return value.strip()
+
+
+def _sanitize_session_paths(state: dict) -> dict:
+    for key in ("apk_path", "decompiled_path"):
+        if key in state:
+            state[key] = _clean_terminal_text(state.get(key))
+    return state
+
+
+def _slug(value: str, max_len: int = 80) -> str:
+    value = _clean_terminal_text(value).lower()
+    value = re.sub(r"[^a-z0-9_.-]+", "_", value).strip("_")
+    return (value or "unknown")[:max_len]
+
+
+def _test_slug(test_name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", test_name)[:60]
+
+
+def _app_key(app_name: str = "", package_name: str = "") -> str:
+    return _slug(package_name or app_name)
+
+
+def _app_results_path(app_name: str = "", package_name: str = "") -> Path:
+    return APP_RESULTS_DIR / _app_key(app_name, package_name)
+
+
 # ── Embedded MASTG test definitions (section, level, name, guidance) ──────────
 TESTS = [
     {
         "section": 'Storage Tests',
         "level":   'L1',
         "name":    'Testing Local Storage for Sensitive Data',
-        "content": 'Analyze data storage in the source code.\nBe sure to trigger all possible functionality in the application (e.g. by clicking everywhere possible) in order to ensure data generation.\nCheck all application generated and modified files and ensure that the storage method is sufficiently secure.\nThis includes SharedPreferences, databases, Internal Storage, External Storage, etc.\n\nStatic Analysis¶\nFirst of all, try to determine the kind of storage used by the Android app and to find out whether the app processes sensitive data insecurely.\n\nCheck AndroidManifest.xml for read/write external storage permissions, for example, uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE".\nCheck the source code for keywords and API calls that are used to store data:\nFile permissions, such as:\nMODE_WORLD_READABLE or MODE_WORLD_WRITABLE: You should avoid using MODE_WORLD_WRITEABLE and MODE_WORLD_READABLE for files because any app will be able to read from or write to the files, even if they are stored in the app\'s private data directory. If data must be shared with other applications, consider a content provider. A content provider offers read and write permissions to other apps and can grant dynamic permission on a case-by-case basis.\nClasses and functions, such as:\nthe SharedPreferences class ( stores key-value pairs)\nthe FileOutPutStream class (uses internal or external storage)\nthe getExternal* functions (use external storage)\nthe getWritableDatabase function (returns a SQLiteDatabase for writing)\nthe getReadableDatabase function (returns a SQLiteDatabase for reading)\nthe getCacheDir and getExternalCacheDirs function (use cached files)\nEncryption should be implemented using proven SDK functions. The following describes bad practices to look for in the source code:\n\nLocally stored sensitive information "encrypted" via simple bit operations like XOR or bit flipping. These operations should be avoided because the encrypted data can be recovered easily.\nKeys used or created without Android onboard features, such as the Android KeyStore\nKeys disclosed by hard-coding\nA typical misuse are hard-coded cryptographic keys. Hard-coded and world-readable cryptographic keys significantly increase the possibility that encrypted data will be recovered. Once an attacker obtains the data, decrypting it is trivial. Symmetric cryptography keys must be stored on the device, so identifying them is just a matter of time and effort. Consider the following code:\n\n\nthis.db = localU',
+        "content": 'Foodscanner-specific local storage checklist from prior runs:\n\n1. Verify environment and package: `adb devices`, `frida-ps -U | head -20`, `adb shell pm list packages | grep com.flipside.devfoodscanner`.\n2. Confirm manifest flags with line numbers: `nl -ba AndroidManifest.xml | sed -n "1,120p"`. Prior evidence: `android:debuggable="true"`, `android:installLocation="preferExternal"`, `android:allowBackup="false"`.\n3. Static app-code searches to rerun: `rg -n "MODE_WORLD_READABLE|MODE_WORLD_WRITABLE|openFileOutput|openFileInput|getExternalStorageDirectory|getExternalStoragePublicDirectory|getExternalFilesDir|getExternalCacheDir|FileOutputStream|EncryptedSharedPreferences|MasterKey|androidx.security.crypto|KeyStore|Cipher" smali/com smali_classes4/com/flipside assets res -g "*"`.\n4. Inspect the known external write code: `nl -ba smali/com/ToolBar/EasyWebCam/EasyWebCam\\$2.smali | sed -n "50,230p"` shows `Environment.getExternalStorageDirectory()` building `/sdcard/AppTest/PicTest_<timestamp>.jpg` and `FileOutputStream`; `nl -ba smali/com/ToolBar/EasyWebCam/EasyWebCam.smali | sed -n "625,660p"` shows `getExternalStoragePublicDirectory(DIRECTORY_PICTURES)`.\n5. Runtime app-private storage: because the build is debuggable, use `run-as` to list and read files: `adb shell run-as com.flipside.devfoodscanner find /data/user/0/com.flipside.devfoodscanner -maxdepth 3 -type f -print`. Confirm `files/PersistedInstallation*.json` for cleartext `Fid`, `AuthToken`, and `RefreshToken`; confirm Unity/Firebase identifiers in `shared_prefs/*.xml`.\n6. Runtime external storage: list files with `adb shell "find /storage/emulated/0/Android/data/com.flipside.devfoodscanner -maxdepth 5 -type f -printf \\"%p %s bytes\\\\n\\" 2>/dev/null | sort | head -200"`. Prior sensitive files: `files/request.txt` contains `from_barcode`, `to_barcode`, and `device_identifier`; `files/data.db` and `files/swaps.db` contain scan/swap history and product barcodes in cleartext; `download_cache/*.jpg` contains product image cache.\n7. Sample external file content with `adb shell "for f in /storage/emulated/0/Android/data/com.flipside.devfoodscanner/files/request.txt /storage/emulated/0/Android/data/com.flipside.devfoodscanner/files/messaging.json /storage/emulated/0/Android/data/com.flipside.devfoodscanner/files/terms.json; do echo ---$f; head -c 1200 \\"$f\\"; echo; done"` and `adb shell "for db in /storage/emulated/0/Android/data/com.flipside.devfoodscanner/files/*.db; do echo ---$db; strings \\"$db\\" | head -80; done"`.\n8. Packaged assets to inspect: `assets/google-services-desktop.json` exposes Firebase project info, OAuth client IDs, and API key; `assets/bin/Data/boot.config` exposes Unity player connection mode and IP. Treat Firebase API key as project configuration, but still report exposed staging configuration where relevant.\n9. Known false positives to skip or mark low priority: AndroidX Fragment/SavedState/Core SharedPreferences; Firebase datatransport SQLite event queue; AndroidX FileProvider/ContextCompat external path resolution; Firebase Analytics `session_stitching_token` and `sgtm_preview_key` constants; Okio crypto classes; Google/Guava/Crashlytics library `FileOutputStream`, `SecretKeySpec`, and SDK cache/storage code unless it stores live tokens in app data.\n10. Evaluation: fail if sensitive/user-identifying data, tokens, scan history, or camera captures are stored in cleartext in app-private or external storage. External app-specific storage under `/storage/emulated/0/Android/data/<package>` still counts when it contains sensitive data and no encryption is present.',
     },
     {
         "section": 'Storage Tests',
         "level":   'L1',
         "name":    'Testing the Device-Access-Security Policy',
-        "content": 'Apps that process or query sensitive information should run in a trusted and secure environment. To create this environment, the app can check the device for the following:\n\nPIN- or password-protected device locking\nRecent Android OS version\nUSB Debugging activation\nDevice encryption\nDevice rooting (see also "Testing Root Detection")\nStatic Analysis¶\nTo test the device-access-security policy that the app enforces, a written copy of the policy must be provided. The policy should define available checks and their enforcement. For example, one check could require that the app run only on Android 6.0 (API level 23) or a more recent version, closing the app or displaying a warning if the Android version is less than 6.0.\n\nCheck the source code for functions that implement the policy and determine whether it can be bypassed.\n\nYou can implement checks on the Android device by querying Settings.Secure ↗ for system preferences. Device Administration API ↗ offers techniques for creating applications that can enforce password policies and device encryption.\n\nDynamic Analysis¶\nThe dynamic analysis depends on the checks enforced by the app and their expected behavior. If the checks can be bypassed, they must be validated.',
+        "content": 'Foodscanner-specific device-access-security policy checklist:\n\n1. Verify environment and package: `adb devices`, `frida-ps -U | head -20`, `adb shell pm list packages | grep com.flipside.devfoodscanner`.\n2. Capture manifest/package evidence with line numbers: `nl -ba AndroidManifest.xml | sed -n "1,90p"` and `aapt dump badging /home/kali/Desktop/FoodScanner_4.0.0_stg.apk | head -20`. Prior evidence: manifest line 2 has `android:installLocation="preferExternal"` / `install-location:\'preferExternal\'`; application line 30 has `android:debuggable="true"`, `android:allowBackup="false"`.\n3. Confirm installed runtime state: `adb shell dumpsys package com.flipside.devfoodscanner | sed -n "/Package \\\\[com.flipside.devfoodscanner\\\\]/,/Queries:/p"` and note `pkgFlags`, `dataDir`, `targetSdk`, granted runtime permissions, and whether the app process is running.\n4. Check current device posture that a policy might enforce: `adb shell "settings get global adb_enabled; settings get secure lockscreen.disabled; settings get secure lockscreen.password_type; getprop ro.crypto.state; getprop ro.crypto.type; getprop ro.debuggable; getprop ro.secure; getprop ro.build.tags; command -v su || true; pidof com.flipside.devfoodscanner || true"`. Prior run showed USB debugging enabled (`1`), `/system/bin/su` present, encrypted file-based storage, and the app still running.\n5. Static policy search to rerun: `rg -n "KeyguardManager|isDeviceSecure|isKeyguardSecure|DevicePolicyManager|Settings\\\\$Secure|Settings\\\\.Secure|ADB_ENABLED|adb_enabled|development_settings_enabled|isEncrypted|ro\\\\.crypto|ro\\\\.secure|ro\\\\.debuggable|RootUtils|com/unitymedved/rootchecker|checkRoot|isRoot|root" smali/com smali_classes4/com/flipside -g "*.smali"`.\n6. Inspect root-checker usage separately: `rg -n "Lcom/unitymedved/rootchecker/RootUtils;|RootUtils;->|checkForBinary|checkSuExists|isDeviceRooted|detectRoot" smali smali_classes* -g "*.smali"`. Prior evidence only found `RootUtils.smali` self-references, so treat the packaged root checker as unused/low-priority unless a caller is found.\n7. For Unity IL2CPP builds, scan native metadata/string tables for policy references: `strings -a lib/arm64-v8a/libil2cpp.so | rg -n "RootUtils|unitymedved|isDeviceSecure|KeyguardManager|DevicePolicyManager|adb_enabled|development_settings_enabled|ro.crypto|ro.secure|ro.debuggable|/system/bin/su|test-keys|Magisk|magisk|root" | head -100`; also scan `global-metadata.dat` if present.\n8. Confirm debug/device-access impact with `adb shell run-as com.flipside.devfoodscanner pwd`, `adb shell run-as com.flipside.devfoodscanner ls -la`, and `adb shell run-as com.flipside.devfoodscanner find . -maxdepth 3 -type f -print | sort | head -100`. Debuggable builds allow app-private data access through ADB and should be reported if this is a release/security test build.\n9. Known false positives to skip or mark low priority: generic `root` variable names in Kotlin/Guava/Okio/Unity GC strings; Firebase Crashlytics `isRooted()` telemetry; bundled `com/unitymedved/rootchecker/RootUtils.smali` unless static or dynamic evidence shows app enforcement; AndroidX/Firebase storage internals unrelated to access policy.\n10. Evaluation: if no written device-access policy is provided, report INFO for policy absence/untestable requirements, but still raise concrete FAIL findings for insecure build/device-access controls such as debug signing, `android:debuggable="true"`, or `installLocation="preferExternal"` when sensitive app data is present or this is expected to be a production-equivalent build.',
     },
     {
         "section": 'Storage Tests',
@@ -932,12 +1042,13 @@ def load_state() -> dict:
     if STATE_FILE.exists():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return _sanitize_session_paths(json.load(f))
         except Exception:
             return {}
     return {}
 
 def save_state(state: dict) -> None:
+    _sanitize_session_paths(state)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
@@ -948,8 +1059,8 @@ def new_session(tests, app_name, pkg_name,
         "session_id":       datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
         "app_name":         app_name,
         "package_name":     pkg_name,
-        "apk_path":         apk_path,
-        "decompiled_path":  decomp_path,
+        "apk_path":         _clean_terminal_text(apk_path),
+        "decompiled_path":  _clean_terminal_text(decomp_path),
         "level_filter":     level_filter,
         "model":            model,
         "ollama_model":     ollama_model,
@@ -1143,6 +1254,8 @@ JIRA_TICKET_SUMMARY:
 <one-line Jira summary; blank if PASS>
 JIRA_TICKET_DESCRIPTION:
 <full Jira description with steps to reproduce; blank if PASS>
+JIRA_TICKET_EVIDENCE:
+<specific evidence bullets or excerpts to place after steps and before recommendation; blank if PASS>
 JIRA_TICKET_RECOMMENDATION:
 <what the developer must do to fix this; blank if PASS>
 ===TEST_RESULT_END===
@@ -1196,64 +1309,6 @@ def _augment_grep(cmd, decomp_path):
         target = "smali*"
 
     return f"{cmd} {target}"
-
-
-def _resolve_codex_binary() -> str:
-    """Find Codex even when Python was started with a limited PATH."""
-    candidates = []
-
-    env_bin = os.environ.get("CODEX_BIN", "").strip()
-    if env_bin:
-        candidates.append(env_bin)
-
-    for name in ("codex", "codex.cmd", "codex.CMD"):
-        found = shutil.which(name)
-        if found:
-            candidates.append(found)
-
-    if IS_WIN:
-        appdata = os.environ.get("APPDATA", "")
-        localappdata = os.environ.get("LOCALAPPDATA", "")
-        candidates += [
-            os.path.join(appdata, "npm", "codex.cmd"),
-            os.path.join(appdata, "npm", "codex.CMD"),
-            os.path.join(localappdata, "Programs", "codex", "codex.exe"),
-        ]
-    else:
-        candidates += [
-            "/usr/local/bin/codex",
-            "/usr/bin/codex",
-            os.path.expanduser("~/.local/bin/codex"),
-            os.path.expanduser("~/.npm-global/bin/codex"),
-            os.path.expanduser("~/node_modules/.bin/codex"),
-        ]
-        for shell in ("/usr/bin/zsh", "/bin/zsh", "/usr/bin/bash", "/bin/bash"):
-            if os.path.exists(shell):
-                try:
-                    cp = subprocess.run(
-                        [shell, "-lc", "command -v codex"],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    found = (cp.stdout or "").strip().splitlines()
-                    if found:
-                        candidates.append(found[0])
-                except Exception:
-                    pass
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        expanded = os.path.expanduser(os.path.expandvars(candidate))
-        if os.path.exists(expanded):
-            return expanded
-
-    raise FileNotFoundError(
-        "codex not found. Set CODEX_BIN to the full Codex path. "
-        "Example on Kali: export CODEX_BIN=$(command -v codex). "
-        f"PATH={os.environ.get('PATH', '')}"
-    )
 
 
 # ── Claude runner ─────────────────────────────────────────────────────────────
@@ -1311,14 +1366,39 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 pay = json.dumps({
                     "model":  ollama_model,
                     "prompt": conv,
-                    "stream": False,
+                    "stream": True,
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     url, data=pay,
                     headers={"Content-Type": "application/json"},
                 )
+                pieces = []
+                line_buf = ""
+                visible_started = False
                 with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return json.loads(r.read()).get("response", "")
+                    for raw_line in r:
+                        if not raw_line.strip():
+                            continue
+                        try:
+                            ev = json.loads(raw_line.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            continue
+                        chunk = ev.get("response", "")
+                        if chunk:
+                            if not visible_started:
+                                spinning[0] = False
+                                spin_t.join(2)
+                                visible_started = True
+                            pieces.append(chunk)
+                            line_buf += chunk
+                            while "\n" in line_buf:
+                                line, line_buf = line_buf.split("\n", 1)
+                                _print_response_lines(line)
+                        if ev.get("done"):
+                            break
+                if visible_started and line_buf.strip():
+                    _print_response_lines(line_buf)
+                return "".join(pieces)
 
             # Regex catches <run_command> AND common model variations like <runcommand>
             _CMD_TAG = re.compile(r"<run_?command>(.*?)</run_?command>",
@@ -1344,16 +1424,18 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     if (cl
                             and not cl.startswith("===")
                             and not cl.startswith("TEST_COMPLETED")
+                            and not cl.startswith("STATUS:")
+                            and not cl.startswith("SEVERITY:")
                             and not _TAG_RE.search(cl)):
                         print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
 
             for step in range(MAX_STEPS):
+                print(f"\r  {_C}│ Ollama step {step + 1}/{MAX_STEPS}: generating response…{' ' * 14}│{_R}")
                 response = _ollama_call(conversation)
                 all_responses.append(response)
 
-                _print_response_lines(response)
-
                 if "===TEST_RESULT_START===" in response:
+                    print(f"\r  {_G}│ Ollama produced final result block.{' ' * 35}│{_R}")
                     break
 
                 clean_response = _OUT_TAG.sub("", response).strip()
@@ -1361,6 +1443,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
 
                 if not cmds:
                     no_cmd_streak += 1
+                    print(f"\r  {_Y}│ Ollama did not request commands on this step ({no_cmd_streak}/3).{' ' * 8}│{_R}")
                     if no_cmd_streak >= 3:
                         conversation += (
                             f"\n\n{clean_response}\n\n"
@@ -1388,13 +1471,16 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
 
                 no_cmd_streak = 0
                 cmd_outputs = []
+                print(f"\r  {_C}│ Ollama requested {len(cmds)} command(s); executing now.{' ' * 20}│{_R}")
                 for raw_cmd in cmds:
                     cmd = _augment_grep(raw_cmd.strip(), cwd)
                     # Skip bare file paths (not shell commands)
                     if _PATH_ONLY.match(cmd.strip()):
+                        print(f"\r  {_Y}│ Skipping non-command path: {cmd[:w-30]:<{w-30}} │{_R}")
                         continue
                     # Skip duplicates
                     if cmd in _seen_cmds:
+                        print(f"\r  {_Y}│ Already executed: {cmd[:w-22]:<{w-22}} │{_R}")
                         cmd_outputs.append(
                             f"<command_output>\n$ {cmd}\n"
                             "[Already executed — see earlier output]\n"
@@ -1456,38 +1542,12 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             out = "\n\n".join(all_responses)
 
         elif model == "codex":
-            codex_bin = _resolve_codex_binary()
-            proc = subprocess.run(
-                [
-                    codex_bin, "exec",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--skip-git-repo-check",
-                    "--color", "never",
-                    "-",
-                ],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                cwd=cwd or str(SCRIPT_DIR),
-            )
-            spinning[0] = False
-            spin_t.join(2)
-            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
-
-            if len(out.strip()) < 80:
-                print(f"  {_Y}â”‚ [!] Codex produced very little output.{_R}")
-                print(f"  {_Y}â”‚     Raw (first 200 chars): {out[:200]!r}{_R}")
-                print(f"  {_Y}â”‚     Ensure 'codex' is authenticated: run 'codex' interactively first.{_R}")
-
-        elif model == "__codex_pty_legacy_disabled__":
             # ── Codex — requires a real TTY (isatty check) ────────────────────
             # Run inside a PTY.  Codex reads its task from stdin so we send the
             # prompt after a short startup pause rather than as a CLI argument
             # (avoids arg-length and shell-escaping problems).
             import pty, os as _os, select as _select, struct, fcntl, termios
+            codex_bin = _resolve_cli("codex") or "codex"
 
             def _strip_esc(txt):
                 """Remove ANSI CSI, OSC, DCS and stray control codes."""
@@ -1513,21 +1573,29 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, ws)
                 except Exception:
                     pass
+                try:
+                    attrs = termios.tcgetattr(slave_fd)
+                    attrs[3] = attrs[3] & ~termios.ECHO
+                    termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+                except Exception:
+                    pass
 
-                _env = {**_os.environ,
+                _env = _cli_env(codex_bin if os.path.isabs(codex_bin) else None)
+                _env.update({
                         "TERM": "xterm-256color",
-                        "COLUMNS": "220", "LINES": "50"}
+                        "COLUMNS": "220", "LINES": "50",
+                })
 
                 # PTY is only here to satisfy Codex's isatty() check.
-                # Prompt is passed as a positional argument so multiline
-                # content is not misinterpreted as multiple Enter keypresses.
+                # Prompt is sent on stdin to avoid OS argv limits on long
+                # feedback prompts that include previous raw output.
                 proc = subprocess.Popen(
                     [
-                        "codex", "exec",
+                        codex_bin, "exec",
                         "--dangerously-bypass-approvals-and-sandbox",
                         "--skip-git-repo-check",
                         "--color", "never",
-                        prompt,
+                        "-",
                     ],
                     stdin=slave_fd,
                     stdout=slave_fd,
@@ -1548,6 +1616,8 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     except OSError:
                         pass
 
+                _sent_prompt = False
+
                 # Debug log path — shows raw PTY bytes so we can diagnose
                 _dbg_path = SCRIPT_DIR / "codex_pty_debug.log"
                 _dbg      = open(_dbg_path, "wb")
@@ -1560,7 +1630,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 )
                 _trust_buf  = ""
                 _trust_cool = 0.0
-                _start_dl   = time.time() + 20
+                _start_dl   = time.time() + 3
                 while time.time() < _start_dl:
                     try:
                         r2, _, _ = _select.select([master_fd], [], [], 0.5)
@@ -1585,6 +1655,13 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                                 _trust_cool = time.time() + 1.5
                     if proc.poll() is not None:
                         break
+
+                if proc.poll() is None:
+                    _pty_send(prompt)
+                    _os.write(master_fd, b"\n\x04")
+                    _sent_prompt = True
+                    _dbg.write(b"[PROMPT_SENT_STDIN]\n")
+                    _dbg.flush()
 
                 # ── Read until Codex finishes ─────────────────────────────
                 # Exit when: process exits, idle IDLE_SECS (even with no
@@ -1719,8 +1796,9 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
         else:
             # ── Claude — stream-json so we can show tool calls live ────────────
             import queue as _queue
+            claude_bin = _resolve_cli("claude") or "claude"
             proc_c = subprocess.Popen(
-                ["claude", "-p", "--verbose",
+                [claude_bin, "-p", "--verbose",
                  "--dangerously-skip-permissions",
                  "--output-format", "stream-json", prompt],
                 stdout=subprocess.PIPE,
@@ -1729,6 +1807,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 encoding="utf-8",
                 errors="replace",
                 cwd=cwd or str(SCRIPT_DIR),
+                env=_cli_env(claude_bin if os.path.isabs(claude_bin) else None),
                 bufsize=1,
             )
 
@@ -1875,13 +1954,17 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
         print(f"  {_Y}│ [TIMEOUT] No response after {timeout}s{_R}")
         print(f"  {_C}└{'─' * w}┘{_R}\n")
         return False, f"[ERROR] {model} timed out after {timeout}s"
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         spinning[0] = False
         spin_t.join(2)
         binary = "codex" if model == "codex" else "claude"
-        print(f"  {_Y}│ [ERROR] '{binary}' not found in PATH{_R}")
+        missing = exc.filename or binary
+        if missing == (cwd or str(SCRIPT_DIR)):
+            print(f"  {_Y}│ [ERROR] working directory not found: {missing}{_R}")
+        else:
+            print(f"  {_Y}│ [ERROR] file not found while starting {binary}: {missing}{_R}")
         print(f"  {_C}└{'─' * w}┘{_R}\n")
-        return False, f"[ERROR] '{binary}' not found – is it installed and in PATH?"
+        return False, f"[ERROR] file not found while starting {binary}: {missing}"
     except Exception as exc:
         spinning[0] = False
         spin_t.join(2)
@@ -1896,7 +1979,7 @@ def parse_result(output, test_name):
         "status": "UNKNOWN", "severity": "Info",
         "findings": [], "commands_used": [], "notes": "",
         "false_positives": [], "jira_summary": "",
-        "jira_description": "", "jira_recommendation": "",
+        "jira_description": "", "jira_evidence": "", "jira_recommendation": "",
         "completed": False, "improved_prompt": "",
         "raw_output": output,
     }
@@ -1945,6 +2028,7 @@ def parse_result(output, test_name):
         r["false_positives"]     = _bullets(_field("FALSE_POSITIVES"))
         r["jira_summary"]        = _field("JIRA_TICKET_SUMMARY")
         r["jira_description"]    = _field("JIRA_TICKET_DESCRIPTION")
+        r["jira_evidence"]       = _field("JIRA_TICKET_EVIDENCE")
         r["jira_recommendation"] = _field("JIRA_TICKET_RECOMMENDATION")
 
     pm = re.search(
@@ -1955,20 +2039,37 @@ def parse_result(output, test_name):
     return r
 
 
+def _jira_evidence_text(result: dict) -> str:
+    """Return explicit Jira evidence, or derive it from parsed findings."""
+    explicit = (result.get("jira_evidence") or "").strip()
+    if explicit:
+        return explicit
+    findings = result.get("findings") or []
+    if findings:
+        return "\n".join(f"- {finding}" for finding in findings)
+    return ""
+
+
 # ── Per-test result file ──────────────────────────────────────────────────────
-def save_result_file(test: dict, result: dict, session_id: str) -> Path:
-    dest = RESULTS_DIR / session_id
-    dest.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", test["name"])[:60]
-    path = dest / f"{slug}.md"
+def _result_markdown(test: dict, result: dict, session: dict | None = None) -> str:
+    session = session or {}
+    dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    app_name = session.get("app_name", "")
+    package_name = session.get("package_name", "")
+    session_id = session.get("session_id", "")
 
     lines = [
         f"# {test['name']}",
+        f"**App:** {app_name}" if app_name else "",
+        f"**Package:** `{package_name}`" if package_name else "",
+        f"**Session:** `{session_id}`" if session_id else "",
         f"**Section:** {test['section']}  |  **Level:** {test['level']}",
         f"**Status:** `{result['status']}`  |  **Severity:** `{result['severity']}`",
-        f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"**Date:** {dt}",
         "",
     ]
+    lines = [line for line in lines if line]
+    lines.append("")
     if result["findings"]:
         lines += ["## Findings", ""] + [f"- {f}" for f in result["findings"]] + [""]
     if result["commands_used"]:
@@ -1981,12 +2082,15 @@ def save_result_file(test: dict, result: dict, session_id: str) -> Path:
     if result["false_positives"]:
         lines += ["## False Positives", ""] + [f"- {fp}" for fp in result["false_positives"]] + [""]
     if result["jira_summary"]:
+        evidence = _jira_evidence_text(result)
         lines += [
             "## Jira Ticket",
             f"**Summary:** {result['jira_summary']}", "",
             "**Description:**", result["jira_description"], "",
-            "**Recommendation:**", result["jira_recommendation"], "",
         ]
+        if evidence:
+            lines += ["**Evidence:**", evidence, ""]
+        lines += ["**Recommendation:**", result["jira_recommendation"], ""]
     if result.get("improved_prompt"):
         lines += ["## Improved Prompt (next run)", "", "```", result["improved_prompt"], "```", ""]
     if result.get("raw_output"):
@@ -2003,9 +2107,170 @@ def save_result_file(test: dict, result: dict, session_id: str) -> Path:
             "```", raw_output, "```",
             "</details>",
         ]
+    return "\n".join(lines)
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+
+def save_result_file(test: dict, result: dict, session_id: str, session: dict | None = None) -> Path:
+    dest = RESULTS_DIR / session_id
+    dest.mkdir(parents=True, exist_ok=True)
+    slug = _test_slug(test["name"])
+    path = dest / f"{slug}.md"
+    md = _result_markdown(test, result, session)
+    path.write_text(md, encoding="utf-8")
+
+    if session:
+        app_dest = _app_results_path(session.get("app_name", ""), session.get("package_name", ""))
+        app_dest.mkdir(parents=True, exist_ok=True)
+        (app_dest / f"{slug}.md").write_text(md, encoding="utf-8")
     return path
+
+
+def _section_text(md: str, heading: str) -> str:
+    pat = rf"^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)"
+    m = re.search(pat, md, re.DOTALL | re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
+def _markdown_bullets(section: str) -> list[str]:
+    return [
+        line.lstrip("-•* \t").strip()
+        for line in section.splitlines()
+        if line.strip().startswith(("-", "•", "*"))
+    ]
+
+
+def _parse_result_markdown(path: Path) -> dict | None:
+    try:
+        md = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    status_m = re.search(r"\*\*Status:\*\*\s*`?([A-Z]+)`?", md)
+    severity_m = re.search(r"\*\*Severity:\*\*\s*`?([^`\n]+)`?", md)
+    if not status_m:
+        return None
+
+    jira = _section_text(md, "Jira Ticket")
+
+    def _jira_field(label: str) -> str:
+        m = re.search(
+            rf"\*\*{re.escape(label)}:\*\*\s*\n?(.*?)(?=\n\*\*[A-Za-z ]+:\*\*|\Z)",
+            jira,
+            re.DOTALL,
+        )
+        return m.group(1).strip() if m else ""
+
+    return {
+        "status": status_m.group(1).upper(),
+        "severity": (severity_m.group(1).strip() if severity_m else "Info"),
+        "findings": _markdown_bullets(_section_text(md, "Findings")),
+        "commands_used": re.findall(r"```bash\n(.*?)\n```", _section_text(md, "Commands Used"), re.DOTALL),
+        "notes": _section_text(md, "Notes"),
+        "false_positives": _markdown_bullets(_section_text(md, "False Positives")),
+        "jira_summary": _jira_field("Summary"),
+        "jira_description": _jira_field("Description"),
+        "jira_evidence": _jira_field("Evidence"),
+        "jira_recommendation": _jira_field("Recommendation"),
+        "completed": True,
+        "improved_prompt": "",
+        "raw_output": "",
+        "imported_from": str(path),
+    }
+
+
+def _sync_session_results_to_app_history(session: dict) -> int:
+    """Mirror existing session markdown files into app-based history."""
+    app_name = session.get("app_name", "")
+    package_name = session.get("package_name", "")
+    if not (app_name or package_name):
+        return 0
+    src = RESULTS_DIR / str(session.get("session_id", ""))
+    if not src.is_dir():
+        return 0
+    dest = _app_results_path(app_name, package_name)
+    dest.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for md in src.glob("*.md"):
+        if md.name.startswith("debug_"):
+            continue
+        target = dest / md.name
+        try:
+            if not target.exists() or md.stat().st_mtime >= target.stat().st_mtime:
+                shutil.copy2(md, target)
+                copied += 1
+        except OSError:
+            pass
+    return copied
+
+
+def _sync_legacy_results_to_app_history(app_name: str, package_name: str) -> int:
+    """Find older session result md files for this app and mirror them into app history."""
+    if not (app_name or package_name):
+        return 0
+    dest = _app_results_path(app_name, package_name)
+    dest.mkdir(parents=True, exist_ok=True)
+    needles = [n.lower() for n in (package_name, app_name) if n]
+    copied = 0
+    for md in RESULTS_DIR.glob("*/*.md"):
+        if md.parts[-2] == "by_app" or md.name.startswith("debug_"):
+            continue
+        try:
+            text = md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        text_l = text.lower()
+        if needles and not any(n in text_l for n in needles):
+            continue
+        result = _parse_result_markdown(md)
+        if not result:
+            continue
+        target = dest / md.name
+        try:
+            if not target.exists() or md.stat().st_mtime >= target.stat().st_mtime:
+                shutil.copy2(md, target)
+                copied += 1
+        except OSError:
+            pass
+    return copied
+
+
+def _load_app_completed_results(app_name: str, package_name: str) -> dict[str, dict]:
+    hist = _app_results_path(app_name, package_name)
+    completed: dict[str, dict] = {}
+    if not hist.is_dir():
+        return completed
+    for md in hist.glob("*.md"):
+        result = _parse_result_markdown(md)
+        if result:
+            completed[md.stem] = result
+    return completed
+
+
+def apply_app_history(session: dict, force_rerun: bool = False) -> int:
+    """Mark selected tests completed when app history already has their md result."""
+    if force_rerun:
+        return 0
+    _sync_session_results_to_app_history(session)
+    _sync_legacy_results_to_app_history(
+        session.get("app_name", ""),
+        session.get("package_name", ""),
+    )
+    completed = _load_app_completed_results(
+        session.get("app_name", ""),
+        session.get("package_name", ""),
+    )
+    imported = 0
+    for test in session.get("tests", []):
+        if test.get("status") == "completed":
+            continue
+        result = completed.get(_test_slug(test["name"]))
+        if result:
+            test["status"] = "completed"
+            test["result"] = result
+            imported += 1
+    if imported:
+        session["last_run"] = datetime.datetime.now().isoformat()
+    return imported
 
 
 # ── Jira report generator ─────────────────────────────────────────────────────
@@ -2063,7 +2328,10 @@ def generate_report(session: dict) -> str:
             if r.get("findings"):
                 lines += ["**Findings:**"] + [f"- {f}" for f in r["findings"]] + [""]
             if r.get("jira_description"):
-                lines += ["**Steps to Reproduce / Evidence:**", "", r["jira_description"], ""]
+                lines += ["**Description:**", "", r["jira_description"], ""]
+            evidence = _jira_evidence_text(r)
+            if evidence:
+                lines += ["**Evidence:**", "", evidence, ""]
             if r.get("jira_recommendation"):
                 lines += ["**Recommendation:**", "", r["jira_recommendation"], ""]
             if r.get("commands_used"):
@@ -2357,15 +2625,29 @@ def _preflight_ai(model="claude", ollama_host=OLLAMA_HOST):
             return False
 
     binary = "codex" if model == "codex" else "claude"
+    binary_path = _resolve_cli(binary)
+    if not binary_path:
+        print(f"\n  {_Y}[!] '{binary}' not found in PATH or common user install locations.{_R}")
+        checked = ", ".join(_candidate_cli_paths(binary)[:6])
+        if checked:
+            print(f"  {_Y}    Checked: {checked}{_R}")
+        if model == "claude":
+            print(f"  {_Y}    Install: npm install -g @anthropic-ai/claude-code{_R}\n")
+        else:
+            print(f"  {_Y}    Install: npm install -g @openai/codex{_R}\n")
+        return False
+
     print(f"  {_C}[*] Checking {binary} CLI…{_R}", end="", flush=True)
     try:
         r = subprocess.run(
-            [binary, "--version"],
+            [binary_path, "--version"],
             capture_output=True, text=True, timeout=15,
+            env=_cli_env(binary_path),
         )
         if r.returncode == 0:
             ver = r.stdout.strip() or r.stderr.strip()
-            print(f" {_G}OK{_R} ({ver})")
+            suffix = f" at {binary_path}" if binary_path != binary else ""
+            print(f" {_G}OK{_R} ({ver}{suffix})")
             return True
         print(f"\n  {_Y}[!] '{binary} --version' returned exit {r.returncode}{_R}")
         print(f"  {_Y}    stderr: {r.stderr.strip()[:120]}{_R}")
@@ -2392,6 +2674,12 @@ def _build_feedback_prompt(test, session, improvements, previous_output, feedbac
     """Rebuild the test prompt adding tester feedback + previous analysis for revision."""
     imp = get_improvement(improvements, test["name"])
     base = build_prompt(test, session, imp, model=model)
+    if len(previous_output) > 50000:
+        previous_output = (
+            previous_output[:12000]
+            + "\n\n... [previous analysis truncated for feedback rerun] ...\n\n"
+            + previous_output[-30000:]
+        )
     return f"""{base}
 
 ## ── TESTER FEEDBACK: PLEASE REVISE YOUR ANALYSIS ──────────────────────────
@@ -2437,6 +2725,8 @@ JIRA_TICKET_SUMMARY:
 <revised one-line Jira summary; blank if PASS>
 JIRA_TICKET_DESCRIPTION:
 <revised Jira description>
+JIRA_TICKET_EVIDENCE:
+<revised evidence bullets or excerpts to place after steps and before recommendation>
 JIRA_TICKET_RECOMMENDATION:
 <revised developer recommendations>
 ===TEST_RESULT_END===
@@ -2653,7 +2943,7 @@ def run_tests(session, improvements):
                            result, result.get("improved_prompt", ""))
         save_improvements(improvements)
 
-        rf = save_result_file(test, result, session["session_id"])
+        rf = save_result_file(test, result, session["session_id"], session)
 
         if result.get("improved_prompt"):
             print(f"  {_G}[✓] Prompt improved for next run{_R}")
@@ -2734,6 +3024,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--new", action="store_true",
         help="Force a new session even if a resumable one exists",
+    )
+    p.add_argument(
+        "--rerun-completed", action="store_true",
+        help="Do not import completed app-history results; rerun selected tests",
     )
     p.add_argument(
         "--reset", action="store_true",
@@ -2893,9 +3187,18 @@ def main() -> None:
         session = new_session(selected, app_name, pkg_name,
                               apk_path, decomp_path, level_filter,
                               model, ollama_model, ollama_host)
+        imported = apply_app_history(session, force_rerun=args.rerun_completed)
+        if imported:
+            print(f"  {_G}[✓] Reused {imported} completed test result(s) from app history.{_R}")
+        elif args.rerun_completed:
+            print(f"  {_Y}[~] App-history reuse disabled; selected tests will rerun.{_R}")
         save_state(session)
 
     # ── Confirm & run ─────────────────────────────────────────────────────────
+    imported = apply_app_history(session, force_rerun=args.rerun_completed)
+    if imported:
+        print(f"  {_G}[✓] Reused {imported} completed test result(s) from app history.{_R}")
+        save_state(session)
     show_checklist(session)
     done = sum(1 for t in session["tests"] if t.get("status") == "completed")
     rem  = len(session["tests"]) - done
