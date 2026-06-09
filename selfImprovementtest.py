@@ -1451,16 +1451,28 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 # ── Phase 1: startup handshake ────────────────────────────
                 # Read output for up to 12 s, auto-answering any prompts
                 # that appear before Codex is ready to receive our task.
+                # Trust / y-n prompts to auto-answer
                 _TRUST_PAT = re.compile(
                     r"trust|proceed|continue|allow|permission|y/n|yes/no|\[y\]|\(y\)",
                     re.IGNORECASE,
                 )
+                # Codex input prompt: >, ❯, ❱ on their own at end of output
+                # (NOT > inside URLs like https://github.com/...)
                 _READY_PAT = re.compile(
-                    r"what.*would|what.*like|enter.*task|your task|>|\$",
-                    re.IGNORECASE,
+                    r"(?:^|\n)\s*[>❯❱]\s*$"
+                    r"|what\s+would\s+you\s+like"
+                    r"|enter\s+your\s+task"
+                    r"|your\s+task\s*:",
+                    re.IGNORECASE | re.MULTILINE,
                 )
-                startup_deadline = time.time() + 12
-                ready = False
+                # Update banner — just wait it out, don't treat as ready
+                _UPDATE_PAT = re.compile(r"update available", re.IGNORECASE)
+
+                startup_deadline = time.time() + 20   # longer to handle banners
+                ready            = False
+                saw_update       = False
+                update_wait_end  = 0.0
+
                 while time.time() < startup_deadline:
                     data = _pty_read_chunk()
                     if data:
@@ -1468,23 +1480,38 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         seen_so_far += _strip_esc(
                             data.decode("utf-8", errors="replace")
                         )
-                        # Auto-answer any confirmation / trust prompt
-                        if _TRUST_PAT.search(seen_so_far[-300:]):
+                        window = seen_so_far[-400:]
+
+                        # Update banner — give it 3 extra seconds to clear
+                        if _UPDATE_PAT.search(window) and not saw_update:
+                            saw_update      = True
+                            update_wait_end = time.time() + 3
+                            seen_so_far     = ""
+                            continue
+
+                        # Don't evaluate ready/trust until update banner clears
+                        if saw_update and time.time() < update_wait_end:
+                            seen_so_far = ""
+                            continue
+
+                        # Auto-answer trust / confirmation prompts
+                        if _TRUST_PAT.search(window):
                             time.sleep(0.4)
                             _pty_send("y\n")
-                            seen_so_far = ""     # reset so we don't re-trigger
+                            seen_so_far = ""
                             time.sleep(0.5)
                             continue
-                        # Codex is showing its input prompt — it's ready
-                        if _READY_PAT.search(seen_so_far[-200:]):
+
+                        # Codex input cursor is visible — it's ready
+                        if _READY_PAT.search(window):
                             ready = True
                             break
+
                     elif proc.poll() is not None:
                         break   # Codex exited during startup
 
                 if not ready:
-                    # Timed out waiting — try sending anyway
-                    time.sleep(0.5)
+                    time.sleep(1.0)   # timed out — send anyway
 
                 # ── Phase 2: send the security-test prompt ─────────────────
                 _pty_send(prompt + "\n")
