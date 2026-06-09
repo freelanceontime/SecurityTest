@@ -1375,22 +1375,59 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
 
         elif model == "codex":
             # ── Codex — requires a real TTY (isatty check) ────────────────────
-            # Run inside a PTY so Codex thinks it has a terminal.
-            import pty, os as _os, select as _select
+            # Run inside a PTY.  Codex reads its task from stdin so we send the
+            # prompt after a short startup pause rather than as a CLI argument
+            # (avoids arg-length and shell-escaping problems).
+            import pty, os as _os, select as _select, struct, fcntl, termios
+
+            def _strip_esc(txt):
+                """Remove ANSI CSI, OSC, DCS and stray control codes."""
+                # CSI  — \x1b[ ... final-byte
+                txt = re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", txt)
+                # OSC  — \x1b] ... BEL  or  ST (\x1b\\)
+                txt = re.sub(r"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)", "", txt)
+                # DCS / PM / APC
+                txt = re.sub(r"\x1B[P_^][^\x1B]*\x1B\\", "", txt)
+                # Remaining lone ESC + one char
+                txt = re.sub(r"\x1B[@-Z\\-_]", "", txt)
+                # Bare ESC
+                txt = re.sub(r"\x1B", "", txt)
+                # Non-printable control chars (keep \t \n \r)
+                txt = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", txt)
+                return txt
 
             master_fd, slave_fd = pty.openpty()
             try:
+                # Give the slave a proper terminal size so Codex doesn't complain
+                try:
+                    ws = struct.pack("HHHH", 50, 220, 0, 0)
+                    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, ws)
+                except Exception:
+                    pass
+
+                _env = {**_os.environ,
+                        "TERM": "xterm-256color",
+                        "COLUMNS": "220", "LINES": "50"}
+
                 proc = subprocess.Popen(
-                    ["codex", "--yolo", prompt],
+                    ["codex", "--yolo"],   # no prompt arg — sent via stdin
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
                     close_fds=True,
                     cwd=cwd or str(SCRIPT_DIR),
                     preexec_fn=_os.setsid,
+                    env=_env,
                 )
                 _os.close(slave_fd)
                 slave_fd = -1
+
+                # Give Codex time to initialise its UI, then send the prompt
+                time.sleep(3)
+                try:
+                    _os.write(master_fd, (prompt + "\n").encode("utf-8"))
+                except OSError:
+                    pass
 
                 chunks = []
                 deadline = time.time() + timeout
@@ -1407,7 +1444,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         except OSError:
                             break
                     if proc.poll() is not None:
-                        # drain remaining output
+                        time.sleep(0.3)   # brief drain wait
                         while True:
                             try:
                                 r, _, _ = _select.select([master_fd], [], [], 0.05)
@@ -1439,8 +1476,14 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             spinning[0] = False
             spin_t.join(2)
             raw = b"".join(chunks).decode("utf-8", errors="replace")
-            # Strip ANSI/VT100 escape codes produced by the PTY
-            out = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", raw)
+            out = _strip_esc(raw)
+
+            # If output is suspiciously short it likely means Codex didn't start
+            # properly — surface the raw text so the user can diagnose
+            if len(out.strip()) < 80:
+                print(f"  {_Y}│ [!] Codex produced very little output.{_R}")
+                print(f"  {_Y}│     Raw (first 200 chars): {raw[:200]!r}{_R}")
+                print(f"  {_Y}│     Ensure 'codex' is authenticated: run 'codex' interactively first.{_R}")
 
         else:
             # ── Claude — subprocess.run / communicate() ────────────────────────
