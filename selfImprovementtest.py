@@ -1494,7 +1494,30 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     time.sleep(1.5)   # banner still clearing — proceed anyway
 
                 # ── Phase 2: send the security-test prompt ─────────────────
-                _pty_send(prompt + "\n")
+                # Wrap in bracketed-paste sequences so Codex treats the entire
+                # block as one paste — without this every \n triggers Enter and
+                # submits each line as a separate task.
+                PASTE_START = "\x1b[200~"
+                PASTE_END   = "\x1b[201~"
+                _pty_send(PASTE_START + prompt + PASTE_END + "\n")
+
+                # Drain any echo / leftover startup output so it doesn't
+                # pollute Phase 3's "how much real output did Codex produce"
+                # counter and trigger a false early-exit.
+                time.sleep(1.0)
+                _echo_deadline = time.time() + 3.0
+                while time.time() < _echo_deadline:
+                    try:
+                        r2, _, _ = _select.select([master_fd], [], [], 0.15)
+                        if not r2:
+                            break   # nothing for 150 ms → echo has cleared
+                        d2 = _os.read(master_fd, 8192)
+                        if d2:
+                            chunks.append(d2)   # keep for display; not in p3_text
+                        else:
+                            break
+                    except OSError:
+                        break
 
                 # ── Phase 3: read until Codex finishes ─────────────────────
                 # codex --yolo stays open after finishing (interactive mode),
@@ -1506,8 +1529,8 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 _DONE_PAT  = re.compile(
                     r"(?:^|\n)\s*[>❯❱]\s*$", re.MULTILINE
                 )
-                IDLE_SECS       = 45
-                MIN_DONE_CHARS  = 200   # ignore done-prompt before this much output
+                IDLE_SECS       = 60
+                MIN_DONE_CHARS  = 800   # need real task output before done check
                 deadline        = time.time() + timeout
                 p3_text         = ""
                 last_data_t     = time.time()
