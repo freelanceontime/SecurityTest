@@ -1200,7 +1200,7 @@ def _augment_grep(cmd, decomp_path):
 
 # ── Claude runner ─────────────────────────────────────────────────────────────
 def run_claude(prompt, cwd=None, timeout=600, model="claude",
-               ollama_model="", ollama_host=OLLAMA_HOST):
+               ollama_model="", ollama_host=OLLAMA_HOST, test_name=""):
     """Run the selected AI model with the given prompt. Returns (ok, full_output)."""
     import threading, time
 
@@ -1269,50 +1269,61 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             _OUT_TAG = re.compile(r"<command_output>.*?</command_output>",
                                   re.DOTALL | re.IGNORECASE)
 
-            no_cmd_streak = 0  # consecutive turns with no commands and no result
+            no_cmd_streak = 0
+            _seen_cmds    = set()   # deduplicate commands within this test run
+
+            # Regex to detect tag lines for display filtering
+            _TAG_RE = re.compile(
+                r"</?run_?command|</?command_output|<system_instruction",
+                re.IGNORECASE,
+            )
+            # A "command" that is only a bare file path is not runnable
+            _PATH_ONLY = re.compile(r"^/\S+\.\w{1,6}$")
+
+            def _print_response_lines(txt):
+                for ln in txt.splitlines():
+                    cl = ln.strip()
+                    if (cl
+                            and not cl.startswith("===")
+                            and not cl.startswith("TEST_COMPLETED")
+                            and not _TAG_RE.search(cl)):
+                        print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
 
             for step in range(MAX_STEPS):
                 response = _ollama_call(conversation)
                 all_responses.append(response)
 
-                # Print non-structural lines live (skip command/output tags)
-                for ln in response.splitlines():
-                    cl = ln.strip()
-                    if (cl
-                            and not cl.startswith("===")
-                            and not cl.startswith("TEST_COMPLETED")
-                            and not cl.startswith("<run")
-                            and not cl.startswith("<command_output")
-                            and not cl.startswith("</command_output")):
-                        print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
+                _print_response_lines(response)
 
-                # Done when result block appears
                 if "===TEST_RESULT_START===" in response:
                     break
 
-                # Strip any <command_output> blocks the model hallucinated —
-                # only the harness writes those; model-written ones confuse the loop
                 clean_response = _OUT_TAG.sub("", response).strip()
-
-                # Extract real <run_command> blocks (catch tag variations)
                 cmds = _CMD_TAG.findall(clean_response)
 
                 if not cmds:
                     no_cmd_streak += 1
                     if no_cmd_streak >= 3:
-                        # Force it to produce the result block
                         conversation += (
                             f"\n\n{clean_response}\n\n"
                             "STOP. You have not run any commands for several turns.\n"
-                            "Based on the evidence collected so far, you MUST now output "
-                            "the ===TEST_RESULT_START=== block. Do not run any more commands."
+                            "Based on the evidence collected so far, output ONLY the "
+                            "result block below (fill in the brackets):\n\n"
+                            "===TEST_RESULT_START===\n"
+                            f"**Test:** {test_name}\n"
+                            "**Status:** [PASS or FAIL or PARTIAL]\n"
+                            "**Severity:** [Critical/High/Medium/Low/Info]\n"
+                            "**Findings:**\n[your findings]\n"
+                            "**Recommendations:**\n[your recommendations]\n"
+                            "===TEST_RESULT_END===\n"
+                            f"TEST_COMPLETED: {test_name}"
                         )
                     else:
                         conversation += (
                             f"\n\n{clean_response}\n\n"
                             "REMINDER: Use <run_command>your command</run_command> to run "
-                            "commands. Do NOT write <command_output> yourself — the harness "
-                            "provides that. Run the next 2-5 commands now, or output the "
+                            "commands. Do NOT write <command_output> yourself. "
+                            "Run the next 2-5 commands now, or write the "
                             "===TEST_RESULT_START=== block if you have enough evidence."
                         )
                     continue
@@ -1321,6 +1332,18 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 cmd_outputs = []
                 for raw_cmd in cmds:
                     cmd = _augment_grep(raw_cmd.strip(), cwd)
+                    # Skip bare file paths (not shell commands)
+                    if _PATH_ONLY.match(cmd.strip()):
+                        continue
+                    # Skip duplicates
+                    if cmd in _seen_cmds:
+                        cmd_outputs.append(
+                            f"<command_output>\n$ {cmd}\n"
+                            "[Already executed — see earlier output]\n"
+                            "</command_output>"
+                        )
+                        continue
+                    _seen_cmds.add(cmd)
                     print(f"\r  {_C}│ $ {cmd[:w-4]:<{w-4}} │{_R}")
                     try:
                         cr = subprocess.run(
@@ -1342,27 +1365,33 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         f"<command_output>\n$ {cmd}\n{out_txt}\n</command_output>"
                     )
 
-                conversation += (
-                    f"\n\n{clean_response}\n\n"
-                    + "\n".join(cmd_outputs)
-                    + "\n\nReal command output above. Analyse it and continue."
-                    "  Do NOT write <command_output> yourself."
-                )
+                if cmd_outputs:
+                    conversation += (
+                        f"\n\n{clean_response}\n\n"
+                        + "\n".join(cmd_outputs)
+                        + "\n\nReal command output above. Analyse it and continue. "
+                        "Do NOT write <command_output> yourself."
+                    )
 
             else:
-                # Max steps reached without a result block — force one final call
+                # Max steps — force result block with pre-filled template
                 print(f"\r  {_Y}│ [!] Max steps reached — forcing result block…{_R}")
                 forced = _ollama_call(
                     conversation
-                    + "\n\nYou have reached the maximum analysis steps. "
-                    "STOP running commands. Using ONLY the real evidence gathered above, "
-                    "output the ===TEST_RESULT_START=== block NOW. Nothing else."
+                    + "\n\nMax steps reached. Write ONLY the block below "
+                    "(fill in the brackets, no other text):\n\n"
+                    "===TEST_RESULT_START===\n"
+                    f"**Test:** {test_name}\n"
+                    "**Status:** [PASS or FAIL or PARTIAL]\n"
+                    "**Severity:** [Critical/High/Medium/Low/Info]\n"
+                    "**Findings:**\n[summarise your findings from the evidence above]\n"
+                    "**Recommendations:**\n[your recommendations]\n"
+                    "===TEST_RESULT_END===\n"
+                    f"TEST_COMPLETED: {test_name}\n\n"
+                    "Start your response with ===TEST_RESULT_START==="
                 )
                 all_responses.append(forced)
-                for ln in forced.splitlines():
-                    cl = ln.strip()
-                    if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
-                        print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
+                _print_response_lines(forced)
 
             spinning[0] = False
             spin_t.join(2)
@@ -1404,8 +1433,11 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         "TERM": "xterm-256color",
                         "COLUMNS": "220", "LINES": "50"}
 
+                # PTY is only here to satisfy Codex's isatty() check.
+                # Prompt is passed as a positional argument so multiline
+                # content is not misinterpreted as multiple Enter keypresses.
                 proc = subprocess.Popen(
-                    ["codex", "--yolo"],   # no prompt arg — sent via stdin
+                    ["codex", "--yolo", prompt],
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
@@ -1417,25 +1449,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 _os.close(slave_fd)
                 slave_fd = -1
 
-                chunks      = []
-                seen_so_far = ""
-
-                def _pty_read_chunk():
-                    """Read whatever is available on master_fd right now."""
-                    buf = b""
-                    while True:
-                        try:
-                            r, _, _ = _select.select([master_fd], [], [], 0.3)
-                            if not r:
-                                break
-                            data = _os.read(master_fd, 8192)
-                            if data:
-                                buf += data
-                            else:
-                                break
-                        except OSError:
-                            break
-                    return buf
+                chunks = []
 
                 def _pty_send(text):
                     try:
@@ -1443,97 +1457,54 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     except OSError:
                         pass
 
-                # ── Phase 1: startup handshake ────────────────────────────
-                # Auto-answer any trust / y-n / update prompts, then wait
-                # for Codex's input cursor before sending our task.
+                # Debug log path — shows raw PTY bytes so we can diagnose
+                _dbg_path = SCRIPT_DIR / "codex_pty_debug.log"
+                _dbg      = open(_dbg_path, "wb")
+
+                # ── Startup: drain banner, auto-answer any y/n prompts ────
                 _TRUST_PAT = re.compile(
                     r"trust|proceed|continue|allow|permission"
                     r"|y/n|yes/no|\[y\]|\[y/n\]|\(y\)|download.*apply",
                     re.IGNORECASE,
                 )
-                # Codex input cursor must be alone at end of output
-                # (so we don't match ">" inside URLs)
-                _READY_PAT = re.compile(
-                    r"(?:^|\n)\s*[>❯❱]\s*$"
-                    r"|what\s+would\s+you\s+like"
-                    r"|enter\s+your\s+task"
-                    r"|your\s+task\s*:",
-                    re.IGNORECASE | re.MULTILINE,
-                )
-
-                startup_deadline = time.time() + 25
-                ready            = False
-                _trust_cooldown  = 0.0  # don't re-trigger for 1 s after answering
-
-                while time.time() < startup_deadline:
-                    data = _pty_read_chunk()
-                    if data:
-                        chunks.append(data)
-                        seen_so_far += _strip_esc(
-                            data.decode("utf-8", errors="replace")
-                        )
-                        window = seen_so_far[-500:]
-
-                        # Auto-answer any y/n prompts (trust, update, etc.)
-                        if time.time() > _trust_cooldown and _TRUST_PAT.search(window):
-                            time.sleep(0.3)
-                            _pty_send("y\n")
-                            seen_so_far  = ""
-                            _trust_cooldown = time.time() + 1.0
-                            continue
-
-                        # Codex input cursor visible → ready for our task
-                        if _READY_PAT.search(window):
-                            ready = True
-                            break
-
-                    elif proc.poll() is not None:
-                        break   # Codex exited during startup
-
-                if not ready:
-                    time.sleep(1.5)   # banner still clearing — proceed anyway
-
-                # ── Phase 2: send the security-test prompt ─────────────────
-                # Wrap in bracketed-paste sequences so Codex treats the entire
-                # block as one paste — without this every \n triggers Enter and
-                # submits each line as a separate task.
-                PASTE_START = "\x1b[200~"
-                PASTE_END   = "\x1b[201~"
-                _pty_send(PASTE_START + prompt + PASTE_END + "\n")
-
-                # Drain any echo / leftover startup output so it doesn't
-                # pollute Phase 3's "how much real output did Codex produce"
-                # counter and trigger a false early-exit.
-                time.sleep(1.0)
-                _echo_deadline = time.time() + 3.0
-                while time.time() < _echo_deadline:
+                _trust_buf  = ""
+                _trust_cool = 0.0
+                _start_dl   = time.time() + 20
+                while time.time() < _start_dl:
                     try:
-                        r2, _, _ = _select.select([master_fd], [], [], 0.15)
-                        if not r2:
-                            break   # nothing for 150 ms → echo has cleared
-                        d2 = _os.read(master_fd, 8192)
-                        if d2:
-                            chunks.append(d2)   # keep for display; not in p3_text
-                        else:
+                        r2, _, _ = _select.select([master_fd], [], [], 0.5)
+                    except (ValueError, OSError):
+                        break
+                    if r2:
+                        try:
+                            d2 = _os.read(master_fd, 8192)
+                        except OSError:
                             break
-                    except OSError:
+                        if d2:
+                            chunks.append(d2)
+                            _dbg.write(b"[STARTUP] " + d2 + b"\n")
+                            _dbg.flush()
+                            _trust_buf += _strip_esc(
+                                d2.decode("utf-8", errors="replace")
+                            )
+                            if time.time() > _trust_cool and _TRUST_PAT.search(_trust_buf[-300:]):
+                                time.sleep(0.3)
+                                _pty_send("y\n")
+                                _trust_buf  = ""
+                                _trust_cool = time.time() + 1.5
+                    if proc.poll() is not None:
                         break
 
-                # ── Phase 3: read until Codex finishes ─────────────────────
-                # codex --yolo stays open after finishing (interactive mode),
-                # so we stop when:
-                #  a) its input cursor reappears after substantial output, OR
-                #  b) no new output for IDLE_SECS seconds after min content, OR
-                #  c) process exits, OR
-                #  d) hard timeout
-                _DONE_PAT  = re.compile(
-                    r"(?:^|\n)\s*[>❯❱]\s*$", re.MULTILINE
-                )
-                IDLE_SECS       = 60
-                MIN_DONE_CHARS  = 800   # need real task output before done check
-                deadline        = time.time() + timeout
-                p3_text         = ""
-                last_data_t     = time.time()
+                # ── Read until Codex finishes ─────────────────────────────
+                # Exit when: process exits, idle IDLE_SECS (even with no
+                # output at all), back at input prompt, or hard timeout.
+                _DONE_PAT      = re.compile(r"(?:^|\n)\s*[>❯❱]\s*$", re.MULTILINE)
+                IDLE_SECS      = 60
+                NO_OUTPUT_SECS = 30   # give up if NOTHING arrives in 30 s
+                MIN_DONE_CHARS = 400
+                deadline       = time.time() + timeout
+                p3_text        = ""
+                last_data_t    = time.time()
 
                 def _drain_pty():
                     while True:
@@ -1561,16 +1532,46 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                             break
                         if data:
                             chunks.append(data)
+                            _dbg.write(b"[P3] " + data + b"\n")
+                            _dbg.flush()
                             p3_text += _strip_esc(
                                 data.decode("utf-8", errors="replace")
                             )
                             last_data_t = time.time()
 
-                    # Process exited — drain and leave
                     if proc.poll() is not None:
                         time.sleep(0.4)
                         _drain_pty()
                         break
+
+                    elapsed_idle = time.time() - last_data_t
+                    # No output at all after NO_OUTPUT_SECS — something is wrong
+                    if not p3_text and elapsed_idle > NO_OUTPUT_SECS:
+                        _drain_pty()
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except Exception:
+                            proc.kill()
+                        break
+
+                    if len(p3_text.strip()) >= MIN_DONE_CHARS:
+                        if _DONE_PAT.search(p3_text[-300:]):
+                            _drain_pty()
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=3)
+                            except Exception:
+                                proc.kill()
+                            break
+                        if elapsed_idle > IDLE_SECS:
+                            _drain_pty()
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=3)
+                            except Exception:
+                                proc.kill()
+                            break
 
                     # After enough output, check whether Codex is back at its
                     # input prompt (task finished, waiting for next instruction)
@@ -1598,6 +1599,10 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     proc.wait()
 
             finally:
+                try:
+                    _dbg.close()
+                except Exception:
+                    pass
                 if slave_fd != -1:
                     try:
                         _os.close(slave_fd)
@@ -1621,26 +1626,79 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 print(f"  {_Y}│     Ensure 'codex' is authenticated: run 'codex' interactively first.{_R}")
 
         else:
-            # ── Claude — subprocess.run / communicate() ────────────────────────
-            result = subprocess.run(
+            # ── Claude — stream output line by line via reader thread ──────────
+            import queue as _queue
+            proc_c = subprocess.Popen(
                 ["claude", "-p", prompt],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 encoding="utf-8",
                 errors="replace",
                 cwd=cwd or str(SCRIPT_DIR),
+                bufsize=1,
             )
-            spinning[0] = False
-            spin_t.join(2)
-            out = result.stdout or ""
-            err = (result.stderr or "").strip()
-            if not out and err:
-                out = err
 
+            _cq      = _queue.Queue()
+            _out_buf = []
+
+            def _c_reader():
+                try:
+                    for ln in proc_c.stdout:
+                        _cq.put(("out", ln))
+                finally:
+                    _cq.put(("done", None))
+
+            threading.Thread(target=_c_reader, daemon=True).start()
+
+            _c_deadline   = time.time() + timeout
+            _got_output   = False
+            while time.time() < _c_deadline:
+                try:
+                    kind, ln = _cq.get(timeout=1.0)
+                except _queue.Empty:
+                    if proc_c.poll() is not None:
+                        break
+                    continue
+                if kind == "done":
+                    break
+                if not _got_output:
+                    # First byte arrived — kill the "Waiting…" spinner
+                    spinning[0] = False
+                    spin_t.join(2)
+                    _got_output = True
+                _out_buf.append(ln.rstrip())
+                _cl = ln.strip()
+                if (_cl
+                        and not _cl.startswith("===")
+                        and not _cl.startswith("TEST_COMPLETED")
+                        and not re.search(
+                            r"</?run_?command|</?command_output|<system_instruction",
+                            _cl, re.IGNORECASE)):
+                    print(f"  {_D}│ {_cl[:w-2]:<{w-2}} │{_R}")
+            else:
+                proc_c.kill()
+                proc_c.wait()
+
+            if not _got_output:
+                spinning[0] = False
+                spin_t.join(2)
+
+            _cerr = (proc_c.stderr.read() or "").strip() if proc_c.stderr else ""
+            out   = "\n".join(_out_buf)
+            if not out and _cerr:
+                out = _cerr
+
+        _DISP_SKIP = re.compile(
+            r"</?run_?command|</?command_output|<system_instruction",
+            re.IGNORECASE,
+        )
         for raw in out.splitlines():
             clean = raw.strip()
-            if clean and not clean.startswith("===") and not clean.startswith("TEST_COMPLETED"):
+            if (clean
+                    and not clean.startswith("===")
+                    and not clean.startswith("TEST_COMPLETED")
+                    and not _DISP_SKIP.search(clean)):
                 print(f"  {_D}│ {clean[:w - 2]:<{w - 2}} │{_R}")
 
         print(f"  {_C}└{'─' * w}┘{_R}\n")
@@ -1684,7 +1742,10 @@ def parse_result(output, test_name):
         "raw_output": output,
     }
 
-    r["completed"] = f"TEST_COMPLETED: {test_name}" in output
+    r["completed"] = (
+        f"TEST_COMPLETED: {test_name}" in output
+        or "===TEST_RESULT_START===" in output
+    )
 
     m = re.search(r"===TEST_RESULT_START===(.*?)===TEST_RESULT_END===", output, re.DOTALL)
     if m:
@@ -2276,6 +2337,7 @@ def _feedback_loop(test, result, output, session, improvements, cwd,
             success, new_output = run_claude(
                 rerun_prompt, cwd=cwd, model=model,
                 ollama_model=ollama_model, ollama_host=ollama_host,
+                test_name=test["name"],
             )
 
             if not success or not new_output.strip():
@@ -2339,7 +2401,19 @@ def run_tests(session, improvements):
         success, output = run_claude(
             prompt, cwd=cwd, model=model,
             ollama_model=ollama_model, ollama_host=ollama_host,
+            test_name=test["name"],
         )
+
+        # Write full prompt + response to a per-test debug file
+        _dbg_dir = RESULTS_DIR / session["id"]
+        _dbg_dir.mkdir(parents=True, exist_ok=True)
+        _safe = re.sub(r"[^a-zA-Z0-9_-]", "_", test["name"])[:60]
+        _dbg_file = _dbg_dir / f"debug_{i+1:03d}_{_safe}.txt"
+        try:
+            with open(_dbg_file, "w", encoding="utf-8") as _df:
+                _df.write(f"=== PROMPT ===\n{prompt}\n\n=== RESPONSE ===\n{output}\n")
+        except OSError:
+            pass
 
         # Report any script self-modification
         if _can_edit:
