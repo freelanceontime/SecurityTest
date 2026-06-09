@@ -1091,6 +1091,25 @@ Level   : {test["level"]}  {"(Standard Security)" if test["level"] == "L1" else 
 4. Flag any findings that are library/framework code (not app code) as low-priority.
 5. Note any false positives explicitly so future runs can skip them.
 6. When done, output the result block below EXACTLY – do not alter the delimiters.
+{"" if model != "ollama" else """
+## RUNNING COMMANDS (Ollama mode)
+You do not have built-in tool access, but you CAN run commands on this Kali Linux machine.
+Wrap each command you want executed in <run_command> tags — one command per block:
+
+  <run_command>adb devices</run_command>
+  <run_command>grep -r "password" /path/to/smali --include="*.smali" -l</run_command>
+
+The script will execute the command and return output as:
+  <command_output>
+  $ your command
+  ... output ...
+  </command_output>
+
+Rules:
+- Run commands in batches of 2-5 at a time, then analyse the output before continuing
+- Only output the ===TEST_RESULT_START=== block once you have enough evidence
+- Do NOT include <run_command> tags inside the result block
+"""}
 
 ===TEST_RESULT_START===
 STATUS: PASS|FAIL|INFO|SKIP
@@ -1138,6 +1157,47 @@ If you make changes, note what you changed and why in the NOTES section above.
 """}"""
 
 
+# ── Grep augmentation ────────────────────────────────────────────────────────
+def _augment_grep(cmd, decomp_path):
+    """
+    For grep commands issued by Ollama that have no explicit search path,
+    automatically append all smali* directories from the decompiled APK so
+    searches hit the right source files.
+
+    Only modifies the command when:
+      - it starts with 'grep'
+      - it does not already reference 'smali', the decompiled path, or end with
+        a path-like token (starts with / or ~, or is . or ..)
+    """
+    if not re.match(r"^grep\b", cmd.strip()):
+        return cmd
+
+    # Already has smali or an absolute/relative path → leave untouched
+    if re.search(r"smali", cmd) or (decomp_path and decomp_path in cmd):
+        return cmd
+
+    # Check whether the last token looks like a path argument
+    tokens = cmd.split()
+    if tokens:
+        last = tokens[-1]
+        # Flags start with - ; patterns are quoted; paths start with / ~ . or are bare dirs
+        if last.startswith("/") or last.startswith("~") or last in (".", ".."):
+            return cmd  # already has a path
+
+    # Build smali target: if decomp_path given, use absolute glob; else relative
+    if decomp_path:
+        import glob as _glob
+        smali_dirs = _glob.glob(os.path.join(decomp_path, "smali*"))
+        if smali_dirs:
+            target = " ".join(smali_dirs)
+        else:
+            target = os.path.join(decomp_path, "smali")
+    else:
+        target = "smali*"
+
+    return f"{cmd} {target}"
+
+
 # ── Claude runner ─────────────────────────────────────────────────────────────
 def run_claude(prompt, cwd=None, timeout=600, model="claude",
                ollama_model="", ollama_host=OLLAMA_HOST):
@@ -1171,23 +1231,90 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
 
     try:
         if model == "ollama":
-            # ── Ollama HTTP API ───────────────────────────────────────────────
-            url = f"http://{ollama_host}:{OLLAMA_PORT}/api/generate"
-            payload = json.dumps({
-                "model":  ollama_model,
-                "prompt": prompt,
-                "stream": False,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                url, data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            # urlopen blocks until done; spinner thread shows progress meanwhile
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read())
+            # ── Ollama agentic loop ───────────────────────────────────────────
+            # Ollama only generates text; we execute any <run_command> blocks
+            # it produces, feed the output back, and loop until it writes the
+            # ===TEST_RESULT_START=== block or we hit the step limit.
+            MAX_STEPS   = 25
+            CMD_TIMEOUT = 30          # seconds per shell command
+            MAX_CMD_OUT = 3000        # chars of output to feed back per command
+            conversation  = prompt
+            all_responses = []
+
+            def _ollama_call(conv):
+                url = f"http://{ollama_host}:{OLLAMA_PORT}/api/generate"
+                pay = json.dumps({
+                    "model":  ollama_model,
+                    "prompt": conv,
+                    "stream": False,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=pay,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return json.loads(r.read()).get("response", "")
+
+            for step in range(MAX_STEPS):
+                response = _ollama_call(conversation)
+                all_responses.append(response)
+
+                # Print non-structural lines live
+                for ln in response.splitlines():
+                    cl = ln.strip()
+                    if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
+                        print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
+
+                # Done when result block appears
+                if "===TEST_RESULT_START===" in response:
+                    break
+
+                # Extract and run any <run_command> blocks
+                cmds = re.findall(r"<run_command>(.*?)</run_command>",
+                                  response, re.DOTALL)
+                if not cmds:
+                    # No commands and no result — nudge it forward
+                    conversation += (
+                        f"\n\n{response}\n\n"
+                        "You have not issued any commands or produced a result block yet. "
+                        "Run the next relevant commands, or if you have enough evidence "
+                        "output the ===TEST_RESULT_START=== block now."
+                    )
+                    continue
+
+                cmd_outputs = []
+                for raw_cmd in cmds:
+                    cmd = _augment_grep(raw_cmd.strip(), cwd)
+                    print(f"\r  {_C}│ $ {cmd[:w-4]:<{w-4}} │{_R}")
+                    try:
+                        cr = subprocess.run(
+                            cmd, shell=True,
+                            capture_output=True, text=True,
+                            timeout=CMD_TIMEOUT,
+                            encoding="utf-8", errors="replace",
+                            cwd=cwd or str(SCRIPT_DIR),
+                        )
+                        out_txt = (cr.stdout + cr.stderr).strip()
+                        if len(out_txt) > MAX_CMD_OUT:
+                            out_txt = out_txt[:MAX_CMD_OUT] + "\n... [truncated]"
+                        print(f"\r  {_D}│   {len(out_txt)} chars{_R}")
+                    except subprocess.TimeoutExpired:
+                        out_txt = f"[TIMEOUT after {CMD_TIMEOUT}s]"
+                    except Exception as ce:
+                        out_txt = f"[ERROR: {ce}]"
+                    cmd_outputs.append(
+                        f"<command_output>\n$ {cmd}\n{out_txt}\n</command_output>"
+                    )
+
+                conversation += (
+                    f"\n\n{response}\n\n"
+                    + "\n".join(cmd_outputs)
+                    + "\n\nAnalyse the output above and continue."
+                )
+
             spinning[0] = False
             spin_t.join(2)
-            out = data.get("response", "")
+            out = "\n\n".join(all_responses)
 
         else:
             # ── CLI models (Claude / Codex) ───────────────────────────────────
