@@ -1422,14 +1422,74 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 _os.close(slave_fd)
                 slave_fd = -1
 
-                # Give Codex time to initialise its UI, then send the prompt
-                time.sleep(3)
-                try:
-                    _os.write(master_fd, (prompt + "\n").encode("utf-8"))
-                except OSError:
-                    pass
+                chunks      = []
+                seen_so_far = ""
 
-                chunks = []
+                def _pty_read_chunk():
+                    """Read whatever is available on master_fd right now."""
+                    buf = b""
+                    while True:
+                        try:
+                            r, _, _ = _select.select([master_fd], [], [], 0.3)
+                            if not r:
+                                break
+                            data = _os.read(master_fd, 8192)
+                            if data:
+                                buf += data
+                            else:
+                                break
+                        except OSError:
+                            break
+                    return buf
+
+                def _pty_send(text):
+                    try:
+                        _os.write(master_fd, text.encode("utf-8"))
+                    except OSError:
+                        pass
+
+                # ── Phase 1: startup handshake ────────────────────────────
+                # Read output for up to 12 s, auto-answering any prompts
+                # that appear before Codex is ready to receive our task.
+                _TRUST_PAT = re.compile(
+                    r"trust|proceed|continue|allow|permission|y/n|yes/no|\[y\]|\(y\)",
+                    re.IGNORECASE,
+                )
+                _READY_PAT = re.compile(
+                    r"what.*would|what.*like|enter.*task|your task|>|\$",
+                    re.IGNORECASE,
+                )
+                startup_deadline = time.time() + 12
+                ready = False
+                while time.time() < startup_deadline:
+                    data = _pty_read_chunk()
+                    if data:
+                        chunks.append(data)
+                        seen_so_far += _strip_esc(
+                            data.decode("utf-8", errors="replace")
+                        )
+                        # Auto-answer any confirmation / trust prompt
+                        if _TRUST_PAT.search(seen_so_far[-300:]):
+                            time.sleep(0.4)
+                            _pty_send("y\n")
+                            seen_so_far = ""     # reset so we don't re-trigger
+                            time.sleep(0.5)
+                            continue
+                        # Codex is showing its input prompt — it's ready
+                        if _READY_PAT.search(seen_so_far[-200:]):
+                            ready = True
+                            break
+                    elif proc.poll() is not None:
+                        break   # Codex exited during startup
+
+                if not ready:
+                    # Timed out waiting — try sending anyway
+                    time.sleep(0.5)
+
+                # ── Phase 2: send the security-test prompt ─────────────────
+                _pty_send(prompt + "\n")
+
+                # ── Phase 3: read until Codex finishes ────────────────────
                 deadline = time.time() + timeout
                 while time.time() < deadline:
                     try:
@@ -1444,7 +1504,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                         except OSError:
                             break
                     if proc.poll() is not None:
-                        time.sleep(0.3)   # brief drain wait
+                        time.sleep(0.5)   # brief drain
                         while True:
                             try:
                                 r, _, _ = _select.select([master_fd], [], [], 0.05)
