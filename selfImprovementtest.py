@@ -1626,10 +1626,12 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 print(f"  {_Y}│     Ensure 'codex' is authenticated: run 'codex' interactively first.{_R}")
 
         else:
-            # ── Claude — stream output line by line via reader thread ──────────
+            # ── Claude — stream-json so we can show tool calls live ────────────
             import queue as _queue
             proc_c = subprocess.Popen(
-                ["claude", "-p", prompt],
+                ["claude", "-p", "--verbose",
+                 "--dangerously-skip-permissions",
+                 "--output-format", "stream-json", prompt],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1640,42 +1642,108 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             )
 
             _cq      = _queue.Queue()
-            _out_buf = []
+            _out_buf = []   # collects plain-text lines for the final result
 
             def _c_reader():
                 try:
                     for ln in proc_c.stdout:
-                        _cq.put(("out", ln))
+                        _cq.put(ln)
                 finally:
-                    _cq.put(("done", None))
+                    _cq.put(None)
 
             threading.Thread(target=_c_reader, daemon=True).start()
 
-            _c_deadline   = time.time() + timeout
-            _got_output   = False
+            _c_deadline = time.time() + timeout
+            _got_output = False
+
             while time.time() < _c_deadline:
                 try:
-                    kind, ln = _cq.get(timeout=1.0)
+                    ln = _cq.get(timeout=1.0)
                 except _queue.Empty:
                     if proc_c.poll() is not None:
                         break
                     continue
-                if kind == "done":
+                if ln is None:
                     break
+
                 if not _got_output:
-                    # First byte arrived — kill the "Waiting…" spinner
                     spinning[0] = False
                     spin_t.join(2)
                     _got_output = True
-                _out_buf.append(ln.rstrip())
-                _cl = ln.strip()
-                if (_cl
-                        and not _cl.startswith("===")
-                        and not _cl.startswith("TEST_COMPLETED")
-                        and not re.search(
-                            r"</?run_?command|</?command_output|<system_instruction",
-                            _cl, re.IGNORECASE)):
-                    print(f"  {_D}│ {_cl[:w-2]:<{w-2}} │{_R}")
+
+                raw_ln = ln.rstrip()
+
+                # Try to parse as a stream-json event
+                try:
+                    ev = json.loads(raw_ln)
+                except (json.JSONDecodeError, ValueError):
+                    # Plain text fallback (shouldn't happen with stream-json)
+                    _out_buf.append(raw_ln)
+                    _cl = raw_ln.strip()
+                    if _cl and not _cl.startswith("===") and not _cl.startswith("TEST_COMPLETED"):
+                        print(f"  {_D}│ {_cl[:w-2]:<{w-2}} │{_R}")
+                    continue
+
+                if not isinstance(ev, dict):
+                    continue
+                ev_type = ev.get("type", "")
+
+                try:
+                    if ev_type == "assistant":
+                        for blk in ev.get("message", {}).get("content", []):
+                            if not isinstance(blk, dict):
+                                continue
+                            if blk.get("type") == "text":
+                                for tl in blk.get("text", "").splitlines():
+                                    _out_buf.append(tl)
+                                    cl = tl.strip()
+                                    if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
+                                        print(f"  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
+                            elif blk.get("type") == "tool_use":
+                                tool_name = blk.get("name", "tool")
+                                inp       = blk.get("input", {})
+                                if not isinstance(inp, dict):
+                                    inp = {}
+                                cmd = inp.get("command", inp.get("description", str(inp)))
+                                tag = f"[{tool_name}]"
+                                print(f"  {_C}│ {tag} {cmd[:w-len(tag)-3]:<{w-len(tag)-3}} │{_R}")
+                                _out_buf.append(f"$ {cmd}")
+
+                    elif ev_type == "user":
+                        for blk in ev.get("message", {}).get("content", []):
+                            if not isinstance(blk, dict):
+                                continue
+                            if blk.get("type") == "tool_result":
+                                raw_content = blk.get("content", "")
+                                if isinstance(raw_content, str):
+                                    txt = raw_content
+                                elif isinstance(raw_content, list):
+                                    parts = []
+                                    for rb in raw_content:
+                                        if isinstance(rb, dict):
+                                            parts.append(rb.get("text", ""))
+                                        elif isinstance(rb, str):
+                                            parts.append(rb)
+                                    txt = "\n".join(parts)
+                                else:
+                                    txt = str(raw_content) if raw_content else ""
+                                if txt:
+                                    first = txt.splitlines()[0][:w-6]
+                                    print(f"  {_D}│   → {first:<{w-6}} │{_R}")
+                                    _out_buf.append(txt)
+
+                    elif ev_type == "result":
+                        if not _out_buf:
+                            res_text = ev.get("result", "")
+                            for tl in res_text.splitlines():
+                                _out_buf.append(tl)
+                                cl = tl.strip()
+                                if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
+                                    print(f"  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
+
+                except Exception as _ev_exc:
+                    print(f"  {_D}│ [stream-parse error: {_ev_exc}]{' '*(w-22)} │{_R}")
+
             else:
                 proc_c.kill()
                 proc_c.wait()
@@ -2405,7 +2473,7 @@ def run_tests(session, improvements):
         )
 
         # Write full prompt + response to a per-test debug file
-        _dbg_dir = RESULTS_DIR / session["id"]
+        _dbg_dir = RESULTS_DIR / session["session_id"]
         _dbg_dir.mkdir(parents=True, exist_ok=True)
         _safe = re.sub(r"[^a-zA-Z0-9_-]", "_", test["name"])[:60]
         _dbg_file = _dbg_dir / f"debug_{i+1:03d}_{_safe}.txt"
