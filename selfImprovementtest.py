@@ -1068,20 +1068,21 @@ def build_prompt(test, session, improvement, model="claude"):
     # Build optional sections as plain strings (can't nest triple-quotes in f-strings)
     if model == "ollama":
         _ollama_section = (
-            "\n## RUNNING COMMANDS (Ollama mode)\n"
-            "You do not have built-in tool access, but you CAN run commands on this Kali Linux machine.\n"
-            "Wrap each command you want executed in <run_command> tags — one command per block:\n\n"
+            "\n## HOW TO RUN COMMANDS\n"
+            "You cannot run commands yourself, but the test harness will run them for you.\n"
+            "To execute a command, write it inside <run_command> tags (EXACTLY this format):\n\n"
             "  <run_command>adb devices</run_command>\n"
-            "  <run_command>grep -r \"password\" --include=\"*.smali\" -l</run_command>\n\n"
-            "The script will execute the command and return output as:\n"
-            "  <command_output>\n"
-            "  $ your command\n"
-            "  ... output ...\n"
-            "  </command_output>\n\n"
-            "Rules:\n"
-            "- Run commands in batches of 2-5 at a time, then analyse the output before continuing\n"
-            "- Only output the ===TEST_RESULT_START=== block once you have enough evidence\n"
-            "- Do NOT include <run_command> tags inside the result block\n"
+            "  <run_command>grep -rn \"password\" --include=\"*.smali\" -l</run_command>\n\n"
+            "After you write your <run_command> blocks the harness will stop, execute each\n"
+            "command on the real Kali Linux machine, and return the real output wrapped in\n"
+            "<command_output> tags. You then continue your analysis.\n\n"
+            "STRICT RULES — breaking these will invalidate the test:\n"
+            "1. NEVER write <command_output> yourself. ONLY the harness writes those.\n"
+            "2. NEVER simulate, guess, or assume command output. Wait for the real result.\n"
+            "3. Use EXACTLY <run_command>...</run_command> — no variations, no underscores removed.\n"
+            "4. Run 2-5 commands per turn, then STOP and wait for the output before continuing.\n"
+            "5. ONLY write the ===TEST_RESULT_START=== block when you have real evidence.\n"
+            "6. Do NOT include <run_command> tags inside the result block.\n"
         )
     else:
         _ollama_section = ""
@@ -1266,33 +1267,62 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.loads(r.read()).get("response", "")
 
+            # Regex catches <run_command> AND common model variations like <runcommand>
+            _CMD_TAG = re.compile(r"<run_?command>(.*?)</run_?command>",
+                                  re.DOTALL | re.IGNORECASE)
+            # Strip model-hallucinated <command_output> blocks before feeding back
+            _OUT_TAG = re.compile(r"<command_output>.*?</command_output>",
+                                  re.DOTALL | re.IGNORECASE)
+
+            no_cmd_streak = 0  # consecutive turns with no commands and no result
+
             for step in range(MAX_STEPS):
                 response = _ollama_call(conversation)
                 all_responses.append(response)
 
-                # Print non-structural lines live
+                # Print non-structural lines live (skip command/output tags)
                 for ln in response.splitlines():
                     cl = ln.strip()
-                    if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
+                    if (cl
+                            and not cl.startswith("===")
+                            and not cl.startswith("TEST_COMPLETED")
+                            and not cl.startswith("<run")
+                            and not cl.startswith("<command_output")
+                            and not cl.startswith("</command_output")):
                         print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
 
                 # Done when result block appears
                 if "===TEST_RESULT_START===" in response:
                     break
 
-                # Extract and run any <run_command> blocks
-                cmds = re.findall(r"<run_command>(.*?)</run_command>",
-                                  response, re.DOTALL)
+                # Strip any <command_output> blocks the model hallucinated —
+                # only the harness writes those; model-written ones confuse the loop
+                clean_response = _OUT_TAG.sub("", response).strip()
+
+                # Extract real <run_command> blocks (catch tag variations)
+                cmds = _CMD_TAG.findall(clean_response)
+
                 if not cmds:
-                    # No commands and no result — nudge it forward
-                    conversation += (
-                        f"\n\n{response}\n\n"
-                        "You have not issued any commands or produced a result block yet. "
-                        "Run the next relevant commands, or if you have enough evidence "
-                        "output the ===TEST_RESULT_START=== block now."
-                    )
+                    no_cmd_streak += 1
+                    if no_cmd_streak >= 3:
+                        # Force it to produce the result block
+                        conversation += (
+                            f"\n\n{clean_response}\n\n"
+                            "STOP. You have not run any commands for several turns.\n"
+                            "Based on the evidence collected so far, you MUST now output "
+                            "the ===TEST_RESULT_START=== block. Do not run any more commands."
+                        )
+                    else:
+                        conversation += (
+                            f"\n\n{clean_response}\n\n"
+                            "REMINDER: Use <run_command>your command</run_command> to run "
+                            "commands. Do NOT write <command_output> yourself — the harness "
+                            "provides that. Run the next 2-5 commands now, or output the "
+                            "===TEST_RESULT_START=== block if you have enough evidence."
+                        )
                     continue
 
+                no_cmd_streak = 0
                 cmd_outputs = []
                 for raw_cmd in cmds:
                     cmd = _augment_grep(raw_cmd.strip(), cwd)
@@ -1318,25 +1348,104 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
                     )
 
                 conversation += (
-                    f"\n\n{response}\n\n"
+                    f"\n\n{clean_response}\n\n"
                     + "\n".join(cmd_outputs)
-                    + "\n\nAnalyse the output above and continue."
+                    + "\n\nReal command output above. Analyse it and continue."
+                    "  Do NOT write <command_output> yourself."
                 )
+
+            else:
+                # Max steps reached without a result block — force one final call
+                print(f"\r  {_Y}│ [!] Max steps reached — forcing result block…{_R}")
+                forced = _ollama_call(
+                    conversation
+                    + "\n\nYou have reached the maximum analysis steps. "
+                    "STOP running commands. Using ONLY the real evidence gathered above, "
+                    "output the ===TEST_RESULT_START=== block NOW. Nothing else."
+                )
+                all_responses.append(forced)
+                for ln in forced.splitlines():
+                    cl = ln.strip()
+                    if cl and not cl.startswith("===") and not cl.startswith("TEST_COMPLETED"):
+                        print(f"\r  {_D}│ {cl[:w-2]:<{w-2}} │{_R}")
 
             spinning[0] = False
             spin_t.join(2)
             out = "\n\n".join(all_responses)
 
-        else:
-            # ── CLI models (Claude / Codex) ───────────────────────────────────
-            # subprocess.run uses communicate() internally — avoids line-buffer hangs.
-            if model == "codex":
-                cmd = ["codex", "--yolo", prompt]
-            else:
-                cmd = ["claude", "-p", prompt]
+        elif model == "codex":
+            # ── Codex — requires a real TTY (isatty check) ────────────────────
+            # Run inside a PTY so Codex thinks it has a terminal.
+            import pty, os as _os, select as _select
 
+            master_fd, slave_fd = pty.openpty()
+            try:
+                proc = subprocess.Popen(
+                    ["codex", "--yolo", prompt],
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    close_fds=True,
+                    cwd=cwd or str(SCRIPT_DIR),
+                    preexec_fn=_os.setsid,
+                )
+                _os.close(slave_fd)
+                slave_fd = -1
+
+                chunks = []
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    try:
+                        r, _, _ = _select.select([master_fd], [], [], 1.0)
+                    except (ValueError, OSError):
+                        break
+                    if r:
+                        try:
+                            data = _os.read(master_fd, 8192)
+                            if data:
+                                chunks.append(data)
+                        except OSError:
+                            break
+                    if proc.poll() is not None:
+                        # drain remaining output
+                        while True:
+                            try:
+                                r, _, _ = _select.select([master_fd], [], [], 0.05)
+                                if not r:
+                                    break
+                                data = _os.read(master_fd, 8192)
+                                if data:
+                                    chunks.append(data)
+                                else:
+                                    break
+                            except OSError:
+                                break
+                        break
+                else:
+                    proc.kill()
+                    proc.wait()
+
+            finally:
+                if slave_fd != -1:
+                    try:
+                        _os.close(slave_fd)
+                    except OSError:
+                        pass
+                try:
+                    _os.close(master_fd)
+                except OSError:
+                    pass
+
+            spinning[0] = False
+            spin_t.join(2)
+            raw = b"".join(chunks).decode("utf-8", errors="replace")
+            # Strip ANSI/VT100 escape codes produced by the PTY
+            out = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", raw)
+
+        else:
+            # ── Claude — subprocess.run / communicate() ────────────────────────
             result = subprocess.run(
-                cmd,
+                ["claude", "-p", prompt],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
