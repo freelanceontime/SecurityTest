@@ -65,13 +65,18 @@ def _enable_ansi() -> None:
 def _clear() -> None:
     os.system("cls" if IS_WIN else "clear")
 
-def _box(title: str, w: int = 72) -> None:
+def _term_w() -> int:
+    """Return usable inner width for bordered boxes (terminal cols minus borders/indent)."""
+    return max(60, shutil.get_terminal_size(fallback=(80, 24)).columns - 4)
+
+def _box(title: str, w: int = 0) -> None:
+    w = w or _term_w()
     print(f"{_B}{'=' * w}{_R}")
     print(f"{_B}  {title}{_R}")
     print(f"{_B}{'=' * w}{_R}")
 
-def _hr(w: int = 72) -> str:
-    return "─" * w
+def _hr(w: int = 0) -> str:
+    return "─" * (w or _term_w())
 
 
 def _candidate_cli_paths(binary: str) -> list[str]:
@@ -1231,8 +1236,16 @@ Level   : {test["level"]}  {"(Standard Security)" if test["level"] == "L1" else 
 {guidance}
 {extras}
 ## INSTRUCTIONS
-1. Perform this security test thoroughly using the tools available.
-2. Run actual commands (adb, frida, grep, strings, apksigner, etc.) and show their output.
+0. SCOPE CONSTRAINT – you are performing ONE test only: "{test["name"]}".
+   Do NOT investigate, report, or run commands for any other test or issue.
+   If you notice something unrelated, record it in NOTES as a one-line observation
+   and move on. Do not pursue it further.
+1. Perform this test using only commands directly relevant to its guidance. Run the
+   minimum number of commands needed to reach a conclusion — stop as soon as you have
+   sufficient evidence. Do NOT keep running extra commands once a finding is confirmed.
+2. STOP AND WRITE THE RESULT BLOCK as soon as you have confirmed evidence (or confirmed
+   absence of the issue). Do not run follow-up commands "to gather more detail" after a
+   finding is confirmed — that detail belongs in a separate dedicated test.
 3. Evidence must include file paths, line numbers, or command output – no assumptions.
 4. Flag any findings that are library/framework code (not app code) as low-priority.
 5. Note any false positives explicitly so future runs can skip them.
@@ -1242,20 +1255,18 @@ Level   : {test["level"]}  {"(Standard Security)" if test["level"] == "L1" else 
 ===TEST_RESULT_START===
 STATUS: PASS|FAIL|INFO|SKIP
 SEVERITY: Critical|High|Medium|Low|Info|N/A
-FINDINGS:
-- <finding 1 with evidence, or "None">
-COMMANDS_USED:
-- <exact command and brief output summary>
-NOTES:
-<context, caveats, observations>
 FALSE_POSITIVES:
 - <false positive you identified, or "None">
 JIRA_TICKET_SUMMARY:
-<one-line Jira summary; blank if PASS>
+<one-line Jira title; blank if PASS>
 JIRA_TICKET_DESCRIPTION:
-<full Jira description with steps to reproduce; blank if PASS>
+<2-3 sentence description of the issue and why it matters; blank if PASS>
+JIRA_TICKET_CONCERN:
+<one paragraph explaining the specific security concern and risk to the app or its users; blank if PASS>
+JIRA_TICKET_STEPS:
+<numbered steps to reproduce the finding; blank if PASS>
 JIRA_TICKET_EVIDENCE:
-<specific evidence bullets or excerpts to place after steps and before recommendation; blank if PASS>
+<specific evidence bullets: file paths, command output excerpts, line numbers; blank if PASS>
 JIRA_TICKET_RECOMMENDATION:
 <what the developer must do to fix this; blank if PASS>
 ===TEST_RESULT_END===
@@ -1324,7 +1335,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
     else:
         label = "Claude output"
 
-    w = 70
+    w = _term_w()
     print(f"\n  {_C}┌{'─' * w}┐{_R}")
     print(f"  {_C}│{label:^{w}}│{_R}")
     print(f"  {_C}├{'─' * w}┤{_R}")
@@ -1800,6 +1811,7 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
             proc_c = subprocess.Popen(
                 [claude_bin, "-p", "--verbose",
                  "--dangerously-skip-permissions",
+                 "--max-turns", "25",
                  "--output-format", "stream-json", prompt],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1977,9 +1989,9 @@ def run_claude(prompt, cwd=None, timeout=600, model="claude",
 def parse_result(output, test_name):
     r = {
         "status": "UNKNOWN", "severity": "Info",
-        "findings": [], "commands_used": [], "notes": "",
         "false_positives": [], "jira_summary": "",
-        "jira_description": "", "jira_evidence": "", "jira_recommendation": "",
+        "jira_description": "", "jira_concern": "", "jira_steps": "",
+        "jira_evidence": "", "jira_recommendation": "",
         "completed": False, "improved_prompt": "",
         "raw_output": output,
     }
@@ -2022,12 +2034,11 @@ def parse_result(output, test_name):
                 if l.strip() and l.strip().lower() not in ("none", "-", "n/a")
             ]
 
-        r["findings"]            = _bullets(_field("FINDINGS"))
-        r["commands_used"]       = _bullets(_field("COMMANDS_USED"))
-        r["notes"]               = _field("NOTES")
         r["false_positives"]     = _bullets(_field("FALSE_POSITIVES"))
         r["jira_summary"]        = _field("JIRA_TICKET_SUMMARY")
         r["jira_description"]    = _field("JIRA_TICKET_DESCRIPTION")
+        r["jira_concern"]        = _field("JIRA_TICKET_CONCERN")
+        r["jira_steps"]          = _field("JIRA_TICKET_STEPS")
         r["jira_evidence"]       = _field("JIRA_TICKET_EVIDENCE")
         r["jira_recommendation"] = _field("JIRA_TICKET_RECOMMENDATION")
 
@@ -2056,57 +2067,33 @@ def _result_markdown(test: dict, result: dict, session: dict | None = None) -> s
     dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     app_name = session.get("app_name", "")
     package_name = session.get("package_name", "")
-    session_id = session.get("session_id", "")
 
+    summary = result.get("jira_summary") or test["name"]
     lines = [
-        f"# {test['name']}",
-        f"**App:** {app_name}" if app_name else "",
-        f"**Package:** `{package_name}`" if package_name else "",
-        f"**Session:** `{session_id}`" if session_id else "",
-        f"**Section:** {test['section']}  |  **Level:** {test['level']}",
-        f"**Status:** `{result['status']}`  |  **Severity:** `{result['severity']}`",
-        f"**Date:** {dt}",
+        f"# {summary}",
+        "",
+        f"**App:** {app_name}  |  **Package:** `{package_name}`" if app_name else "",
+        f"**Status:** `{result['status']}`  |  **Severity:** `{result['severity']}`  |  **Date:** {dt}",
         "",
     ]
-    lines = [line for line in lines if line]
-    lines.append("")
-    if result["findings"]:
-        lines += ["## Findings", ""] + [f"- {f}" for f in result["findings"]] + [""]
-    if result["commands_used"]:
-        lines += ["## Commands Used", ""]
-        for cmd in result["commands_used"]:
-            lines += [f"```bash\n{cmd}\n```"]
-        lines.append("")
-    if result["notes"]:
-        lines += ["## Notes", "", result["notes"], ""]
-    if result["false_positives"]:
-        lines += ["## False Positives", ""] + [f"- {fp}" for fp in result["false_positives"]] + [""]
-    if result["jira_summary"]:
-        evidence = _jira_evidence_text(result)
-        lines += [
-            "## Jira Ticket",
-            f"**Summary:** {result['jira_summary']}", "",
-            "**Description:**", result["jira_description"], "",
-        ]
-        if evidence:
-            lines += ["**Evidence:**", evidence, ""]
-        lines += ["**Recommendation:**", result["jira_recommendation"], ""]
-    if result.get("improved_prompt"):
-        lines += ["## Improved Prompt (next run)", "", "```", result["improved_prompt"], "```", ""]
-    if result.get("raw_output"):
-        raw_output = result["raw_output"]
-        if len(raw_output) > 12000:
-            raw_output = (
-                raw_output[:3000]
-                + "\n\n... [middle of raw output truncated] ...\n\n"
-                + raw_output[-9000:]
-            )
-        lines += [
-            "## Raw Output",
-            "<details><summary>Expand</summary>", "",
-            "```", raw_output, "```",
-            "</details>",
-        ]
+    lines = [l for l in lines if l is not None]
+
+    if result.get("jira_description"):
+        lines += ["## Description", "", result["jira_description"], ""]
+
+    if result.get("jira_concern"):
+        lines += ["## Concern", "", result["jira_concern"], ""]
+
+    if result.get("jira_steps"):
+        lines += ["## Steps to Reproduce", "", result["jira_steps"], ""]
+
+    evidence = _jira_evidence_text(result)
+    if evidence:
+        lines += ["## Evidence", "", evidence, ""]
+
+    if result.get("jira_recommendation"):
+        lines += ["## Recommendation", "", result["jira_recommendation"], ""]
+
     return "\n".join(lines)
 
 
@@ -2146,31 +2133,23 @@ def _parse_result_markdown(path: Path) -> dict | None:
         return None
 
     status_m = re.search(r"\*\*Status:\*\*\s*`?([A-Z]+)`?", md)
-    severity_m = re.search(r"\*\*Severity:\*\*\s*`?([^`\n]+)`?", md)
+    severity_m = re.search(r"\*\*Severity:\*\*\s*`?([^`\n|]+)`?", md)
     if not status_m:
         return None
 
-    jira = _section_text(md, "Jira Ticket")
-
-    def _jira_field(label: str) -> str:
-        m = re.search(
-            rf"\*\*{re.escape(label)}:\*\*\s*\n?(.*?)(?=\n\*\*[A-Za-z ]+:\*\*|\Z)",
-            jira,
-            re.DOTALL,
-        )
-        return m.group(1).strip() if m else ""
+    # Extract heading 1 as jira_summary
+    title_m = re.search(r"^#\s+(.+)$", md, re.MULTILINE)
 
     return {
         "status": status_m.group(1).upper(),
         "severity": (severity_m.group(1).strip() if severity_m else "Info"),
-        "findings": _markdown_bullets(_section_text(md, "Findings")),
-        "commands_used": re.findall(r"```bash\n(.*?)\n```", _section_text(md, "Commands Used"), re.DOTALL),
-        "notes": _section_text(md, "Notes"),
-        "false_positives": _markdown_bullets(_section_text(md, "False Positives")),
-        "jira_summary": _jira_field("Summary"),
-        "jira_description": _jira_field("Description"),
-        "jira_evidence": _jira_field("Evidence"),
-        "jira_recommendation": _jira_field("Recommendation"),
+        "false_positives": [],
+        "jira_summary": title_m.group(1).strip() if title_m else "",
+        "jira_description": _section_text(md, "Description"),
+        "jira_concern": _section_text(md, "Concern"),
+        "jira_steps": _section_text(md, "Steps to Reproduce"),
+        "jira_evidence": _section_text(md, "Evidence"),
+        "jira_recommendation": _section_text(md, "Recommendation"),
         "completed": True,
         "improved_prompt": "",
         "raw_output": "",
@@ -2325,20 +2304,17 @@ def generate_report(session: dict) -> str:
             ]
             if r.get("jira_summary"):
                 lines += [f"**Summary:** {r['jira_summary']}", ""]
-            if r.get("findings"):
-                lines += ["**Findings:**"] + [f"- {f}" for f in r["findings"]] + [""]
             if r.get("jira_description"):
                 lines += ["**Description:**", "", r["jira_description"], ""]
+            if r.get("jira_concern"):
+                lines += ["**Concern:**", "", r["jira_concern"], ""]
+            if r.get("jira_steps"):
+                lines += ["**Steps to Reproduce:**", "", r["jira_steps"], ""]
             evidence = _jira_evidence_text(r)
             if evidence:
                 lines += ["**Evidence:**", "", evidence, ""]
             if r.get("jira_recommendation"):
                 lines += ["**Recommendation:**", "", r["jira_recommendation"], ""]
-            if r.get("commands_used"):
-                lines += ["**Commands used:**"]
-                for cmd in r["commands_used"]:
-                    lines += [f"```bash\n{cmd}\n```"]
-                lines.append("")
             lines += ["---", ""]
             ticket += 1
 
@@ -2744,12 +2720,8 @@ def _show_result_summary(result):
     sev = result["severity"]
     col = _G if st == "PASS" else _Y if st == "INFO" else _RE
     print(f"\n  Result: {col}{_B}{st}{_R}  |  Severity: {sev}")
-    if result["findings"]:
-        print(f"  Findings ({len(result['findings'])}):")
-        for f in result["findings"][:3]:
-            print(f"    {_RE}•{_R} {f[:85]}")
-        if len(result["findings"]) > 3:
-            print(f"    {_D}… {len(result['findings'])-3} more — see result file{_R}")
+    if result.get("jira_summary"):
+        print(f"  {_D}{result['jira_summary'][:90]}{_R}")
 
 
 def _feedback_loop(test, result, output, session, improvements, cwd,
