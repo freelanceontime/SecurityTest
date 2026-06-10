@@ -521,11 +521,12 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
 
     # Search rootful and rootless bundle locations
     bundle_search_paths = "/var/containers/Bundle/Application /var/jb/var/containers/Bundle/Application /Applications /var/jb/Applications"
-    cmd = f"grep -ram1 '{search_bundle}' {bundle_search_paths} 2>/dev/null | grep '\\.app/' | head -10"
-    rc, out = ssh_run(device_ip, cmd, password=password, timeout=20, manual=manual)
+    cmd = f"grep -raml1 '{search_bundle}' {bundle_search_paths} 2>/dev/null | grep -a '\\.app' | head -10"
+    rc, out = ssh_run(device_ip, cmd, password=password, timeout=120, manual=manual)
 
     app_match = extract_app_bundle_path_from_output(out) if rc == 0 else None
-    if not app_match and (rc == 124 or (out.strip().startswith("Timeout running:") if out else False)):
+    timed_out = rc == 124 or (out.strip().startswith("Timeout running:") if out else False)
+    if not app_match and (timed_out or not out.strip()):
         app_match = ssh_find_app_path(device_ip, search_bundle, password, manual)
 
     if app_match:
