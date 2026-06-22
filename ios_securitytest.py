@@ -370,6 +370,7 @@ def clean_ssh_output(output: str) -> str:
         # Skip SSH warning messages and prompts
         if any(skip in line_lower for skip in [
             "warning: permanently added",
+            "you are connecting as ",
             "password for root@",
             "password:",
             "pseudo-terminal will not be allocated",
@@ -487,9 +488,16 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
         "suggestions": []
     }
 
-    # 1. Use grep to find the bundle ID (much simpler and more reliable)
+    # 1. Locate the data-container metadata. Corellium commonly stores these
+    # plists in Apple's binary format, where recursive grep only reports
+    # "binary file matches" and loses the container path.
     _info(f"Locating data container for {expected_bundle_id} ...")
-    cmd = f"grep -ra '{expected_bundle_id}' /var/mobile/Containers/Data/Application/ 2>/dev/null | head -1"
+    cmd = (
+        "find /var/mobile/Containers/Data/Application "
+        "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
+        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{expected_bundle_id}' "
+        "&& { echo \"$p\"; break; }; done"
+    )
 
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
 
@@ -508,7 +516,12 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
         _warn(f"Bundle not found: {expected_bundle_id} — trying partial match...")
         search_terms = expected_bundle_id.split('.')
         for term in reversed(search_terms[-2:]):
-            cmd = f"grep -ra '{term}' /var/mobile/Containers/Data/Application/ 2>/dev/null | grep -i 'bundle' | head -3"
+            cmd = (
+                "find /var/mobile/Containers/Data/Application "
+                "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
+                f"while read p; do strings \"$p\" 2>/dev/null | grep -qi -F '{term}' "
+                "&& echo \"$p\"; done | head -3"
+            )
             rc, out = ssh_run(device_ip, cmd, password=password, timeout=20, manual=manual)
             if rc == 0 and out.strip():
                 for line in out.strip().splitlines()[:3]:
@@ -521,7 +534,11 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
 
     # Search rootful and rootless bundle locations
     bundle_search_paths = "/var/containers/Bundle/Application /var/jb/var/containers/Bundle/Application /Applications /var/jb/Applications"
-    cmd = f"grep -raml1 '{search_bundle}' {bundle_search_paths} 2>/dev/null | grep -a '\\.app' | head -10"
+    cmd = (
+        f"find {bundle_search_paths} -maxdepth 3 -type f -name Info.plist 2>/dev/null | "
+        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{search_bundle}' "
+        "&& echo \"$p\"; done | head -10"
+    )
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=120, manual=manual)
 
     app_match = extract_app_bundle_path_from_output(out) if rc == 0 else None
@@ -674,7 +691,7 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
 
     if rc == 0 and out.strip():
         for info_path in out.strip().splitlines():
-            check_cmd = f"grep -a '{bundle_id}' '{info_path}' 2>/dev/null | head -1"
+            check_cmd = f"strings '{info_path}' 2>/dev/null | grep -F '{bundle_id}' | head -1"
             rc_check, out_check = ssh_run(device_ip, check_cmd, password=password, timeout=10, manual=manual)
             if rc_check == 0 and out_check.strip():
                 app_dir = os.path.dirname(info_path)
@@ -687,11 +704,17 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
 def ssh_find_app_data_path(device_ip: str, bundle_id: str, password: str = "alpine", manual: bool = False) -> Optional[str]:
     """
     Find the app data container path on the device.
-    Uses grep to search for bundle ID in any file (much more reliable than plutil).
+    Uses strings on container metadata because Corellium stores the plist in
+    Apple's binary format.
     """
     _info(f"Searching for data container: {bundle_id} ...")
 
-    cmd = f"grep -ra '{bundle_id}' /var/mobile/Containers/Data/Application/ 2>/dev/null | head -1"
+    cmd = (
+        "find /var/mobile/Containers/Data/Application "
+        "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
+        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{bundle_id}' "
+        "&& { echo \"$p\"; break; }; done"
+    )
 
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
 
