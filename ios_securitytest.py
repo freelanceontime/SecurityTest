@@ -51,6 +51,7 @@ import pathlib
 import plistlib
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -473,6 +474,47 @@ def ssh_check_connectivity(device_ip: str, password: str = "alpine", manual: boo
     rc, _ = ssh_run(device_ip, "echo test", password=password, timeout=5, manual=manual)
     return rc == 0
 
+def _sq(value: str) -> str:
+    """Shell-quote a value for commands executed on the iOS device."""
+    return shlex.quote(value)
+
+def remote_plist_value_cmd(plist_var: str, key: str) -> str:
+    """
+    Return a POSIX shell snippet that prints a plist key from a remote file path
+    stored in variable `plist_var`. iOS environments vary, so try plutil,
+    PlistBuddy, and finally a binary-plist strings fallback.
+    """
+    key_q = _sq(key)
+    return (
+        f"plutil -extract {key_q} raw -o - \"${plist_var}\" 2>/dev/null || "
+        f"/usr/libexec/PlistBuddy -c 'Print :{key}' \"${plist_var}\" 2>/dev/null || "
+        f"plutil -key {key_q} -show \"${plist_var}\" 2>&1 | "
+        f"sed -n 's/^[[:space:]]*{key} = [\"]\\{{0,1\\}}\\([^\";]*\\)[\"]\\{{0,1\\}};.*$/\\1/p' | head -1"
+    )
+
+def remote_plist_dump_cmd(plist_var: str) -> str:
+    """Return a shell snippet that prints a plist in a grep-friendly form."""
+    return f"plutil -key CFBundleIdentifier -show \"${plist_var}\" 2>&1 || strings \"${plist_var}\" 2>/dev/null"
+
+def ssh_get_app_identifiers(device_ip: str, app_path: str, password: str = "alpine", manual: bool = False) -> Dict[str, str]:
+    """Read CFBundleIdentifier and any preserved alternate bundle identifier."""
+    info_path = app_path.rstrip("/") + "/Info.plist"
+    cmd = (
+        f"p={_sq(info_path)}; "
+        f"{remote_plist_dump_cmd('p')} | "
+        "grep -E '^[[:space:]]*(CFBundleIdentifier|ALTBundleIdentifier) =' | "
+        "sed 's/^[[:space:]]*//; s/[\";]//g'"
+    )
+    rc, out = ssh_run(device_ip, cmd, password=password, timeout=10, manual=manual)
+    identifiers: Dict[str, str] = {}
+    if rc == 0 and out.strip():
+        for line in out.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            identifiers[key.strip()] = value.strip().strip('";')
+    return identifiers
+
 def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str = "alpine", manual: bool = False) -> Dict[str, any]:
     """
     Run diagnostic checks to locate app and verify bundle ID.
@@ -488,38 +530,43 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
         "suggestions": []
     }
 
-    # 1. Locate the data-container metadata. Corellium commonly stores these
-    # plists in Apple's binary format, where recursive grep only reports
-    # "binary file matches" and loses the container path.
+    # 1. Locate the app bundle first. An installed app may not have a data
+    # container until it has been launched at least once.
+    _info("Locating app bundle ...")
+    app_match = ssh_find_app_path(device_ip, expected_bundle_id, password, manual)
+    if app_match:
+        identifiers = ssh_get_app_identifiers(device_ip, app_match, password, manual)
+        actual_bundle_id = identifiers.get("CFBundleIdentifier") or expected_bundle_id
+        alt_bundle_id = identifiers.get("ALTBundleIdentifier")
+        result["found"] = True
+        result["actual_bundle_id"] = actual_bundle_id
+        result["app_path"] = app_match
+        if actual_bundle_id != expected_bundle_id:
+            _info(f"Device bundle id: {actual_bundle_id}")
+            if alt_bundle_id:
+                _info(f"Original bundle id: {alt_bundle_id}")
+
+    # 2. Locate the data-container metadata. These plists are often binary, so
+    # parse the plist value where possible and keep strings as a fallback.
     _info(f"Locating data container for {expected_bundle_id} ...")
-    cmd = (
-        "find /var/mobile/Containers/Data/Application "
-        "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
-        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{expected_bundle_id}' "
-        "&& { echo \"$p\"; break; }; done"
-    )
-
-    rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
-
-    if rc == 0 and out.strip():
-        match_line = out.strip().splitlines()[0]
-        if '/Containers/Data/Application/' in match_line:
-            parts = match_line.split('/Containers/Data/Application/')
-            if len(parts) > 1:
-                container_uuid = parts[1].split('/')[0].split(':')[0]
-                result["found"] = True
-                result["actual_bundle_id"] = expected_bundle_id
-                result["data_path"] = f"/var/mobile/Containers/Data/Application/{container_uuid}"
-                _ok(f"Data container: {container_uuid}")
+    data_bundle_id = result.get("actual_bundle_id") or expected_bundle_id
+    data_match = ssh_find_app_data_path(device_ip, data_bundle_id, password, manual)
+    if not data_match and data_bundle_id != expected_bundle_id:
+        data_match = ssh_find_app_data_path(device_ip, expected_bundle_id, password, manual)
+    if data_match:
+        result["found"] = True
+        result["actual_bundle_id"] = data_bundle_id
+        result["data_path"] = data_match
 
     if not result["found"]:
         _warn(f"Bundle not found: {expected_bundle_id} — trying partial match...")
         search_terms = expected_bundle_id.split('.')
         for term in reversed(search_terms[-2:]):
+            term_q = _sq(term)
             cmd = (
                 "find /var/mobile/Containers/Data/Application "
                 "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
-                f"while read p; do strings \"$p\" 2>/dev/null | grep -qi -F '{term}' "
+                f"while read p; do strings \"$p\" 2>/dev/null | grep -qi -F {term_q} "
                 "&& echo \"$p\"; done | head -3"
             )
             rc, out = ssh_run(device_ip, cmd, password=password, timeout=20, manual=manual)
@@ -528,32 +575,7 @@ def ssh_diagnostic_check(device_ip: str, expected_bundle_id: str, password: str 
                     _info(f"  Possible: {line[:90]}")
                 break
 
-    # 3. Search for app bundle using grep
-    _info("Locating app bundle ...")
-    search_bundle = result.get("actual_bundle_id") or expected_bundle_id
-
-    # Search rootful and rootless bundle locations
-    bundle_search_paths = "/var/containers/Bundle/Application /var/jb/var/containers/Bundle/Application /Applications /var/jb/Applications"
-    cmd = (
-        f"find {bundle_search_paths} -maxdepth 3 -type f -name Info.plist 2>/dev/null | "
-        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{search_bundle}' "
-        "&& echo \"$p\"; done | head -10"
-    )
-    rc, out = ssh_run(device_ip, cmd, password=password, timeout=120, manual=manual)
-
-    app_match = extract_app_bundle_path_from_output(out) if rc == 0 else None
-    timed_out = rc == 124 or (out.strip().startswith("Timeout running:") if out else False)
-    if not app_match and (timed_out or not out.strip()):
-        app_match = ssh_find_app_path(device_ip, search_bundle, password, manual)
-
-    if app_match:
-        result["app_path"] = app_match
-        _ok(f"App bundle: {result['app_path']}")
-    else:
-        if not result.get("app_path"):
-            _warn(f"App bundle not found for: {search_bundle}")
-
-    # 4. Summary
+    # 3. Summary
     _section("Device Diagnostic")
     if result["found"]:
         _ok(f"App installed  •  {result['actual_bundle_id']}")
@@ -659,7 +681,7 @@ def extract_app_bundle_path_from_output(out: str) -> Optional[str]:
         if not cleaned.startswith("/"):
             continue
 
-        match = re.search(r"(/[^:\s]*?\.app)", cleaned)
+        match = re.search(r"(/.*?\.app)", cleaned)
         if match:
             return match.group(1)
 
@@ -668,14 +690,19 @@ def extract_app_bundle_path_from_output(out: str) -> Optional[str]:
 def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", manual: bool = False) -> Optional[str]:
     """
     Find the app installation path on the device by bundle identifier.
-    Uses direct Info.plist scanning (previous grep-first approach often timed out).
+    Uses direct Info.plist key parsing with strings fallback.
     """
     _info(f"Searching for app bundle: {bundle_id} ...")
 
-    # Check standard locations — include rootless jailbreak paths (/var/jb/)
+    bundle_q = _sq(bundle_id)
+
+    # Check standard locations, including /private prefixes and rootless
+    # jailbreak paths. Different iOS shells expose either spelling.
     search_paths = [
         "/var/containers/Bundle/Application",
+        "/private/var/containers/Bundle/Application",
         "/var/mobile/Containers/Bundle/Application",
+        "/private/var/mobile/Containers/Bundle/Application",
         "/var/jb/var/containers/Bundle/Application",
         "/var/jb/var/mobile/Containers/Bundle/Application",
         "/Applications",
@@ -686,17 +713,23 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
     rc_e, out_e = ssh_run(device_ip, exist_cmd, password=password, timeout=10, manual=manual)
     active_paths = [p for p in search_paths if out_e and p in out_e] or search_paths[:3]
 
-    find_cmd = f"find {' '.join(active_paths)} -maxdepth 3 -type f -name Info.plist 2>/dev/null | head -80"
+    find_roots = " ".join(_sq(p) for p in active_paths)
+    plist_dump = remote_plist_dump_cmd("p")
+    find_cmd = (
+        f"{{ find {find_roots} -maxdepth 3 -path '*.app/Info.plist' -type f 2>/dev/null; "
+        f"find {find_roots} -maxdepth 4 -type f -name Info.plist 2>/dev/null; }} | "
+        "while IFS= read -r p; do "
+        f"dump=$({plist_dump}); "
+        f"echo \"$dump\" | grep -q -F {bundle_q} && {{ dirname \"$p\"; exit 0; }}; "
+        "done"
+    )
     rc, out = ssh_run(device_ip, find_cmd, password=password, timeout=45, manual=manual)
 
     if rc == 0 and out.strip():
-        for info_path in out.strip().splitlines():
-            check_cmd = f"strings '{info_path}' 2>/dev/null | grep -F '{bundle_id}' | head -1"
-            rc_check, out_check = ssh_run(device_ip, check_cmd, password=password, timeout=10, manual=manual)
-            if rc_check == 0 and out_check.strip():
-                app_dir = os.path.dirname(info_path)
-                _ok(f"App bundle: {app_dir}")
-                return app_dir
+        app_dir = extract_app_bundle_path_from_output(out)
+        if app_dir:
+            _ok(f"App bundle: {app_dir}")
+            return app_dir
 
     _warn(f"App bundle not found for {bundle_id}")
     return None
@@ -704,29 +737,28 @@ def ssh_find_app_path(device_ip: str, bundle_id: str, password: str = "alpine", 
 def ssh_find_app_data_path(device_ip: str, bundle_id: str, password: str = "alpine", manual: bool = False) -> Optional[str]:
     """
     Find the app data container path on the device.
-    Uses strings on container metadata because Corellium stores the plist in
-    Apple's binary format.
+    Parses the container metadata plist where possible and falls back to strings.
     """
     _info(f"Searching for data container: {bundle_id} ...")
 
+    bundle_q = _sq(bundle_id)
+    read_metadata_id = remote_plist_value_cmd("p", "MCMMetadataIdentifier")
     cmd = (
-        "find /var/mobile/Containers/Data/Application "
+        "find /var/mobile/Containers/Data/Application /private/var/mobile/Containers/Data/Application "
         "-name .com.apple.mobile_container_manager.metadata.plist -type f 2>/dev/null | "
-        f"while read p; do strings \"$p\" 2>/dev/null | grep -q -F '{bundle_id}' "
-        "&& { echo \"$p\"; break; }; done"
+        f"while IFS= read -r p; do bid=$({read_metadata_id}); "
+        f"[ \"$bid\" = {bundle_q} ] && {{ dirname \"$p\"; exit 0; }}; "
+        f"strings \"$p\" 2>/dev/null | grep -q -F {bundle_q} && {{ dirname \"$p\"; exit 0; }}; "
+        "done"
     )
 
     rc, out = ssh_run(device_ip, cmd, password=password, timeout=30, manual=manual)
 
     if rc == 0 and out.strip():
-        match_line = out.strip().splitlines()[0]
-        if '/Containers/Data/Application/' in match_line:
-            parts = match_line.split('/Containers/Data/Application/')
-            if len(parts) > 1:
-                container_uuid = parts[1].split('/')[0].split(':')[0]
-                data_path = f"/var/mobile/Containers/Data/Application/{container_uuid}"
-                _ok(f"Data container: {data_path}")
-                return data_path
+        data_path = out.strip().splitlines()[0]
+        if "/Containers/Data/Application/" in data_path:
+            _ok(f"Data container: {data_path}")
+            return data_path
 
     _warn("Data container not found — app may not have been launched yet")
     return None
@@ -10579,12 +10611,13 @@ def main():
                 )
                 # Update context with discovered paths if found
                 if diagnostic_result["found"]:
+                    if diagnostic_result["actual_bundle_id"]:
+                        ctx["discovered_bundle_id"] = diagnostic_result["actual_bundle_id"]
+                        ctx["bundle_id"] = diagnostic_result["actual_bundle_id"]
                     if diagnostic_result["app_path"]:
                         ctx["discovered_app_path"] = diagnostic_result["app_path"]
                     if diagnostic_result["data_path"]:
                         ctx["discovered_data_path"] = diagnostic_result["data_path"]
-                    if diagnostic_result["actual_bundle_id"]:
-                        ctx["discovered_bundle_id"] = diagnostic_result["actual_bundle_id"]
 
             print()
 
