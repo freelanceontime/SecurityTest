@@ -6310,31 +6310,83 @@ def check_network_security_config(base):
 
     fail_issues = []  # Critical security issues
     warn_issues = []  # Recommendations
+    info_issues = []  # Evidence / context, not warnings
+
+    def _network_security_config_attr(element):
+        if element is None:
+            return None
+        return (
+            element.get('{http://schemas.android.com/apk/res/android}networkSecurityConfig')
+            or element.get('android:networkSecurityConfig')
+            or element.get('networkSecurityConfig')
+        )
+
+    def _resolve_network_security_config_path(config_value):
+        if not config_value:
+            return None
+        config_value = config_value.strip()
+        if config_value.startswith('@xml/'):
+            return os.path.join(base, 'res', 'xml', config_value.split('/', 1)[1] + '.xml')
+        if config_value.startswith('@'):
+            # Handles already-flattened or unusual apktool output such as
+            # @7f120001 by falling back to the conventional resource name.
+            return os.path.join(base, 'res', 'xml', 'network_security_config.xml')
+        if config_value.endswith('.xml'):
+            return os.path.join(base, config_value.lstrip('/'))
+        return None
 
     config_ref = None
+    config_ref_location = None
     try:
         root_manifest = ET.parse(manifest).getroot()
         app = root_manifest.find('application')
+        config_ref = _network_security_config_attr(root_manifest)
+        if config_ref:
+            config_ref_location = '<manifest>'
         if app is not None:
-            config_ref = app.get('{http://schemas.android.com/apk/res/android}networkSecurityConfig')
-            if config_ref and config_ref.startswith('@xml/'):
-                cfg_path = os.path.join(base, 'res', 'xml', config_ref.split('/', 1)[1] + '.xml')
+            app_config_ref = _network_security_config_attr(app)
+            if app_config_ref:
+                config_ref = app_config_ref
+                config_ref_location = '<application>'
+        resolved_cfg_path = _resolve_network_security_config_path(config_ref)
+        if resolved_cfg_path:
+            cfg_path = resolved_cfg_path
     except Exception:
         root_manifest = None
+
+    if not config_ref:
+        # Regex fallback for manifests that are partially decoded, preserve
+        # namespace prefixes oddly, or cannot be parsed by ElementTree.
+        m_cfg = re.search(
+            r'\b(?:android:)?networkSecurityConfig\s*=\s*"([^"]+)"',
+            m_txt,
+            re.IGNORECASE
+        )
+        if m_cfg:
+            config_ref = m_cfg.group(1)
+            config_ref_location = 'manifest text'
+            resolved_cfg_path = _resolve_network_security_config_path(config_ref)
+            if resolved_cfg_path:
+                cfg_path = resolved_cfg_path
 
     # 1) Check usesCleartextTraffic on <application>.
     m = re.search(
         r'<application\b[^>]*\bandroid:usesCleartextTraffic="(true|false)"',
         m_txt
     )
+    missing_cleartext_attr = False
     if not m:
-        warn_issues.append("Missing explicit android:usesCleartextTraffic; platform defaults depend on target SDK and network security config")
+        missing_cleartext_attr = True
     elif m.group(1).lower() != 'false':
         fail_issues.append(f"android:usesCleartextTraffic is set to {m.group(1)}")
 
     # 2) Check networkSecurityConfig reference - RECOMMENDATION
     if not config_ref:
         warn_issues.append("Missing android:networkSecurityConfig")
+    else:
+        info_issues.append(
+            f"android:networkSecurityConfig present at {config_ref_location or 'manifest'}: {html.escape(config_ref)}"
+        )
 
     # 3) Check config file existence - RECOMMENDATION
     if not os.path.exists(cfg_path):
@@ -6349,6 +6401,14 @@ def check_network_security_config(base):
             root = None
 
         if root is not None:
+            base_config = root.find('base-config')
+            base_cleartext_disabled = (
+                base_config is not None
+                and (base_config.get('cleartextTrafficPermitted') or '').lower() == 'false'
+            )
+            if base_cleartext_disabled:
+                info_issues.append("base-config sets cleartextTrafficPermitted=false")
+
             # 4a) debug-overrides - CRITICAL
             dob = root.find('debug-overrides')
             if dob is not None:
@@ -6374,21 +6434,28 @@ def check_network_security_config(base):
                             f"Domain `{domain}` missing <pin-set> (no certificate pinning)"
                         )
 
+            if missing_cleartext_attr and not base_cleartext_disabled:
+                warn_issues.append("Missing explicit android:usesCleartextTraffic; platform defaults depend on target SDK and network security config")
+
+    if missing_cleartext_attr and not os.path.exists(cfg_path):
+        warn_issues.append("Missing explicit android:usesCleartextTraffic; platform defaults depend on target SDK and network security config")
+
     mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-NETWORK/MASTG-TEST-0020/' target='_blank'>MASTG-TEST-0020: Testing the TLS Settings</a></div>"
 
     # 5) Final result
     if fail_issues:
         # Critical issues found - return FAIL
-        all_issues = fail_issues + warn_issues
+        all_issues = fail_issues + warn_issues + info_issues
         all_issues.append(mastg_ref)
         return 'FAIL', "<br>\n".join(all_issues)
     elif warn_issues:
         # Only recommendations - return WARN
-        warn_issues.append(mastg_ref)
-        return 'WARN', "<br>\n".join(warn_issues)
+        all_issues = warn_issues + info_issues + [mastg_ref]
+        return 'WARN', "<br>\n".join(all_issues)
     else:
         # Everything good
-        return 'PASS', f"None{mastg_ref}"
+        output = "<br>\n".join(info_issues) if info_issues else "None"
+        return 'PASS', f"{output}{mastg_ref}"
     
 def check_http_uris(base):
     """
