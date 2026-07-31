@@ -9602,6 +9602,10 @@ def check_manifest_storage_flags(manifest, base):
     has_fragile = _parse_manifest_bool(fragile_raw)
 
     storage_permissions = set()
+    legacy_storage_permissions = {
+        'android.permission.READ_EXTERNAL_STORAGE',
+        'android.permission.WRITE_EXTERNAL_STORAGE',
+    }
     for perm in root.findall('.//uses-permission'):
         name = perm.get(ns + 'name', '')
         if name in (
@@ -9667,6 +9671,26 @@ def check_manifest_storage_flags(manifest, base):
     request_display = html.escape(str(request_legacy_raw)) if request_legacy_raw is not None else "not set"
     fragile_display = html.escape(str(fragile_raw)) if fragile_raw is not None else "not set"
     target_display = str(target_sdk) if target_sdk is not None else "unknown"
+    declared_legacy_permissions = storage_permissions & legacy_storage_permissions
+    legacy_permission_fail_reasons = []
+
+    if target_sdk is not None:
+        if (
+            'android.permission.READ_EXTERNAL_STORAGE' in declared_legacy_permissions
+            and target_sdk <= 32
+        ):
+            legacy_permission_fail_reasons.append(
+                "READ_EXTERNAL_STORAGE with targetSdkVersion <= 32 can grant broad read access to shared external storage on Android 12 and below."
+            )
+        if 'android.permission.WRITE_EXTERNAL_STORAGE' in declared_legacy_permissions:
+            if target_sdk <= 28:
+                legacy_permission_fail_reasons.append(
+                    "WRITE_EXTERNAL_STORAGE with targetSdkVersion <= 28 can grant broad write access to shared external storage on Android 9 and below."
+                )
+            elif target_sdk == 29 and request_legacy is True:
+                legacy_permission_fail_reasons.append(
+                    "WRITE_EXTERNAL_STORAGE with targetSdkVersion 29 and requestLegacyExternalStorage=true preserves legacy broad external-storage behavior on Android 10."
+                )
 
     lines.append("<div><strong>Manifest Storage Summary</strong></div>")
     lines.append("<div style='margin-left:14px'>")
@@ -9701,16 +9725,30 @@ def check_manifest_storage_flags(manifest, base):
         lines.append("<div>hasFragileUserData is not declared.</div>")
 
     if storage_permissions:
-        status = 'WARN'
+        if legacy_permission_fail_reasons:
+            status = 'FAIL'
+        elif status != 'FAIL':
+            status = 'WARN'
         issue_count += 1
         lines.append("<div style='margin-top:8px'><strong>Storage permissions declared:</strong></div>")
         for perm in sorted(storage_permissions):
             lines.append(f"<div style='margin-left:14px'>{html.escape(perm)}</div>")
+        if legacy_permission_fail_reasons:
+            lines.append(
+                "<div class='warning-box'><strong>FAIL:</strong> Legacy external storage permissions increase the app's attack range on this target SDK.</div>"
+            )
+            for reason in legacy_permission_fail_reasons:
+                lines.append(f"<div style='margin-left:14px'>{html.escape(reason)}</div>")
+        elif declared_legacy_permissions and target_sdk is None:
+            lines.append(
+                "<div class='warning-box'><strong>WARNING:</strong> Legacy external storage permissions are declared, but targetSdkVersion could not be determined.</div>"
+            )
     else:
         lines.append("<div style='margin-top:8px'>No broad external storage permissions declared.</div>")
 
     if legacy_hits:
-        status = 'WARN'
+        if status != 'FAIL':
+            status = 'WARN'
         issue_count += 1
         lines.append(f"<div style='margin-top:10px'><strong>Legacy external storage patterns in app code:</strong> {len(legacy_hits)} file(s)</div>")
         for rel in sorted(legacy_hits)[:10]:
