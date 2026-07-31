@@ -5391,7 +5391,7 @@ def check_file_provider(base, manifest=None):
             mastg_ref_html=mastg_ref,
         )
 
-    unique_files = len({f.title for f in findings})
+    unique_files = len({f.title for _, f in findings})
     return TestResult(
         name="FileProvider Paths",
         status="FAIL" if any(status == 'FAIL' for status, _ in findings) else "WARN",
@@ -17843,6 +17843,10 @@ def render_test_result(tr: TestResult) -> str:
         )
 
     for fb in tr.findings:
+        if isinstance(fb, tuple) and fb and isinstance(fb[-1], FindingBlock):
+            fb = fb[-1]
+        if not isinstance(fb, FindingBlock):
+            fb = FindingBlock(title=str(fb), code_language="text")
         heading = html.escape(fb.title)
         if fb.link:
             heading = f'<a href="{html.escape(fb.link)}">{heading}</a>'
