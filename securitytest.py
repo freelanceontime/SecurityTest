@@ -4243,6 +4243,7 @@ def check_kotlin_assert(base):
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/_coroutine/',  # Kotlin coroutine runtime/debug support
         '/io/reactivex/', '/rx/', '/dagger/',
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
@@ -4259,7 +4260,7 @@ def check_kotlin_assert(base):
         """Check if path is library code"""
         if INCLUDE_LIBS:
             return False
-        normalized = '/' + path.replace('\\', '/')
+        normalized = ('/' + path.replace('\\', '/')).lower()
         return any(lib in normalized for lib in lib_paths)
 
     patterns = [
@@ -6872,6 +6873,7 @@ def check_notification_sensitive_data(manifest, base):
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/_coroutine/',  # Kotlin coroutine runtime/debug support
         '/io/reactivex/', '/rx/', '/dagger/',
         '/net/sqlcipher/', '/org/sqlite/',
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
@@ -6882,7 +6884,7 @@ def check_notification_sensitive_data(manifest, base):
     def is_library_path(path):
         if INCLUDE_LIBS:
             return False
-        normalized = '/' + path.replace('\\', '/')
+        normalized = ('/' + path.replace('\\', '/')).lower()
         return any(lib in normalized for lib in lib_paths)
 
     # Search for notification API usage in smali files
@@ -8572,6 +8574,7 @@ def check_kotlin_metadata(base):
         '/com/google/android/gms/', '/com/google/firebase/', '/com/google/android/play/',
         '/okhttp3/', '/retrofit2/', '/com/squareup/',
         '/com/facebook/', '/kotlin/', '/kotlinx/',
+        '/_coroutine/',  # Kotlin coroutine runtime/debug support
         '/io/reactivex/', '/rx/', '/dagger/',
         '/net/sqlcipher/', '/org/sqlite/',  # SQLCipher and SQLite JDBC
         '/org/bouncycastle/', '/com/google/protobuf/', '/io/grpc/',
@@ -8588,7 +8591,7 @@ def check_kotlin_metadata(base):
         """Check if path is library code"""
         if INCLUDE_LIBS:
             return False
-        normalized = '/' + path.replace('\\', '/')
+        normalized = ('/' + path.replace('\\', '/')).lower()
         return any(lib in normalized for lib in lib_paths)
 
     pattern = r"Lkotlin/Metadata;"
@@ -9564,6 +9567,19 @@ def _parse_manifest_bool(raw_value):
         return False
     return None
 
+def _parse_apktool_sdk_value(base, key):
+    """Read sdkInfo values from apktool.yml when apktool strips <uses-sdk>."""
+    apktool_yml = os.path.join(base, 'apktool.yml')
+    if not os.path.exists(apktool_yml):
+        return None
+    try:
+        with open(apktool_yml, errors='ignore') as f:
+            content = f.read()
+    except Exception:
+        return None
+    match = re.search(rf'^\s*{re.escape(key)}:\s*[\'"]?(\d+)[\'"]?\s*$', content, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
 def check_manifest_storage_flags(manifest, base):
     """
     Check manifest storage/data-retention flags:
@@ -9594,6 +9610,8 @@ def check_manifest_storage_flags(manifest, base):
     uses_sdk = root.find('uses-sdk')
     target_sdk_raw = uses_sdk.get(ns + 'targetSdkVersion') if uses_sdk is not None else None
     target_sdk = int(target_sdk_raw) if (target_sdk_raw and str(target_sdk_raw).isdigit()) else None
+    if target_sdk is None:
+        target_sdk = _parse_apktool_sdk_value(base, 'targetSdkVersion')
 
     request_legacy_raw = app.get(ns + 'requestLegacyExternalStorage')
     fragile_raw = app.get(ns + 'hasFragileUserData')
