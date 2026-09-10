@@ -3493,7 +3493,7 @@ def check_masvs_coverage_matrix(static_count, dynamic_count):
     but it does not implement every MASVS/MASTG Android test as a standalone check.
     """
     rows = [
-        ("MASVS-STORAGE", "Automated + dynamic", "Local storage, SharedPreferences, DataStore, Room, external storage, storage analysis, Crashlytics artifact review, file permission flags, S3 bucket exposure"),
+        ("MASVS-STORAGE", "Automated + dynamic", "Local storage, SharedPreferences, DataStore, Room, external storage, storage analysis, Crashlytics artifact review, file permission flags"),
         ("MASVS-CRYPTO", "Partial automated", "Weak crypto, hardcoded keys, signature schemes, key size validation; manual design review still required"),
         ("MASVS-AUTH", "Partial automated", "Deep links and biometric API checks; server-side authz requires manual/API testing"),
         ("MASVS-NETWORK", "Automated + dynamic", "TLS config, HTTP URLs, pinning, WebView SSL, GMS provider, dynamic TLS checks"),
@@ -18657,7 +18657,6 @@ def main():
                 "Room Database Encryption",
                 "Crashlytics Sensitive Data Storage",
                 "Insecure File Permissions",
-                "S3 Bucket Security",
             ]
         },
         "MASVS-CRYPTO": {
