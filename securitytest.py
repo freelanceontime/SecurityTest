@@ -40,7 +40,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "5.1.3"
+__version__ = "5.1.4"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
@@ -6505,12 +6505,15 @@ def check_http_uris(base):
     ]
     false_positive_re = re.compile('|'.join(false_positive_patterns), re.IGNORECASE)
 
-    ext_lang = {'.smali': 'smali', '.java': 'java', '.xml': 'xml'}
+    ext_lang = {'.smali': 'smali', '.java': 'java', '.xml': 'xml', '.js': 'javascript', '.html': 'html'}
 
     files_to_scan = []
     for root, _, files in os.walk(base):
         for fn in files:
-            if fn.endswith(('.smali', '.java', '.xml')):
+            # .js/.html/.bundle cover React Native (assets/index.android.bundle)
+            # and Cordova/Ionic (assets/www/*.js|*.html) app logic, which otherwise
+            # never gets scanned since it isn't smali/java/xml.
+            if fn.endswith(('.smali', '.java', '.xml', '.js', '.html', '.bundle')):
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, base)
                 if (
@@ -9917,11 +9920,36 @@ def check_hardcoded_keys(base):
         'Low': []        # <0.4 (filtered out unless has sensitive keyword)
     }
 
+    # Known vendor secret formats made of only letters/digits/underscores (or
+    # dot-separated) look exactly like plain identifiers or package names, so
+    # without this carve-out they get wrongly discarded by the generic
+    # "looks like an identifier" / "looks like a package name" filters below,
+    # e.g. a real AWS key such as AKIAIOSFODNN7EXAMPLE never surviving.
+    _high_confidence_secret_patterns = [
+        r'^AKIA[0-9A-Z]{16}$',
+        r'^AIza[0-9A-Za-z\-_]{35}$',
+        r'^ya29\.[0-9A-Za-z\-_.]+$',
+        r'^[0-9]+-[0-9A-Za-z_]+\.apps\.googleusercontent\.com$',
+        r'^sk_(?:live|test)_[0-9a-zA-Z]{10,}$',
+        r'^pk_live_[0-9a-zA-Z]{10,}$',
+        r'^rk_live_[0-9a-zA-Z]{10,}$',
+        r'^ghp_[0-9a-zA-Z]{36}$',
+        r'^gho_[0-9a-zA-Z]{36}$',
+        r'^github_pat_[0-9a-zA-Z_]{82}$',
+        r'^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$',
+    ]
+
+    def _is_high_confidence_secret(v):
+        return any(re.match(p, v) for p in _high_confidence_secret_patterns)
+
     # First, collect all files to scan
     files_to_scan = []
     for root, _, files in os.walk(base):
         for f in files:
-            if not f.endswith(('.smali', '.xml', '.java', '.json', '.properties')):
+            # .js/.html/.bundle cover React Native (assets/index.android.bundle)
+            # and Cordova/Ionic (assets/www/*.js|*.html) app logic, which otherwise
+            # never gets scanned since it isn't smali/java.
+            if not f.endswith(('.smali', '.xml', '.java', '.json', '.properties', '.js', '.html', '.bundle')):
                 continue
 
             full_path = os.path.join(root, f)
@@ -9994,7 +10022,8 @@ def check_hardcoded_keys(base):
                                 continue
 
                         # Skip if it looks like XML tag/attribute names (underscores and alphanumeric only)
-                        if re.match(r'^[a-z_][a-z0-9_]*[0-9]*$', value, re.I):  # Simple identifiers with optional trailing numbers
+                        # unless it's actually a known vendor secret format (AKIA, ghp_, sk_live_, etc.)
+                        if re.match(r'^[a-z_][a-z0-9_]*[0-9]*$', value, re.I) and not _is_high_confidence_secret(value):  # Simple identifiers with optional trailing numbers
                                 continue
 
                         # Skip common boolean strings
@@ -17837,7 +17866,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.1.3 - Automated Mobile App Security Test Script
+    AppSec 5.1.4 - Automated Mobile App Security Test Script
 
     Options:
       -f, --file          APK file to decompile into smali
