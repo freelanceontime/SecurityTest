@@ -40,7 +40,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "5.1.5"
+__version__ = "5.1.6"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
@@ -3559,7 +3559,7 @@ def check_masvs_coverage_matrix(static_count, dynamic_count):
         ("MASVS-NETWORK", "Automated + dynamic", "TLS config, HTTP URLs, pinning, WebView SSL, GMS provider, dynamic TLS checks"),
         ("MASVS-PLATFORM", "Automated + dynamic", "IPC/exported components, PendingIntent, WebView, keyboard caching, clipboard, screenshots, notifications"),
         ("MASVS-CODE", "Automated + manual follow-up", "Dependency hygiene, insecure APIs, package context, logging, framework signals"),
-        ("MASVS-RESILIENCE", "Partial automated", "Debuggable, symbols, anti-debug, root detection, memtag; anti-tamper/obfuscation depth needs manual review"),
+        ("MASVS-RESILIENCE", "Partial automated", "Debuggable, symbols, anti-debug, root detection, RE-tool/emulator detection, memtag; runtime-integrity and obfuscation depth still need manual review"),
         ("MASVS-PRIVACY", "Automated + manual follow-up", "Dangerous permissions, local privacy artifacts, logging/telemetry indicators; policy/data-flow inventory still required"),
     ]
     table_rows = []
@@ -17323,6 +17323,157 @@ def check_anti_debugging(base):
     return 'PASS', "<br>\n".join(lines)
 
 
+def check_re_tool_detection(base):
+    """
+    MASTG-TEST-0048: Testing Reverse Engineering Tools Detection
+
+    Detect app-side checks for hooking/instrumentation frameworks
+    (Frida, Xposed, LSPosed, Cydia Substrate). Distinct from root
+    detection (check_root_detection) and anti-debugging
+    (check_anti_debugging) - a device can be unrooted and undebugged
+    while still running a hooking framework via Frida's own process
+    injection or Zygisk-based Xposed modules.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0048/
+    """
+    re_tool_patterns = [
+        (r'frida-server', 'frida-server process/file reference'),
+        (r'lib(?:frida-gadget|frida-agent)\.so', 'Frida Gadget/Agent native library reference'),
+        (r're\.frida\.server', 'Frida server package reference'),
+        (r'FridaDetector', 'FridaDetector class reference'),
+        (r'de/robv/android/xposed/XposedBridge', 'Xposed XposedBridge reference (smali)'),
+        (r'de\.robv\.android\.xposed\.XposedBridge', 'Xposed XposedBridge reference (Java)'),
+        (r'de/robv/android/xposed/XposedHelpers', 'Xposed XposedHelpers reference (smali)'),
+        (r'de\.robv\.android\.xposed\.installer', 'Xposed Installer package reference'),
+        (r'org/lsposed/lspd', 'LSPosed framework reference (smali)'),
+        (r'org\.lsposed\.lspd', 'LSPosed framework reference (Java)'),
+        (r'com\.saurik\.substrate', 'Cydia Substrate reference'),
+    ]
+
+    detections = defaultdict(list)
+
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel))
+
+    compiled = [(re.compile(pat), desc) for pat, desc in re_tool_patterns]
+
+    with ScanProgress("Reverse Engineering Tool Detection", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full, errors='ignore').read()
+            except Exception:
+                continue
+
+            for rx, desc in compiled:
+                if rx.search(content):
+                    detections[desc].append(rel)
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0048/' target='_blank'>MASTG-TEST-0048: Testing Reverse Engineering Tools Detection</a></div>"
+
+    if not detections:
+        return 'WARN', (
+            "<div>No reverse-engineering/hooking-framework detection mechanisms found (Frida, Xposed, LSPosed, Substrate)</div>"
+            "<div>Acceptable for most apps. Only implement for sensitive apps requiring anti-tamper controls.</div>"
+            f"{mastg_ref}"
+        )
+
+    lines = [f"<div>{len(detections)} RE-tool detection mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
+
+    for mechanism, files in sorted(detections.items()):
+        lines.append(f"<li><strong>{mechanism}</strong> in {len(files)} file(s)</li>")
+        for rel in sorted(files)[:3]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f"  <a href='file://{html.escape(full)}'>{html.escape(rel)}</a>")
+        if len(files) > 3:
+            lines.append(f"  ... and {len(files) - 3} more")
+
+    lines.append("</ul>")
+    lines.append(mastg_ref)
+    return 'PASS', "<br>\n".join(lines)
+
+
+def check_emulator_detection(base):
+    """
+    MASTG-TEST-0049: Testing Emulator Detection
+
+    Detect app-side checks for common Android emulator/AVD indicators
+    (build props, QEMU artifacts, well-known default identifiers).
+    Only high-confidence, low-false-positive markers are used - generic
+    terms like a bare "generic" or "sdk" string are deliberately
+    excluded since they occur too often in unrelated contexts.
+
+    Reference: https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0049/
+    """
+    emulator_patterns = [
+        (r'[Gg]enymotion', 'Genymotion manufacturer/build check'),
+        (r'goldfish', 'goldfish hardware check (AVD)'),
+        (r'\branchu\b', 'ranchu hardware check (modern AVD)'),
+        (r'vbox86p', 'VirtualBox x86 product check'),
+        (r'sdk_gphone', 'sdk_gphone product check (modern AVD)'),
+        (r'google_sdk', 'google_sdk model/product check'),
+        (r'/dev/qemu_pipe', 'QEMU pipe device file check'),
+        (r'/dev/socket/qemud', 'QEMU socket check'),
+        (r'ro\.kernel\.qemu', 'ro.kernel.qemu system property check'),
+        (r'ro\.hardware\.virtual_device', 'ro.hardware.virtual_device system property check'),
+        (r'9774d56d682e549c', 'known default emulator ANDROID_ID value check'),
+    ]
+
+    detections = defaultdict(list)
+
+    files_to_scan = []
+    for root, _, files in os.walk(base):
+        for fn in files:
+            if not fn.endswith(('.smali', '.xml', '.java')):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, base)
+            files_to_scan.append((full, rel))
+
+    compiled = [(re.compile(pat), desc) for pat, desc in emulator_patterns]
+
+    with ScanProgress("Emulator Detection", len(files_to_scan)) as scan_progress:
+        for full, rel in files_to_scan:
+            scan_progress.update()
+            try:
+                content = open(full, errors='ignore').read()
+            except Exception:
+                continue
+
+            for rx, desc in compiled:
+                if rx.search(content):
+                    detections[desc].append(rel)
+
+    mastg_ref = "<br><div><strong>Reference:</strong> <a href='https://mas.owasp.org/MASTG/tests/android/MASVS-RESILIENCE/MASTG-TEST-0049/' target='_blank'>MASTG-TEST-0049: Testing Emulator Detection</a></div>"
+
+    if not detections:
+        return 'WARN', (
+            "<div>No emulator detection mechanisms found</div>"
+            "<div>Acceptable for most apps. Only implement for sensitive apps (banking, anti-fraud) requiring anti-tamper controls.</div>"
+            f"{mastg_ref}"
+        )
+
+    lines = [f"<div>{len(detections)} emulator detection mechanism(s) detected:</div>", "<ul style='margin-left:20px;'>"]
+
+    for mechanism, files in sorted(detections.items()):
+        lines.append(f"<li><strong>{mechanism}</strong> in {len(files)} file(s)</li>")
+        for rel in sorted(files)[:3]:
+            full = os.path.abspath(os.path.join(base, rel))
+            lines.append(f"  <a href='file://{html.escape(full)}'>{html.escape(rel)}</a>")
+        if len(files) > 3:
+            lines.append(f"  ... and {len(files) - 3} more")
+
+    lines.append("</ul>")
+    lines.append(mastg_ref)
+    return 'PASS', "<br>\n".join(lines)
+
+
 def check_gms_security_provider(base):
     """
     MASTG-TEST-0023/0295: Testing the Security Provider
@@ -17926,7 +18077,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.1.5 - Automated Mobile App Security Test Script
+    AppSec 5.1.6 - Automated Mobile App Security Test Script
 
     Options:
       -f, --file          APK file to decompile into smali
@@ -18100,6 +18251,7 @@ HTML_SPECIAL_CHECKS = {
     "Recent Screenshot Protection", "Dangerous Permissions",
     "DataStore Encryption",     "Room Database Encryption",
     "Anti-Debugging",
+    "Reverse Engineering Tool Detection", "Emulator Detection",
     "GMS Security Provider",
     "WebView File/Content Access", "Android App Link Verification",
     "Manifest Attack Surface",  "Framework Security Signals",
@@ -18837,6 +18989,8 @@ def main():
                 "StrictMode APIs",
                 "Root Detection",
                 "Anti-Debugging",
+                "Reverse Engineering Tool Detection",
+                "Emulator Detection",
             ]
         },
         "MASVS-PRIVACY": {
@@ -18976,6 +19130,8 @@ def main():
         make_check("DataStore Encryption",    lambda: check_datastore_encryption(base)),
         make_check("Room Database Encryption", lambda: check_room_encryption(base)),
         make_check("Anti-Debugging",          lambda: check_anti_debugging(base)),
+        make_check("Reverse Engineering Tool Detection", lambda: check_re_tool_detection(base)),
+        make_check("Emulator Detection",      lambda: check_emulator_detection(base)),
         make_check("GMS Security Provider",   lambda: check_gms_security_provider(base)),
         make_check("Android App Link Verification", lambda: check_app_link_verification(manifest)),
         make_check("Manifest Attack Surface", lambda: check_manifest_attack_surface(manifest)),
