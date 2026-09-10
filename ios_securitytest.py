@@ -150,7 +150,7 @@ RUN_INTRO = []
 Status = Literal["PASS", "FAIL", "WARN", "INFO"]
 
 # Version tracking for auto-update
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/ios_securitytest.py"
 
 # ---------------------------
@@ -1361,10 +1361,42 @@ JAILBREAK_ARTIFACTS = [
     "/private/var/lib/apt/",
     "/private/var/stash",
     "/var/jb",
-    "substrate",
-    "SubstrateLoader",
+]
+
+# Reverse-engineering / hooking tool indicators (MASTG-TEST-0091) - kept
+# separate from JAILBREAK_ARTIFACTS above (MASTG-TEST-0083): a jailbroken
+# device and an RE-tooling presence check are two distinct MASTG tests, even
+# though "frida"/"objection"/"substrate" used to be lumped into the jailbreak
+# list here.
+RE_TOOL_INDICATORS = [
     "frida",
+    "FridaGadget",
+    "frida-server",
+    "re.frida.server",
     "objection",
+    "cynject",
+    "libcycript",
+    "cycript",
+    "SubstrateLoader",
+    "CydiaSubstrate",
+    "SSLKillSwitch",
+    "SSLKillSwitch2",
+    "libSubstitute",
+]
+
+# Simulator/emulator indicators (MASTG-TEST-0092) - environment artifacts
+# and SDK strings that only appear when a binary was built for/run in the
+# iOS Simulator rather than a physical device.
+SIMULATOR_INDICATORS = [
+    "SIMULATOR_DEVICE_NAME",
+    "SIMULATOR_UDID",
+    "SIMULATOR_HOST_HOME",
+    "SIMULATOR_ROOT",
+    "CoreSimulator",
+    "iPhoneSimulator.platform",
+    "iPhoneSimulator",
+    "TARGET_OS_SIMULATOR",
+    "x86_64-apple-ios-simulator",
 ]
 
 INSECURE_API_PATTERNS = [
@@ -8381,6 +8413,44 @@ def check_strings_patterns(app_dir: str, main_bin: str, base: str) -> List[TestR
                 ["No obvious jailbreak artifact strings matched the current strings triage"],
         findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:30], files=[rel(t, base)]) for t, h in jb_hits[:8]] if jb_hits else [],
         mastg_ref_html=mastg_ref(["MASTG-TEST-0083"], ["Testing for Jailbreak Detection"])
+    ))
+
+    # Reverse-engineering / hooking tool detection indicators (info)
+    re_tool_hits = []
+    for t in bins:
+        raw_hits = strings_grep_lines(get_lines(t), [re.escape(x) for x in RE_TOOL_INDICATORS], max_hits=60)
+        if not raw_hits:
+            continue
+        filtered = [h for h in raw_hits if len(h) <= 160 and not ("<" in h and ">" in h)]
+        if filtered:
+            re_tool_hits.append((t, filtered))
+    results.append(TestResult(
+        id="RESILIENCE-RETOOLDETECT",
+        name="Reverse Engineering Tool Detection Indicators (strings triage)",
+        status="INFO" if re_tool_hits else "PASS",
+        summary=[f"Indicators in {len(re_tool_hits)} file(s) (presence indicates checks; validate robustness)"] if re_tool_hits else
+                ["No obvious RE-tool/hooking-framework detection strings matched the current strings triage"],
+        findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:30], files=[rel(t, base)]) for t, h in re_tool_hits[:8]] if re_tool_hits else [],
+        mastg_ref_html=mastg_ref(["MASTG-TEST-0091"], ["Testing Reverse Engineering Tools Detection"])
+    ))
+
+    # Simulator/emulator detection indicators (info)
+    sim_hits = []
+    for t in bins:
+        raw_hits = strings_grep_lines(get_lines(t), [re.escape(x) for x in SIMULATOR_INDICATORS], max_hits=60)
+        if not raw_hits:
+            continue
+        filtered = [h for h in raw_hits if len(h) <= 160 and not ("<" in h and ">" in h)]
+        if filtered:
+            sim_hits.append((t, filtered))
+    results.append(TestResult(
+        id="RESILIENCE-SIMDETECT",
+        name="Simulator/Emulator Detection Indicators (strings triage)",
+        status="INFO" if sim_hits else "PASS",
+        summary=[f"Indicators in {len(sim_hits)} file(s) (presence indicates checks; validate robustness)"] if sim_hits else
+                ["No obvious simulator-detection strings matched the current strings triage"],
+        findings=[Finding(title=rel(t, base), evidence=sorted(set(h))[:30], files=[rel(t, base)]) for t, h in sim_hits[:8]] if sim_hits else [],
+        mastg_ref_html=mastg_ref(["MASTG-TEST-0092"], ["Testing Emulator Detection"])
     ))
 
     # Insecure API indicators
