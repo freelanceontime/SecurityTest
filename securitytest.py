@@ -40,7 +40,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "5.1.4"
+__version__ = "5.1.5"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
@@ -3204,7 +3204,13 @@ def check_dependency_vulnerability_scan(base):
             + "</div>"
         )
 
-    # Native .so evidence path: extract version strings and query NVD by keyword.
+    # Native .so evidence path: extract version strings and query NVD.
+    # Two query strategies, merged and de-duplicated by CVE ID per candidate:
+    #  - CPE-based (structured, exact version match via NVD's own matching -
+    #    doesn't depend on the version number being restated in prose)
+    #  - keyword-based (fallback/supplement for libraries with no CPE
+    #    template; filtered below since free-text descriptions don't always
+    #    restate the exact version, so this path alone under-detects)
     nvd_vuln_lib_count = 0
     total_nvd_cves = 0
     nvd_cache = {}
@@ -3213,51 +3219,105 @@ def check_dependency_vulnerability_scan(base):
     if len(native_list) > 80:
         native_list = native_list[:80]
 
+    # NVD's public API (no key) allows only 5 requests per rolling 30s window.
+    # Each candidate can fire up to 2 queries (CPE + keyword) across up to 80
+    # candidates, so without throttling nearly every request past the first
+    # ~5 gets rate-limited and silently counted as an error - i.e. real CVEs
+    # go unreported, not "none found".
+    _nvd_last_request_ts = [0.0]
+    NVD_MIN_REQUEST_INTERVAL = 6.5
+
+    def _nvd_throttle():
+        elapsed = time.time() - _nvd_last_request_ts[0]
+        if elapsed < NVD_MIN_REQUEST_INTERVAL:
+            time.sleep(NVD_MIN_REQUEST_INTERVAL - elapsed)
+        _nvd_last_request_ts[0] = time.time()
+
+    native_nvd_cpe_templates = {
+        'sqlite': 'cpe:2.3:a:sqlite:sqlite:{version}:*:*:*:*:*:*:*',
+        'openssl': 'cpe:2.3:a:openssl:openssl:{version}:*:*:*:*:*:*:*',
+        'zlib': 'cpe:2.3:a:zlib:zlib:{version}:*:*:*:*:*:*:*',
+        'libpng': 'cpe:2.3:a:libpng:libpng:{version}:*:*:*:*:*:*:*',
+        'curl': 'cpe:2.3:a:haxx:curl:{version}:*:*:*:*:*:*:*',
+        'libxml2': 'cpe:2.3:a:xmlsoft:libxml2:{version}:*:*:*:*:*:*:*',
+        'expat': 'cpe:2.3:a:libexpat:expat:{version}:*:*:*:*:*:*:*',
+        'nghttp2': 'cpe:2.3:a:nghttp2:nghttp2:{version}:*:*:*:*:*:*:*',
+    }
+
+    def _fetch_nvd(params, cache_key):
+        nonlocal nvd_query_errors
+        if cache_key in nvd_cache:
+            return nvd_cache[cache_key]
+        req_url = f"{nvd_url_base}?{urllib.parse.urlencode(params)}"
+        _nvd_throttle()
+        try:
+            with urllib.request.urlopen(req_url, timeout=20) as resp:
+                body = resp.read().decode('utf-8', errors='ignore')
+            data = json.loads(body) if body else {}
+        except Exception:
+            nvd_query_errors += 1
+            return None
+        nvd_cache[cache_key] = data
+        return data
+
+    def _cve_en_description(cve):
+        descriptions = cve.get('descriptions', [])
+        if isinstance(descriptions, list):
+            for d in descriptions:
+                if isinstance(d, dict) and d.get('lang') == 'en':
+                    return d.get('value', '') or ""
+            if descriptions and isinstance(descriptions[0], dict):
+                return descriptions[0].get('value', '') or ""
+        return ""
+
     for cand in native_list:
         name = cand['name']
         version = cand['version']
-        keyword = f"{name} {version}"
-        if keyword in nvd_cache:
-            nvd_data = nvd_cache[keyword]
-        else:
-            params = {
-                'keywordSearch': keyword,
-                'keywordExactMatch': '',
-                'noRejected': '',
-                'resultsPerPage': '25',
-            }
-            req_url = f"{nvd_url_base}?{urllib.parse.urlencode(params)}"
-            try:
-                with urllib.request.urlopen(req_url, timeout=20) as resp:
-                    body = resp.read().decode('utf-8', errors='ignore')
-                nvd_data = json.loads(body) if body else {}
-                nvd_cache[keyword] = nvd_data
-            except Exception:
-                nvd_query_errors += 1
-                continue
 
-        vulns_arr = nvd_data.get('vulnerabilities', [])
-        if not isinstance(vulns_arr, list) or not vulns_arr:
+        vulns_arr = []
+        seen_ids = set()
+
+        cpe_tmpl = native_nvd_cpe_templates.get(name)
+        if cpe_tmpl:
+            cpe_data = _fetch_nvd(
+                {'cpeName': cpe_tmpl.format(version=version), 'noRejected': ''},
+                f"cpe:{name}:{version}",
+            )
+            if cpe_data:
+                for item in (cpe_data.get('vulnerabilities') or []):
+                    cve = item.get('cve', {}) if isinstance(item, dict) else {}
+                    cid = cve.get('id', '')
+                    if cid and cid not in seen_ids:
+                        seen_ids.add(cid)
+                        vulns_arr.append(item)
+
+        keyword = f"{name} {version}"
+        kw_data = _fetch_nvd(
+            {'keywordSearch': keyword, 'keywordExactMatch': '', 'noRejected': '', 'resultsPerPage': '25'},
+            f"kw:{keyword}",
+        )
+        if kw_data:
+            for item in (kw_data.get('vulnerabilities') or []):
+                cve = item.get('cve', {}) if isinstance(item, dict) else {}
+                cid = cve.get('id', '')
+                if cid and cid in seen_ids:
+                    continue
+                # Reduce noisy keyword matches by requiring both name and version in description.
+                low_desc = _cve_en_description(cve).lower()
+                if name.lower() not in low_desc or version.lower() not in low_desc:
+                    continue
+                if cid:
+                    seen_ids.add(cid)
+                vulns_arr.append(item)
+
+        if not vulns_arr:
             continue
 
         matched_rows = []
         for item in vulns_arr:
             cve = item.get('cve', {}) if isinstance(item, dict) else {}
             cve_id = cve.get('id', '')
-            descriptions = cve.get('descriptions', [])
-            desc_text = ""
-            if isinstance(descriptions, list):
-                for d in descriptions:
-                    if isinstance(d, dict) and d.get('lang') == 'en':
-                        desc_text = d.get('value', '') or ""
-                        break
-                if not desc_text and descriptions and isinstance(descriptions[0], dict):
-                    desc_text = descriptions[0].get('value', '') or ""
-
-            # Reduce noisy keyword matches by requiring both name and version in description.
-            low_desc = desc_text.lower()
-            if name.lower() not in low_desc or version.lower() not in low_desc:
-                continue
+            desc_text = _cve_en_description(cve)
 
             metrics = cve.get('metrics', {})
             severity = "Not provided"
@@ -17866,7 +17926,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.1.4 - Automated Mobile App Security Test Script
+    AppSec 5.1.5 - Automated Mobile App Security Test Script
 
     Options:
       -f, --file          APK file to decompile into smali
