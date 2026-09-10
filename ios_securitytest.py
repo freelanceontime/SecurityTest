@@ -55,6 +55,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -149,7 +150,7 @@ RUN_INTRO = []
 Status = Literal["PASS", "FAIL", "WARN", "INFO"]
 
 # Version tracking for auto-update
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/ios_securitytest.py"
 
 # ---------------------------
@@ -6577,6 +6578,20 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
     nvd_vuln_lib_count = 0
     total_nvd_cves = 0
     nvd_cache: Dict = {}
+    # NVD's public API (no key) allows only 5 requests per rolling 30s window.
+    # A single native candidate can fire up to 3 queries (cpe/keyword+version/
+    # keyword), and there can be dozens of candidates, so without throttling
+    # every request past the first ~5 gets rate-limited and silently counted
+    # as an error - i.e. real CVEs go unreported, not "none found".
+    _nvd_last_request_ts = [0.0]
+    NVD_MIN_REQUEST_INTERVAL = 6.5
+
+    def _nvd_throttle():
+        elapsed = time.time() - _nvd_last_request_ts[0]
+        if elapsed < NVD_MIN_REQUEST_INTERVAL:
+            time.sleep(NVD_MIN_REQUEST_INTERVAL - elapsed)
+        _nvd_last_request_ts[0] = time.time()
+
     native_nvd_cpe_templates: Dict[str, str] = {
         'sqlite': 'cpe:2.3:a:sqlite:sqlite:{version}:*:*:*:*:*:*:*',
         'openssl': 'cpe:2.3:a:openssl:openssl:{version}:*:*:*:*:*:*:*',
@@ -6700,6 +6715,7 @@ def check_dependency_vulnerability_scan_ios(app_dir: str, base: str) -> TestResu
                 req_params['resultsPerPage'] = req_params.get('resultsPerPage') or '50'
                 req_params['startIndex'] = str(start_index)
                 req_url = f"{nvd_url_base}?{urllib.parse.urlencode(req_params)}"
+                _nvd_throttle()
                 with urllib.request.urlopen(req_url, timeout=20) as resp:
                     body = resp.read().decode('utf-8', errors='ignore')
                 nvd_data = json.loads(body) if body else {}
