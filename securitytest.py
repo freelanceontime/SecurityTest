@@ -40,7 +40,7 @@ else:
 from html import escape, unescape
 
 # Version tracking for auto-update
-__version__ = "5.1.2"
+__version__ = "5.1.3"
 __script_url__ = "https://raw.githubusercontent.com/freelanceontime/SecurityTest/main/securitytest.py"
 INCLUDE_LIBS = False
 CUSTOM_FRIDA_SCRIPT = None  # Loaded script content (for hash/visibility)
@@ -3493,8 +3493,8 @@ def check_masvs_coverage_matrix(static_count, dynamic_count):
     but it does not implement every MASVS/MASTG Android test as a standalone check.
     """
     rows = [
-        ("MASVS-STORAGE", "Automated + dynamic", "Local storage, SharedPreferences, DataStore, Room, external storage, storage analysis, Crashlytics artifact review"),
-        ("MASVS-CRYPTO", "Partial automated", "Weak crypto, hardcoded keys, signature schemes; manual design review still required"),
+        ("MASVS-STORAGE", "Automated + dynamic", "Local storage, SharedPreferences, DataStore, Room, external storage, storage analysis, Crashlytics artifact review, file permission flags, S3 bucket exposure"),
+        ("MASVS-CRYPTO", "Partial automated", "Weak crypto, hardcoded keys, signature schemes, key size validation; manual design review still required"),
         ("MASVS-AUTH", "Partial automated", "Deep links and biometric API checks; server-side authz requires manual/API testing"),
         ("MASVS-NETWORK", "Automated + dynamic", "TLS config, HTTP URLs, pinning, WebView SSL, GMS provider, dynamic TLS checks"),
         ("MASVS-PLATFORM", "Automated + dynamic", "IPC/exported components, PendingIntent, WebView, keyboard caching, clipboard, screenshots, notifications"),
@@ -17837,7 +17837,7 @@ def print_banner():
    | |_| | ___) | |___| |___
     \___/ |____/|_____|_____|
 
-    AppSec 5.1.2 - Automated Mobile App Security Test Script
+    AppSec 5.1.3 - Automated Mobile App Security Test Script
 
     Options:
       -f, --file          APK file to decompile into smali
@@ -18016,6 +18016,7 @@ HTML_SPECIAL_CHECKS = {
     "Manifest Attack Surface",  "Framework Security Signals",
     "Dependency Vulnerability Scan",
     "S3 Bucket Security",       "SSL/TLS Security (TrustManager, HostnameVerifier, Endpoint ID)",
+    "Insecure File Permissions", "Insufficient Key Sizes",
 }
 
 SUMMARY_BUILDERS = {
@@ -18655,6 +18656,8 @@ def main():
                 "DataStore Encryption",
                 "Room Database Encryption",
                 "Crashlytics Sensitive Data Storage",
+                "Insecure File Permissions",
+                "S3 Bucket Security",
             ]
         },
         "MASVS-CRYPTO": {
@@ -18664,6 +18667,7 @@ def main():
                 "APK Signature Schemes",
                 "Weak Crypto Algorithms",
                 "Hardcoded Keys",
+                "Insufficient Key Sizes",
             ]
         },
         "MASVS-AUTH": {
@@ -18864,8 +18868,10 @@ def main():
         make_check("SharedPreferences Encryption", lambda: check_sharedprefs_encryption(base)),
         make_check("External Storage Usage",  lambda: check_external_storage(base)),
         make_check("Manifest Storage Flags", lambda: check_manifest_storage_flags(manifest, base)),
+        make_check("Insecure File Permissions", lambda: check_file_permissions(base)),
         make_check("Crashlytics Sensitive Data Storage", lambda: check_crashlytics_sensitive_storage(base)),
         make_check("Hardcoded Keys",          lambda: check_hardcoded_keys(base)),
+        make_check("Insufficient Key Sizes",  lambda: check_key_sizes(base)),
         make_check("Biometric Authentication",lambda: check_biometric_auth(base)),
         make_check("FLAG_SECURE Usage",       lambda: check_flag_secure(base, manifest)),
         make_check("WebView JavaScript Bridges", lambda: check_webview_javascript_bridge(base)),
