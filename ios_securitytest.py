@@ -8171,10 +8171,12 @@ HTTP_IGNORE_DOMAINS = [
     "xmlpull.org",
     "xml.org",
     "ibm.com/data/dtd",
+    "http://cordova.apache.org/ns/1.0",
     
     # Documentation links - not actual network requests
     "flutter.dev",
     "docs.flutter.dev",
+    "http://jedwatson.github.io/classnames",
     
     # Localhost/development - acceptable
     "localhost",
@@ -8200,6 +8202,7 @@ HTTP_IGNORE_DOMAINS = [
     "creativecommons.org/licenses", # CC licence references
     "www.gnu.org/licenses",         # GPL/LGPL licence references
     "mozilla.org/MPL",              # Mozilla Public Licence
+    "http://underscorejs.org/LICENSE", # Underscore licence reference
 
     # SDK/framework internal URLs
     "sentry.io",

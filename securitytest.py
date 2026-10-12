@@ -6535,6 +6535,9 @@ def check_http_uris(base):
         "http://www.w3.org",
         "http://maven.apache.org",
         "http://www.apache.org",
+        "http://cordova.apache.org/ns/1.0",  # Cordova XML namespace
+        "http://jedwatson.github.io/classnames",  # Classnames documentation
+        "http://underscorejs.org/LICENSE",  # Underscore licence reference
         "http://dashif.org",
         "http://ns.adobe.com",
         "http://github.com",
