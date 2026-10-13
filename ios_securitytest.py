@@ -418,62 +418,90 @@ def ssh_run(device_ip: str, cmd: str, password: str = "alpine", timeout: int = 3
     # Fallback to pexpect for automatic password entry
     try:
         import pexpect
-
-        # Build the full SSH command as a string for pexpect
-        ssh_cmd_str = " ".join(f'"{arg}"' if " " in arg else arg for arg in ssh_cmd)
-
-        # Use pexpect.run with events for password handling - simpler and more reliable
-        try:
-            # Define what to send when we see the password prompt
-            events = {
-                r'(?i)password:': password + '\n',
-            }
-
-            # Run the command and capture all output
-            output = pexpect.run(
-                ssh_cmd_str,
-                events=events,
-                timeout=timeout,
-                encoding='utf-8',
-                withexitstatus=True
-            )
-
-            # pexpect.run returns (output, exit_status) when withexitstatus=True
-            if isinstance(output, tuple):
-                all_output, exitstatus = output
-            else:
-                all_output = output
-                exitstatus = 0
-
-            # Debug: Print raw output before cleaning
-            if os.environ.get('SSH_DEBUG'):
-                print(f"    [RAW OUTPUT] length={len(all_output)}, content={repr(all_output[:500])}")
-
-            # Clean the output
-            cleaned = clean_ssh_output(all_output)
-
-            # More debug
-            if os.environ.get('SSH_DEBUG'):
-                print(f"    [CLEANED OUTPUT] length={len(cleaned)}, content={repr(cleaned[:500])}")
-
-            return (exitstatus if exitstatus is not None else 0, cleaned)
-
-        except pexpect.TIMEOUT:
-            return (1, "SSH command timed out")
-        except pexpect.ExceptionPexpect as e:
-            return (1, f"SSH pexpect error: {str(e)}")
-
     except ImportError:
         # pexpect not available, fallback to regular ssh (will prompt for password)
         rc, out = run(ssh_cmd, timeout=timeout)
         return (rc, clean_ssh_output(out))
+
+    try:
+        # Spawn ssh with an argv LIST, not a rebuilt command string. The remote
+        # command is passed as a single argv element, exactly like the sshpass
+        # path above. The previous behaviour rebuilt the command into a string
+        # and re-quoted each argument (f'"{arg}"'), which corrupted any remote
+        # command containing double quotes or '$' — i.e. almost every bundle
+        # discovery / plist / find command — so they silently returned nothing.
+        child = pexpect.spawn(
+            ssh_cmd[0],
+            args=ssh_cmd[1:],
+            timeout=timeout,
+            encoding="utf-8",
+            codec_errors="replace",
+        )
+
+        # Match the password prompt loosely: devices vary ("Password:",
+        # "root@192.168.1.108's password:", "Password for root@iPhone:"), so
+        # allow any text between "password" and the trailing colon. Once the
+        # password has been sent, stop looking for that prompt — otherwise the
+        # literal word "password" appearing in a command's own output (e.g. the
+        # log/keyboard scans) would be mistaken for a prompt and truncate it.
+        password_sent = False
+        while True:
+            if not password_sent:
+                patterns = [
+                    r"(?i)password[^\r\n]*:",
+                    r"\(yes/no(?:/\[fingerprint\])?\)\?",
+                    pexpect.EOF,
+                    pexpect.TIMEOUT,
+                ]
+            else:
+                patterns = [pexpect.EOF, pexpect.TIMEOUT]
+            idx = child.expect(patterns)
+            if not password_sent and idx == 0:
+                child.sendline(password)
+                password_sent = True
+                continue
+            if not password_sent and idx == 1:
+                child.sendline("yes")
+                continue
+            # EOF or TIMEOUT — command finished (or the connection ended).
+            break
+
+        # After the password prompt is answered, child.before holds everything
+        # received between that prompt and EOF — i.e. the command's own output.
+        all_output = child.before or ""
+        try:
+            child.close()
+        except Exception:
+            pass
+        exitstatus = child.exitstatus
+        if exitstatus is None:
+            # Killed by signal, timed out, or auth failed before EOF.
+            exitstatus = 1
+
+        # Debug: Print raw output before cleaning
+        if os.environ.get('SSH_DEBUG'):
+            print(f"    [RAW OUTPUT] length={len(all_output)}, content={repr(all_output[:500])}")
+
+        # Clean the output
+        cleaned = clean_ssh_output(all_output)
+
+        # More debug
+        if os.environ.get('SSH_DEBUG'):
+            print(f"    [CLEANED OUTPUT] length={len(cleaned)}, content={repr(cleaned[:500])}")
+
+        return (exitstatus, cleaned)
+
+    except pexpect.TIMEOUT:
+        return (1, "SSH command timed out")
+    except pexpect.ExceptionPexpect as e:
+        return (1, f"SSH pexpect error: {str(e)}")
     except Exception as e:
         return (1, f"SSH error: {str(e)}")
 
 def ssh_check_connectivity(device_ip: str, password: str = "alpine", manual: bool = False) -> bool:
     """Check if the device is reachable via SSH."""
-    rc, _ = ssh_run(device_ip, "echo test", password=password, timeout=5, manual=manual)
-    return rc == 0
+    rc, out = ssh_run(device_ip, "echo __ssh_ok__", password=password, timeout=15, manual=manual)
+    return rc == 0 and "__ssh_ok__" in out
 
 def _sq(value: str) -> str:
     """Shell-quote a value for commands executed on the iOS device."""
@@ -9425,14 +9453,9 @@ def check_device_keyboard_cache(device_ip: str, bundle_id: str, base: str, passw
         proceed = input("Press Enter after running command to continue...")
     else:
         try:
-            import subprocess
-            result = subprocess.run(
-                ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                 f"root@{device_ip}", ssh_cmd],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode == 0:
-                keyboard_files_found = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+            rc, out = ssh_run(device_ip, ssh_cmd, password=password, timeout=30, manual=manual)
+            if rc == 0:
+                keyboard_files_found = [f.strip() for f in out.splitlines() if f.strip()]
         except Exception as e:
             summary_lines.append(f"SSH connection failed: {str(e)}")
             status = "WARN"
@@ -9443,17 +9466,19 @@ def check_device_keyboard_cache(device_ip: str, bundle_id: str, base: str, passw
         # Try to read dynamic-text.dat for analysis
         for kfile in keyboard_files_found:
             if 'dynamic-text.dat' in kfile or 'UserDictionary' in kfile:
-                read_cmd = f'strings "{kfile}" 2>/dev/null | head -100'
+                # `strings` is frequently absent on jailbroken devices; fall back
+                # to a portable printable-run extractor built from tr.
+                read_cmd = (
+                    f'if command -v strings >/dev/null 2>&1; then strings "{kfile}" 2>/dev/null; '
+                    f'else LC_ALL=C tr -c "[:print:]" "\\n" < "{kfile}" 2>/dev/null; fi | '
+                    f'grep -E ".{{4,}}" | head -100'
+                )
 
                 if not manual:
                     try:
-                        result = subprocess.run(
-                            ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                             f"root@{device_ip}", read_cmd],
-                            capture_output=True, text=True, timeout=30
-                        )
-                        if result.returncode == 0 and result.stdout.strip():
-                            strings_data = result.stdout.splitlines()
+                        rc, out = ssh_run(device_ip, read_cmd, password=password, timeout=30, manual=manual)
+                        if rc == 0 and out.strip():
+                            strings_data = out.splitlines()
                             keyboard_data.extend(strings_data[:50])  # Limit to 50 entries
                     except Exception:
                         pass
@@ -9577,26 +9602,18 @@ def check_device_system_logs(device_ip: str, bundle_id: str, base: str, password
         status = "INFO"
     else:
         try:
-            import subprocess
-            result = subprocess.run(
-                ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                 f"root@{device_ip}", log_cmd],
-                capture_output=True, text=True, timeout=45
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                log_entries = result.stdout.splitlines()
+            rc, out = ssh_run(device_ip, log_cmd, password=password, timeout=45, manual=manual)
+            if rc == 0 and out.strip():
+                log_entries = out.splitlines()
         except Exception as e:
             summary_lines.append(f"Log collection failed: {str(e)}")
-            # Try alternative /var/log search
+        # If the unified log returned nothing, try a /var/log fallback.
+        if not log_entries:
             try:
                 alt_cmd = f"grep -h '{bundle_id}' /var/log/*.log 2>/dev/null | tail -100"
-                result = subprocess.run(
-                    ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                     f"root@{device_ip}", alt_cmd],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    log_entries = result.stdout.splitlines()
+                rc, out = ssh_run(device_ip, alt_cmd, password=password, timeout=30, manual=manual)
+                if rc == 0 and out.strip():
+                    log_entries = out.splitlines()
             except Exception:
                 pass
 
@@ -9724,16 +9741,11 @@ def check_device_memory_dump(device_ip: str, bundle_id: str, base: str, password
 
     if not manual:
         try:
-            import subprocess
-            result = subprocess.run(
-                ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                 f"root@{device_ip}", ps_cmd],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode == 0 and result.stdout.strip():
+            rc, out = ssh_run(device_ip, ps_cmd, password=password, timeout=30, manual=manual)
+            if rc == 0 and out.strip():
                 # Parse PID from ps output
                 import re
-                match = re.search(r'\s+(\d+)\s+', result.stdout)
+                match = re.search(r'\s+(\d+)\s+', out)
                 if match:
                     app_pid = match.group(1).strip()
         except Exception as e:
@@ -9747,13 +9759,9 @@ def check_device_memory_dump(device_ip: str, bundle_id: str, base: str, password
         vmmap_cmd = f'vmmap {app_pid} 2>/dev/null | head -50'
 
         try:
-            result = subprocess.run(
-                ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no",
-                 f"root@{device_ip}", vmmap_cmd],
-                capture_output=True, text=True, timeout=45
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                vmmap_output = result.stdout
+            rc, out = ssh_run(device_ip, vmmap_cmd, password=password, timeout=45, manual=manual)
+            if rc == 0 and out.strip():
+                vmmap_output = out
 
                 findings.append(FindingBlock(
                     title=f"Memory Map (PID {app_pid})",
